@@ -159,10 +159,12 @@ class Memory:
         include_superseded: bool = False,
         max_tokens: int | None = None,
         token_estimator: Callable[[str], int] | None = None,
+        entries: list[MemoryEntry] | None = None,
     ) -> str:
         lines: list[str] = []
         estimator = token_estimator or _default_token_estimator
         omitted = 0
+        source_entries = list(self.entries.values()) if entries is None else list(entries)
 
         def would_fit(extra_lines: list[str]) -> bool:
             if max_tokens is None:
@@ -190,7 +192,7 @@ class Memory:
 
         for cfg in self.sections:
             section_entries = [
-                e for e in self.entries.values() if e.section == cfg.key and e.status == "active"
+                e for e in source_entries if e.section == cfg.key and e.status == "active"
             ]
             if not section_entries:
                 continue
@@ -201,7 +203,7 @@ class Memory:
             append_entry_block(f"## {cfg.title}", entry_lines)
 
         if include_superseded:
-            superseded_entries = [e for e in self.entries.values() if e.status == "superseded"]
+            superseded_entries = [e for e in source_entries if e.status == "superseded"]
             if superseded_entries:
                 entry_lines = []
                 for e in superseded_entries:

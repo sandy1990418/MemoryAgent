@@ -7,6 +7,7 @@ import logging
 from memory_agent.llm import LLMClient
 from memory_agent.memory import Memory
 from memory_agent.sections import CHAT_SECTIONS, SectionConfig
+from memory_agent.selector import MemorySelector
 from memory_agent.transcript import Transcript
 from memory_agent.updater import MemoryUpdater, UpdateFailed
 from memory_agent.window import WorkingWindow
@@ -26,6 +27,7 @@ class MemorySession:
         max_prompt_tokens: int | None = None,
         max_memory_tokens: int | None = None,
         base_system_prompt: str = "You are a helpful assistant.",
+        memory_selector: MemorySelector | None = None,
     ) -> None:
         self.chat_llm = chat_llm
         self.updater = updater
@@ -35,14 +37,17 @@ class MemorySession:
             max_memory_tokens if max_memory_tokens is not None else self.max_prompt_tokens // 2
         )
 
-        self.memory = Memory(sections=sections)
         self.transcript = Transcript()
         self.window = WorkingWindow(max_tokens=max_window_tokens)
+        self.memory = Memory(sections=sections)
+        self.memory_selector = memory_selector or MemorySelector(
+            token_estimator=self.window.token_estimator
+        )
 
         self.last_system_prompt: str = ""
 
-    def _maybe_evict(self) -> None:
-        prompt_overhead_tokens = self._prompt_overhead_tokens()
+    def _maybe_evict(self, query: str = "") -> None:
+        prompt_overhead_tokens = self._prompt_overhead_tokens(query=query)
         if not self.window.needs_eviction(
             extra_tokens=prompt_overhead_tokens,
             max_tokens=self.max_prompt_tokens,
@@ -70,26 +75,32 @@ class MemorySession:
 
         self.window.remove(batch)
 
-    def _render_memory_for_prompt(self) -> str:
+    def _render_memory_for_prompt(self, query: str = "") -> str:
+        selected_entries = self.memory_selector.select(
+            memory=self.memory,
+            query=query,
+            max_tokens=self.max_memory_tokens,
+        )
         return self.memory.render(
             max_tokens=self.max_memory_tokens,
             token_estimator=self.window.token_estimator,
+            entries=selected_entries,
         )
 
-    def _prompt_overhead_tokens(self) -> int:
-        return self.window.token_estimator(self._build_system_prompt())
+    def _prompt_overhead_tokens(self, query: str = "") -> int:
+        return self.window.token_estimator(self._build_system_prompt(query=query))
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, query: str = "") -> str:
         # memory.render() already includes the narrative section when set.
-        return f"{self.base_system_prompt}\n\n# Conversation Memory\n{self._render_memory_for_prompt()}"
+        return f"{self.base_system_prompt}\n\n# Conversation Memory\n{self._render_memory_for_prompt(query=query)}"
 
     def send(self, user_text: str) -> str:
         user_turn = self.transcript.append("user", user_text)
         self.window.add(user_turn)
 
-        self._maybe_evict()
+        self._maybe_evict(query=user_text)
 
-        system = self._build_system_prompt()
+        system = self._build_system_prompt(query=user_text)
         self.last_system_prompt = system
 
         messages = [{"role": t.role, "content": t.content} for t in self.window.turns()]

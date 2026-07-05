@@ -31,6 +31,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from memory_agent.memory import Memory
+from memory_agent.selector import MemorySelector
 from memory_agent.transcript import Transcript, Turn
 from memory_agent.updater import MemoryUpdater, UpdateFailed
 
@@ -116,6 +117,7 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         max_memory_tokens: int | None = None,
         transcript: Transcript | None = None,
         token_counter: TokenCounter = count_tokens_approximately,
+        memory_selector: MemorySelector | None = None,
     ) -> None:
         super().__init__()
         self.memory = memory
@@ -127,6 +129,7 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         )
         self.transcript = transcript if transcript is not None else Transcript()
         self.token_counter = token_counter
+        self.memory_selector = memory_selector or MemorySelector(token_estimator=_char_token_estimator)
         self._turn_id_by_message_id: dict[str, int] = {}
 
     @staticmethod
@@ -271,11 +274,25 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         """Async wrapper: the eviction logic above does no I/O of its own."""
         return self.before_model(state, runtime)
 
+    @staticmethod
+    def _query_from_messages(messages: list[AnyMessage]) -> str:
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage):
+                return _content_to_text(message.content)
+        return ""
+
     def wrap_model_call(self, request: "ModelRequest[Any]", handler: Callable[..., Any]) -> Any:
         """Inject the rendered structured memory into the system prompt."""
+        query = self._query_from_messages(list(request.messages))
+        selected_entries = self.memory_selector.select(
+            memory=self.memory,
+            query=query,
+            max_tokens=self.max_memory_tokens,
+        )
         rendered = self.memory.render(
             max_tokens=self.max_memory_tokens,
             token_estimator=_char_token_estimator,
+            entries=selected_entries,
         )
         if rendered:
             new_prompt = (request.system_prompt or "") + "\n\n# Conversation Memory\n" + rendered

@@ -49,7 +49,8 @@ trigger such as `trigger=("tokens", 4000)`.
 
 The `memory_agent/` package is a framework-light structured-memory experiment.
 It keeps an append-only transcript, renders memory entries into the system
-prompt, and uses a `MemoryUpdater` LLM to convert evicted turns into operations:
+prompt after session-local selection, and uses a `MemoryUpdater` LLM to convert
+evicted turns into operations:
 
 - `ADD` creates a new memory entry.
 - `UPDATE` refines or extends an entry that remains true.
