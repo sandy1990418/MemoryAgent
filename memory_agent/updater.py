@@ -12,6 +12,7 @@ from memory_agent.sections import SectionConfig
 from memory_agent.transcript import Turn
 
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_TURN_SUFFIX_RE = re.compile(r"\s*\(turns?\s+([0-9,\-\s]+)\)\s*$", re.IGNORECASE)
 
 
 class UpdateFailed(Exception):
@@ -38,6 +39,7 @@ class MemoryUpdater:
         self.model = model
         self.max_memory_tokens = max_memory_tokens
         self.token_estimator = token_estimator or _default_token_estimator
+        self._section_key_by_prefix = {section.prefix.lower(): section.key for section in sections}
 
     def _build_prompt(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[str, list[dict]]:
         section_lines = [
@@ -66,6 +68,9 @@ class MemoryUpdater:
             "1. Use only these operations: ADD, UPDATE, SUPERSEDE, NOOP.\n"
             "2. ADD format: {\"op\": \"ADD\", \"section\": <section key>, \"text\": <string>, "
             "\"provenance\": [<turn id>, ...]}\n"
+            "   The section value MUST be the exact key string, such as "
+            "\"preferences\" or \"facts\". Do not use rendered ID prefixes like "
+            "\"U\", \"F\", or \"G\" as section values.\n"
             "3. UPDATE format: {\"op\": \"UPDATE\", \"id\": <entry id>, \"text\": <string>, "
             "\"provenance\": [<turn id>, ...]}. Use UPDATE only to refine, clarify, "
             "or extend an existing entry that remains true. Do not use UPDATE to "
@@ -110,12 +115,100 @@ class MemoryUpdater:
         ops = self._parse_ops(response)
         if ops is None:
             raise UpdateFailed(f"Could not parse a JSON ops array from LLM response: {response!r}")
+        ops = self._normalize_ops(ops, memory)
 
         provenance_rejections = self._validate_provenance(ops, evicted_turns)
         if provenance_rejections:
             return [], provenance_rejections
 
         return memory.apply_ops_atomically(ops)
+
+    def _normalize_ops(self, ops: list[dict], memory: Memory) -> list[dict]:
+        normalized_ops: list[dict] = []
+        for op in ops:
+            if not isinstance(op, dict):
+                normalized_ops.append(op)
+                continue
+
+            normalized = dict(op)
+            kind = normalized.get("op")
+            if kind == "ADD":
+                section = normalized.get("section")
+                if isinstance(section, str):
+                    section_key = self._section_key_by_prefix.get(section.lower())
+                    if section_key is not None:
+                        normalized["section"] = section_key
+                self._normalize_text_provenance(normalized)
+            elif (
+                isinstance(kind, str)
+                and kind.lower() in self._section_key_by_prefix
+                and "section" not in normalized
+                and "text" in normalized
+                and "provenance" in normalized
+            ):
+                normalized["op"] = "ADD"
+                normalized["section"] = self._section_key_by_prefix[kind.lower()]
+                self._normalize_text_provenance(normalized)
+            elif kind in {"UPDATE", "SUPERSEDE"}:
+                entry_id = self._normalize_entry_id(normalized.get("id"), memory)
+                if entry_id is not None:
+                    normalized["id"] = entry_id
+                if kind == "UPDATE":
+                    self._normalize_text_provenance(normalized)
+
+            normalized_ops.append(normalized)
+        return normalized_ops
+
+    @staticmethod
+    def _normalize_text_provenance(op: dict) -> None:
+        provenance = op.get("provenance")
+        if isinstance(provenance, list) and provenance:
+            return
+
+        text = op.get("text")
+        if not isinstance(text, str):
+            return
+
+        match = _TURN_SUFFIX_RE.search(text)
+        if not match:
+            return
+
+        turn_ids: list[int] = []
+        for part in match.group(1).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start_text, end_text = [value.strip() for value in part.split("-", 1)]
+                if start_text.isdigit() and end_text.isdigit():
+                    start, end = int(start_text), int(end_text)
+                    if start <= end:
+                        turn_ids.extend(range(start, end + 1))
+                    else:
+                        turn_ids.extend(range(end, start + 1))
+                continue
+            if part.isdigit():
+                turn_ids.append(int(part))
+
+        if turn_ids:
+            op["provenance"] = sorted(set(turn_ids))
+            op["text"] = _TURN_SUFFIX_RE.sub("", text).strip()
+
+    @staticmethod
+    def _normalize_entry_id(entry_id: object, memory: Memory) -> str | None:
+        if entry_id in memory.entries:
+            return str(entry_id)
+        if isinstance(entry_id, int):
+            suffix = str(entry_id)
+        elif isinstance(entry_id, str) and entry_id.isdigit():
+            suffix = entry_id
+        else:
+            return None
+
+        matches = [candidate for candidate in memory.entries if candidate[1:] == suffix]
+        if len(matches) == 1:
+            return matches[0]
+        return None
 
     @staticmethod
     def _validate_provenance(ops: list[dict], evicted_turns: list[Turn]) -> list[dict]:

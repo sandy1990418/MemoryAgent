@@ -5,9 +5,9 @@ This repo has three runnable paths:
 1. `react_summary_agent.py` is the recommended first version. It uses
    LangChain's built-in `SummarizationMiddleware` with a simple ReAct-style
    tool-calling agent.
-2. `react_hybrid_agent.py` keeps `SummarizationMiddleware` for in-session
-   compression and adds a mem0-backed long-term vector memory layer for
-   cross-session recall.
+2. `react_hybrid_agent.py` uses `StructuredMemoryMiddleware` for auditable
+   in-session compression and adds a mem0-backed long-term vector memory layer
+   for cross-session recall.
 3. `demo_react.py` is an experimental structured-memory version. It replaces
    `SummarizationMiddleware` with `StructuredMemoryMiddleware`, which evicts
    old messages into operation-based memory entries.
@@ -49,14 +49,15 @@ The demo uses `trigger=("messages", 6)` and `keep=("messages", 2)` so
 summarization happens quickly in a local test. For real use, prefer a token
 trigger such as `trigger=("tokens", 4000)`.
 
-## Hybrid Path: Summarization + Long-Term Vector Memory (mem0)
+## Hybrid Path: Structured Memory + Long-Term Vector Memory (mem0)
 
 `react_hybrid_agent.py` adds a third runtime path for conversations that need
-both short-term context compression and long-term recall. LangChain's
-`SummarizationMiddleware` still handles most in-session context pressure. A
-second middleware, placed after it, detects the message IDs that disappeared
-from the active context, persists those turns to mem0, and injects semantically
-relevant long-term memories into the system prompt on every model call.
+both auditable short-term context compression and long-term recall.
+`StructuredMemoryMiddleware` evicts older turns into operation-based memory
+entries and injects them under `# Conversation Memory`. A second middleware,
+placed after it, detects the message IDs that disappeared from the active
+context, persists those raw turns to mem0, and injects semantically relevant
+long-term memories under `# Long-Term Memory` on every model call.
 
 Run it with:
 
@@ -69,19 +70,25 @@ Optional knobs:
 
 ```bash
 export MAIN_MODEL="openai:gpt-5.5"
-export SUMMARY_MODEL="openai:gpt-5.4-mini"
+export MEMORY_MODEL="openai:gpt-5.4-mini"
+export STRUCTURED_MAX_TOKENS="220"
+export STRUCTURED_MAX_MEMORY_TOKENS="600"
+export MEM0_LLM_MODEL="gpt-4o-mini"
 export MEM0_USER_ID="demo-user"
 export MEM0_DATA_DIR=".mem0"
 ```
 
 The local mem0 store persists under `.mem0/`, including embedded Qdrant data
-and mem0's history database. Re-running the script with the same
-`MEM0_USER_ID` and `MEM0_DATA_DIR` demonstrates cross-session recall. Embedded
-Qdrant takes an exclusive file lock on its local data path, so run only one
-process against the same `.mem0/` directory at a time.
+and mem0's history database. `MEM0_LLM_MODEL` controls mem0's fact-extraction
+model separately from the main agent model. If `# Conversation Memory` and
+`# Long-Term Memory` conflict, the demo system prompt tells the model to prefer
+the structured conversation memory as the current state. Re-running the script
+with the same `MEM0_USER_ID` and `MEM0_DATA_DIR` demonstrates cross-session
+recall. Embedded Qdrant takes an exclusive file lock on its local data path, so
+run only one process against the same `.mem0/` directory at a time.
 
 If `mem0ai` is not installed, the demo prints an install hint and runs with the
-summary middleware only. The unit tests remain deterministic and network-free
+structured middleware only. The unit tests remain deterministic and network-free
 without importing mem0.
 
 ## Experimental Path: Structured Memory

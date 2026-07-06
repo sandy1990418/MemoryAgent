@@ -31,6 +31,75 @@ def test_fenced_json_array_parsed_and_applied():
     assert mem.entries["D1"].text == "use in-memory storage"
 
 
+def test_section_prefix_is_normalized_to_section_key():
+    response = '[{"op": "ADD", "section": "D", "text": "use postgres", "provenance": [1]}]'
+    updater = make_updater(lambda system, messages: response)
+    mem = Memory(sections=CHAT_SECTIONS)
+    turns = [Turn(id=1, role="user", content="DECISION: use postgres")]
+
+    applied, rejected = updater.update(mem, turns)
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert mem.entries["D1"].section == "decisions"
+    assert mem.entries["D1"].text == "use postgres"
+
+
+def test_prefix_op_with_add_payload_is_normalized_to_add():
+    response = '[{"op": "F", "text": "SQLite database is configured", "provenance": [1]}]'
+    updater = make_updater(lambda system, messages: response)
+    mem = Memory(sections=CHAT_SECTIONS)
+    turns = [Turn(id=1, role="user", content="SQLite database is configured")]
+
+    applied, rejected = updater.update(mem, turns)
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert mem.entries["F1"].section == "facts"
+    assert mem.entries["F1"].text == "SQLite database is configured"
+
+
+def test_numeric_update_id_is_normalized_when_unique():
+    responses = iter(
+        [
+            '[{"op": "ADD", "section": "decisions", "text": "ship MVP", "provenance": [1]}]',
+            '[{"op": "UPDATE", "id": 1, "text": "ship MVP by Friday", "provenance": [2]}]',
+        ]
+    )
+    updater = make_updater(lambda system, messages: next(responses))
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(mem, [Turn(id=1, role="user", content="ship MVP")])
+    assert rejected == []
+    assert len(applied) == 1
+
+    applied, rejected = updater.update(
+        mem,
+        [Turn(id=2, role="user", content="ship MVP by Friday")],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert mem.entries["D1"].text == "ship MVP by Friday"
+
+
+def test_text_suffix_turns_are_normalized_to_provenance():
+    response = '[{"op": "ADD", "section": "facts", "text": "SQLite is configured. (turns 2-3)"}]'
+    updater = make_updater(lambda system, messages: response)
+    mem = Memory(sections=CHAT_SECTIONS)
+    turns = [
+        Turn(id=2, role="user", content="SQLite"),
+        Turn(id=3, role="assistant", content="Configured"),
+    ]
+
+    applied, rejected = updater.update(mem, turns)
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert mem.entries["F1"].text == "SQLite is configured."
+    assert mem.entries["F1"].provenance == [2, 3]
+
+
 def test_garbage_response_raises_update_failed():
     updater = make_updater(lambda system, messages: "this is not json at all, sorry")
     mem = Memory(sections=CHAT_SECTIONS)
