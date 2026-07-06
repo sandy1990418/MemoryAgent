@@ -1,6 +1,7 @@
 """Single-session, in-memory, summarization-based conversational memory."""
 
 from memory_agent.llm import LLMClient, OpenAIClient
+from memory_agent.longterm import LongTermHit, LongTermMemory, Mem0LongTermMemory
 from memory_agent.memory import Memory, MemoryEntry
 from memory_agent.sections import AGENT_SECTIONS, CHAT_SECTIONS, SectionConfig
 from memory_agent.selector import MemorySelector, SelectedMemory
@@ -12,6 +13,9 @@ from memory_agent.window import WorkingWindow
 __all__ = [
     "LLMClient",
     "OpenAIClient",
+    "LongTermHit",
+    "LongTermMemory",
+    "Mem0LongTermMemory",
     "Memory",
     "MemoryEntry",
     "AGENT_SECTIONS",

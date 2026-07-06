@@ -1,6 +1,7 @@
 .claude
 .venv
 .env
+.mem0/
 __pycache__/
 *.pyc
 .pytest_cache/
