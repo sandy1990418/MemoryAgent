@@ -1,6 +1,12 @@
-"""Single-session, in-memory, summarization-based conversational memory."""
+"""Structured conversational memory and LangChain-facing memory adapters."""
 
 from memory_agent.llm import LLMClient, OpenAIClient
+from memory_agent.config import (
+    HybridAgentConfig,
+    SessionDemoConfig,
+    StructuredAgentConfig,
+    SummaryAgentConfig,
+)
 from memory_agent.longterm import LongTermHit, LongTermMemory, Mem0LongTermMemory
 from memory_agent.memory import Memory, MemoryEntry
 from memory_agent.sections import AGENT_SECTIONS, CHAT_SECTIONS, SectionConfig
@@ -13,6 +19,10 @@ from memory_agent.window import WorkingWindow
 __all__ = [
     "LLMClient",
     "OpenAIClient",
+    "HybridAgentConfig",
+    "SessionDemoConfig",
+    "StructuredAgentConfig",
+    "SummaryAgentConfig",
     "LongTermHit",
     "LongTermMemory",
     "Mem0LongTermMemory",

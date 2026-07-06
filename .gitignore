@@ -1,11 +1,11 @@
-.claude
-.venv
+.claude/
 .env
+.venv/
 .mem0/
+data/
+
 __pycache__/
-*.pyc
+**/__pycache__/
+*.py[cod]
 .pytest_cache/
-**/__pycache__
-.pytest_cache
 ARCHITECTURE.md
-data

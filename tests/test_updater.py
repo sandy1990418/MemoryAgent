@@ -83,6 +83,19 @@ def test_numeric_update_id_is_normalized_when_unique():
     assert mem.entries["D1"].text == "ship MVP by Friday"
 
 
+def test_unhashable_update_id_is_rejected_without_crashing():
+    response = '[{"op": "UPDATE", "id": [1], "text": "bad id", "provenance": [2]}]'
+    updater = make_updater(lambda system, messages: response)
+    mem = Memory(sections=CHAT_SECTIONS)
+    mem.apply_ops([{"op": "ADD", "section": "facts", "text": "existing", "provenance": [1]}])
+
+    applied, rejected = updater.update(mem, [Turn(id=2, role="user", content="bad id")])
+
+    assert applied == []
+    assert len(rejected) == 1
+    assert mem.entries["F1"].text == "existing"
+
+
 def test_text_suffix_turns_are_normalized_to_provenance():
     response = '[{"op": "ADD", "section": "facts", "text": "SQLite is configured. (turns 2-3)"}]'
     updater = make_updater(lambda system, messages: response)
@@ -159,6 +172,26 @@ def test_prompt_requires_supersede_add_for_reversals():
     assert "MUST SUPERSEDE the old active entry" in system
     assert "then ADD a new replacement entry" in system
     assert "Never use UPDATE for that case" in system
+
+
+def test_prompt_guards_against_cross_subject_supersede_and_duplicates():
+    captured = {}
+
+    def script(system, messages):
+        captured["system"] = system
+        return '[{"op": "NOOP"}]'
+
+    updater = make_updater(script)
+    mem = Memory(sections=CHAT_SECTIONS)
+    turns = [Turn(id=1, role="user", content="Always include dependency versions.")]
+
+    updater.update(mem, turns)
+
+    system = captured["system"]
+    assert "same semantic subject" in system
+    assert "Do not supersede identity or background facts" in system
+    assert "use UPDATE to merge/refine it instead of adding a duplicate" in system
+    assert "dependency/version-number preferences" in system
 
 
 def test_transport_error_raises_update_failed():

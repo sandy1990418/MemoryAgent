@@ -19,6 +19,25 @@ behavior.
 For the full design, data flow, and memory policy details, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## Project Layout
+
+Runnable files at the repo root are thin entry points. Shared application
+assembly lives inside the package:
+
+- `memory_agent/config.py`: environment-backed config dataclasses.
+- `memory_agent/demo_tools.py`: shared demo tools (`weather`, `calculator`).
+- `memory_agent/agent_builders.py`: LangChain agent builders for summary,
+  structured, and structured+mem0 paths.
+- `memory_agent/memory.py`, `transcript.py`, `window.py`, `selector.py`,
+  `updater.py`: framework-light structured-memory core.
+- `memory_agent/langchain_middleware.py`: LangChain adapter for structured
+  memory.
+- `memory_agent/longterm.py`, `longterm_middleware.py`: mem0-backed long-term
+  recall protocol and LangChain adapter.
+- `scripts/run_beam_case.py`: BEAM one-case benchmark runner. It uses a
+  `BeamRunConfig` object internally and supports `structured_mem0` and
+  `raw_mem0` modes.
+
 ## Primary Path: ReAct + SummarizationMiddleware
 
 `react_summary_agent.py` keeps the architecture intentionally small:
@@ -43,6 +62,7 @@ Optional model overrides:
 ```bash
 export MAIN_MODEL="openai:gpt-5.5"
 export SUMMARY_MODEL="openai:gpt-5.4-mini"
+export THREAD_ID="react-summary-demo"
 ```
 
 The demo uses `trigger=("messages", 6)` and `keep=("messages", 2)` so
@@ -76,6 +96,7 @@ export STRUCTURED_MAX_MEMORY_TOKENS="600"
 export MEM0_LLM_MODEL="gpt-4o-mini"
 export MEM0_USER_ID="demo-user"
 export MEM0_DATA_DIR=".mem0"
+export THREAD_ID="react-hybrid-memory-demo"
 ```
 
 The local mem0 store persists under `.mem0/`, including embedded Qdrant data

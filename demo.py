@@ -15,14 +15,8 @@ from __future__ import annotations
 
 import os
 
-from dotenv import load_dotenv
-
 from memory_agent import CHAT_SECTIONS, MemorySession, MemoryUpdater, OpenAIClient
-
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
-
-MAIN_MODEL = os.getenv("MAIN_MODEL", "openai:gpt-5.5")
-SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "openai:gpt-5.4-mini")
+from memory_agent.config import SessionDemoConfig, load_project_env
 
 PROMPTS = [
     "Hi, my name is Hannah.",
@@ -39,6 +33,7 @@ PROMPTS = [
 
 
 def main() -> None:
+    load_project_env()
     if not os.getenv("OPENAI_API_KEY"):
         print(
             "OPENAI_API_KEY is not set (checked environment and .env). "
@@ -47,15 +42,16 @@ def main() -> None:
         )
         return
 
-    chat_llm = OpenAIClient(model=MAIN_MODEL)
-    summary_llm = OpenAIClient(model=SUMMARY_MODEL)
+    config = SessionDemoConfig.from_env()
+    chat_llm = OpenAIClient(model=config.main_model)
+    summary_llm = OpenAIClient(model=config.memory_model)
     updater = MemoryUpdater(llm=summary_llm, sections=CHAT_SECTIONS)
 
     session = MemorySession(
         chat_llm=chat_llm,
         updater=updater,
         sections=CHAT_SECTIONS,
-        max_window_tokens=300,
+        max_window_tokens=config.max_window_tokens,
         base_system_prompt="You are a helpful assistant.",
     )
 

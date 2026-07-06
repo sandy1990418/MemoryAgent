@@ -34,6 +34,36 @@ DEFAULT_PROBES_PATH = Path("data/beam/100K/1/probing_questions/probing_questions
 DEFAULT_TOPICS_PATH = Path("data/beam/topics/100k/100k_topics.json")
 DEFAULT_RESULTS_DIR = Path("data/beam/results/100K/1")
 
+
+@dataclass(frozen=True)
+class BeamRunConfig:
+    chat: Path = DEFAULT_CHAT_PATH
+    probes: Path = DEFAULT_PROBES_PATH
+    topics: Path = DEFAULT_TOPICS_PATH
+    results_dir: Path = DEFAULT_RESULTS_DIR
+    store_dir: Path | None = None
+    output: Path | None = None
+    env_file: Path = Path(".env")
+    user_id: str = "beam-100k-case-1"
+    memory_mode: str = "structured_mem0"
+    top_k: int = 8
+    max_hit_chars: int = 6000
+    max_active_context_chars: int = 12000
+    skip_ingest: bool = False
+    answer_model: str = "gpt-4o-mini"
+    structured_model: str = "gpt-4o-mini"
+    structured_max_tokens: int = 12000
+    structured_max_memory_tokens: int = 3000
+    structured_answer_tokens: int = 4000
+    structured_evict_fraction: float = 0.5
+    structured_flush_final: bool = True
+    mem0_llm_model: str = "gpt-4o-mini"
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "BeamRunConfig":
+        return cls(**vars(args))
+
+
 STOPWORDS = {
     "about",
     "after",
@@ -135,7 +165,7 @@ def rubric_hit(response: str, rubric_line: str) -> dict[str, Any]:
     ratio = overlap / max(1, len(target_words))
 
     required_numbers = re.findall(r"\d+(?:\.\d+)?", target)
-    numbers_present = all(number in response for number in required_numbers)
+    numbers_present = bool(required_numbers) and all(number in response for number in required_numbers)
     hit = exact or ratio >= 0.65 or (numbers_present and ratio >= 0.45)
 
     return {
@@ -351,7 +381,10 @@ def answer_question(
     return llm.complete(system=system, messages=[{"role": "user", "content": user}], model=model)
 
 
-def run(args: argparse.Namespace) -> dict[str, Any]:
+def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
+    if isinstance(args, argparse.Namespace):
+        args = BeamRunConfig.from_args(args)
+
     load_dotenv(args.env_file)
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set; add it to .env or the environment.")
