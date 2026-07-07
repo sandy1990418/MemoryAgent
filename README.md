@@ -1,174 +1,166 @@
 # MemoryAgent
 
-This repo has three runnable paths:
+MemoryAgent is a small memory architecture playground for LangChain agents.
+The package is organized by responsibility, not by "whatever file was created
+first":
 
-1. `react_summary_agent.py` is the recommended first version. It uses
-   LangChain's built-in `SummarizationMiddleware` with a simple ReAct-style
-   tool-calling agent.
-2. `react_hybrid_agent.py` uses `StructuredMemoryMiddleware` for auditable
-   in-session compression and adds a mem0-backed long-term vector memory layer
-   for cross-session recall.
-3. `demo_react.py` is an experimental structured-memory version. It replaces
-   `SummarizationMiddleware` with `StructuredMemoryMiddleware`, which evicts
-   old messages into operation-based memory entries.
+1. `summary/`: baseline LangChain `SummarizationMiddleware` path.
+2. `structured/`: this repo's operation-based structured memory system.
+3. `longterm/`: long-term recall integration for mem0-style vector memory.
+4. `agents/`: runnable LangChain agent assembly for each path.
 
-Start with the first path unless you specifically need cross-session semantic
-recall, auditable memory entries, superseded history, or custom eviction
-behavior.
-
-For the full design, data flow, and memory policy details, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+For the detailed component graph and data flow, see
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Project Layout
 
-Runnable files at the repo root are thin entry points. Shared application
-assembly lives inside the package:
+```text
+memory_agent/
+  __init__.py              public package exports
 
-- `memory_agent/config.py`: environment-backed config dataclasses.
-- `memory_agent/demo_tools.py`: shared demo tools (`weather`, `calculator`).
-- `memory_agent/agent_builders.py`: LangChain agent builders for summary,
-  structured, and structured+mem0 paths.
-- `memory_agent/memory.py`, `transcript.py`, `window.py`, `selector.py`,
-  `updater.py`: framework-light structured-memory core.
-- `memory_agent/langchain_middleware.py`: LangChain adapter for structured
-  memory.
-- `memory_agent/longterm.py`, `longterm_middleware.py`: mem0-backed long-term
-  recall protocol and LangChain adapter.
-- `scripts/run_beam_case.py`: BEAM one-case benchmark runner. It uses a
-  `BeamRunConfig` object internally and supports `structured_mem0` and
-  `raw_mem0` modes.
-- `scripts/run_beam_case_deepagent.py`: deepagents variant of the BEAM runner.
-  The answering stage uses `create_deep_agent` with a `search_long_term_memory`
-  tool, so the agent performs its own (possibly multi-step) mem0 retrieval
-  instead of receiving pre-retrieved top-k context. `deepagents` requires
-  Python >= 3.11, so it lives in a separate venv:
+  summary/                 summary-related code only
+    agent.py               build_summary_agent using SummarizationMiddleware
 
-  ```bash
-  python3.12 -m venv .venv-deepagents
-  .venv-deepagents/bin/pip install -r requirements-deepagents.txt
-  .venv-deepagents/bin/python scripts/run_beam_case_deepagent.py
-  ```
+  structured/              operation-based memory domain/runtime
+    memory.py              Memory store and ADD/UPDATE/SUPERSEDE/NOOP ops
+    transcript.py          append-only transcript
+    window.py              framework-free sliding context window
+    selector.py            prompt memory selection
+    updater.py             LLM-driven memory operation generator
+    session.py             framework-free structured chat session
+    middleware.py          LangChain StructuredMemoryMiddleware
 
-## Primary Path: ReAct + SummarizationMiddleware
+  longterm/                long-term recall integration
+    middleware.py          LangChain LongTermMemoryMiddleware
 
-`react_summary_agent.py` keeps the architecture intentionally small:
+  agents/                  application assembly
+    common.py              thread/invoke/printing helpers
+    structured.py          structured-memory agent builder
+    hybrid.py              structured + long-term mem0 agent builder
 
-- `create_agent(...)` owns the ReAct/tool-calling loop.
-- `weather` and `calculator` are normal LangChain tools.
-- `SummarizationMiddleware(...)` compresses older conversation context.
-- `InMemorySaver()` keeps repeated turns in one LangGraph thread.
+  clients/                 external service boundaries
+    llm.py                 LLMClient protocol, OpenAIClient adapter
+    mem0.py                LongTermMemory protocol, Mem0 adapter
 
-Run it with:
+  models/                  dataclasses, configs, constants
+    config.py              .env-backed config models
+    sections.py            SectionConfig and default section lists
+    memory.py              MemoryEntry, SelectedMemory
+    transcript.py          Turn
+    longterm.py            LongTermHit
+    runtime.py             agent runtime containers
+    beam.py                BEAM runner models
+
+  tools/
+    demo.py                demo weather/calculator tools
+```
+
+Root runnable files stay thin:
+
+```text
+react_summary_agent.py     uses memory_agent.summary
+demo_react.py              uses memory_agent.agents.structured
+react_hybrid_agent.py      uses memory_agent.agents.hybrid
+demo.py                    uses memory_agent.structured directly
+```
+
+## Setup
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-export OPENAI_API_KEY="your-api-key"
+cp .env.example .env
+```
+
+Edit `.env` and set at least:
+
+```bash
+OPENAI_API_KEY="your-api-key"
+```
+
+Run the baseline summary path:
+
+```bash
 python react_summary_agent.py
 ```
 
-Optional model overrides:
+Run structured memory:
 
 ```bash
-export MAIN_MODEL="openai:gpt-5.5"
-export SUMMARY_MODEL="openai:gpt-5.4-mini"
-export THREAD_ID="react-summary-demo"
-```
-
-The demo uses `trigger=("messages", 6)` and `keep=("messages", 2)` so
-summarization happens quickly in a local test. For real use, prefer a token
-trigger such as `trigger=("tokens", 4000)`.
-
-## Hybrid Path: Structured Memory + Long-Term Vector Memory (mem0)
-
-`react_hybrid_agent.py` adds a third runtime path for conversations that need
-both auditable short-term context compression and long-term recall.
-`StructuredMemoryMiddleware` evicts older turns into operation-based memory
-entries and injects them under `# Conversation Memory`. A second middleware,
-placed after it, detects the message IDs that disappeared from the active
-context, persists those raw turns to mem0, and injects semantically relevant
-long-term memories under `# Long-Term Memory` on every model call.
-
-Run it with:
-
-```bash
-export OPENAI_API_KEY="your-api-key"
-python react_hybrid_agent.py
-```
-
-Optional knobs:
-
-```bash
-export MAIN_MODEL="openai:gpt-5.5"
-export MEMORY_MODEL="openai:gpt-5.4-mini"
-export STRUCTURED_MAX_TOKENS="220"
-export STRUCTURED_MAX_MEMORY_TOKENS="600"
-export STRUCTURED_KEEP_MESSAGES="4"
-export MEM0_LLM_MODEL="gpt-4o-mini"
-export MEM0_USER_ID="demo-user"
-export MEM0_DATA_DIR=".mem0"
-export THREAD_ID="react-hybrid-memory-demo"
-```
-
-The local mem0 store persists under `.mem0/`, including embedded Qdrant data
-and mem0's history database. `MEM0_LLM_MODEL` controls mem0's fact-extraction
-model separately from the main agent model. If `# Conversation Memory` and
-`# Long-Term Memory` conflict, the demo system prompt tells the model to prefer
-the structured conversation memory as the current state. Re-running the script
-with the same `MEM0_USER_ID` and `MEM0_DATA_DIR` demonstrates cross-session
-recall. Embedded Qdrant takes an exclusive file lock on its local data path, so
-run only one process against the same `.mem0/` directory at a time.
-
-If `mem0ai` is not installed, the demo prints an install hint and runs with the
-structured middleware only. The unit tests remain deterministic and network-free
-without importing mem0.
-
-## Experimental Path: Structured Memory
-
-The `memory_agent/` package is a framework-light structured-memory experiment.
-It keeps an append-only transcript, renders memory entries into the system
-prompt after session-local selection, and uses a `MemoryUpdater` LLM to convert
-evicted turns into operations:
-
-- `ADD` creates a new memory entry.
-- `UPDATE` refines or extends an entry that remains true.
-- `SUPERSEDE` marks an entry inactive when it is contradicted or no longer true.
-- `NOOP` records that nothing should be saved.
-
-`demo_react.py` wires this memory layer into a LangChain ReAct agent through
-`StructuredMemoryMiddleware`.
-
-Run it with:
-
-```bash
-export OPENAI_API_KEY="your-api-key"
 python demo_react.py
 ```
 
-Use this path only after the simple summary version is not enough. It is useful
-when you need provenance, conflict history, or stronger guarantees that failed
-memory updates do not drop messages.
+Run structured memory plus mem0:
 
-Preferences and goal entries are pinned, so they are always kept in injected
-memory regardless of the token budget. The `exact_values` section preserves
-numbers, dates, versions, identifiers, paths, and URLs verbatim. Tool outputs
-are deterministically truncated before the updater LLM sees them
-(`max_tool_turn_chars`, default 2000 chars), avoiding wasted tokens on
-re-derivable output.
+```bash
+python react_hybrid_agent.py
+```
 
-## Update Policy
+## Configuration
 
-For structured memory, `UPDATE` should not rewrite history. Use it only for
-same-direction clarification, refinement, or extension.
+All runnable demos call `load_project_env()`, which loads `.env` from the repo
+root. `.env.example` documents the supported variables.
 
-When a user explicitly changes, reverses, or rejects an earlier preference,
-decision, fact, goal, or plan, the updater prompt requires:
+Common variables:
 
-1. `SUPERSEDE` the old active entry.
-2. `ADD` a new replacement entry.
+```bash
+MAIN_MODEL="openai:gpt-5.4-nano"
+SUMMARY_MODEL="openai:gpt-5.4-nano"
+MEMORY_MODEL="openai:gpt-5.4-nano"
+THREAD_ID="react-summary-demo"
+STRUCTURED_MAX_TOKENS="600"
+STRUCTURED_MAX_MEMORY_TOKENS="600"
+STRUCTURED_KEEP_MESSAGES="4"
+```
 
-This keeps the final state correct while preserving the audit trail.
+`LLMClient` and `OpenAIClient` are intentionally different:
+
+- `LLMClient` is a small protocol used by core code and tests. Anything with
+  `complete(system, messages, model=None) -> str` can satisfy it.
+- `OpenAIClient` is the real adapter backed by `langchain_openai.ChatOpenAI`.
+  It is one implementation of `LLMClient`, not a duplicate abstraction.
+
+## mem0 Modes
+
+`react_hybrid_agent.py` uses `HybridAgentConfig` and supports three backends:
+
+```bash
+# Local development/test mode. Uses embedded Qdrant under .mem0/.
+MEM0_BACKEND="local"
+MEM0_DATA_DIR=".mem0"
+MEM0_USER_ID="demo-user"
+MEM0_LLM_MODEL="gpt-5.4-nano"
+
+# Hosted/custom mem0 content. MEM0_DATA_DIR is ignored.
+MEM0_BACKEND="platform"
+MEM0_API_KEY="your-mem0-key"
+MEM0_USER_ID="your-user-id"
+
+# Structured memory only.
+MEM0_BACKEND="disabled"
+```
+
+For your own mem0 data, set `MEM0_BACKEND=platform`, `MEM0_API_KEY`, and
+`MEM0_USER_ID`; you do not need `MEM0_DATA_DIR`. For local testing, leave
+`MEM0_BACKEND=local` and use the default `.mem0` directory, or point
+`MEM0_DATA_DIR` at a temporary test store.
+
+Embedded Qdrant takes an exclusive file lock on the local data path, so run only
+one process against the same local `MEM0_DATA_DIR` at a time.
+
+## Structured Memory Policy
+
+`MemoryUpdater` turns evicted turns into operations:
+
+- `ADD`: create a new memory entry.
+- `UPDATE`: refine an active entry that remains true.
+- `SUPERSEDE`: mark an active entry inactive when contradicted.
+- `NOOP`: preserve nothing from that batch.
+
+Updater-generated batches are applied atomically. If parsing, provenance
+validation, or operation application fails, source messages stay in context for
+retry instead of being dropped.
 
 ## Tests
 

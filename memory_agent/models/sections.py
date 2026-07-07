@@ -1,4 +1,4 @@
-"""Section configuration for structured memory."""
+"""Structured-memory section data models and defaults."""
 
 from __future__ import annotations
 

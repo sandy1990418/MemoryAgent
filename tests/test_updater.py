@@ -1,9 +1,9 @@
 import pytest
 
-from memory_agent.memory import Memory
-from memory_agent.sections import AGENT_SECTIONS, CHAT_SECTIONS
-from memory_agent.transcript import Turn
-from memory_agent.updater import MemoryUpdater, UpdateFailed
+from memory_agent.models.sections import AGENT_SECTIONS, CHAT_SECTIONS
+from memory_agent.models.transcript import Turn
+from memory_agent.structured.memory import Memory
+from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
 from tests.fakes import ScriptedLLM
 
 

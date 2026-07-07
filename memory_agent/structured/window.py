@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from memory_agent.transcript import Turn
+from memory_agent.models.transcript import Turn
 
 
 def _default_token_estimator(text: str) -> int:

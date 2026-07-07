@@ -1,4 +1,4 @@
-"""Configuration objects for demos and benchmark runners."""
+"""Environment-backed configuration models."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MEM0_BACKENDS = frozenset({"local", "platform", "disabled"})
 
 
 def load_project_env(env_file: str | Path | None = None) -> None:
@@ -22,6 +23,23 @@ def _env_int(name: str, default: int) -> int:
     if raw is None or raw == "":
         return default
     return int(raw)
+
+
+def _env_optional(name: str, default: str | None = None) -> str | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    if raw == "":
+        return None
+    return raw
+
+
+def _env_mem0_backend(default: str) -> str:
+    backend = os.getenv("MEM0_BACKEND", default).strip().lower()
+    if backend not in MEM0_BACKENDS:
+        choices = ", ".join(sorted(MEM0_BACKENDS))
+        raise ValueError(f"MEM0_BACKEND must be one of: {choices}")
+    return backend
 
 
 @dataclass(frozen=True)
@@ -69,13 +87,17 @@ class HybridAgentConfig:
     structured_max_tokens: int = 220
     structured_max_memory_tokens: int = 600
     structured_keep_messages: int = 4
+    mem0_backend: str = "local"
     mem0_user_id: str = "demo-user"
-    mem0_data_dir: str = ".mem0"
-    mem0_llm_model: str = "gpt-5.4-nano"
+    mem0_data_dir: str | None = ".mem0"
+    mem0_llm_model: str | None = "gpt-5.4-nano"
+    mem0_api_key: str | None = None
 
     @classmethod
     def from_env(cls) -> "HybridAgentConfig":
         memory_model = os.getenv("MEMORY_MODEL", os.getenv("SUMMARY_MODEL", cls.memory_model))
+        backend = _env_mem0_backend(cls.mem0_backend)
+        default_data_dir = cls.mem0_data_dir if backend == "local" else None
         return cls(
             main_model=os.getenv("MAIN_MODEL", cls.main_model),
             memory_model=memory_model,
@@ -92,9 +114,11 @@ class HybridAgentConfig:
                 "STRUCTURED_KEEP_MESSAGES",
                 cls.structured_keep_messages,
             ),
+            mem0_backend=backend,
             mem0_user_id=os.getenv("MEM0_USER_ID", cls.mem0_user_id),
-            mem0_data_dir=os.getenv("MEM0_DATA_DIR", cls.mem0_data_dir),
-            mem0_llm_model=os.getenv("MEM0_LLM_MODEL", cls.mem0_llm_model),
+            mem0_data_dir=_env_optional("MEM0_DATA_DIR", default_data_dir),
+            mem0_llm_model=_env_optional("MEM0_LLM_MODEL", cls.mem0_llm_model),
+            mem0_api_key=_env_optional("MEM0_API_KEY"),
         )
 
 

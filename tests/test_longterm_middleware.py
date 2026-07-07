@@ -3,8 +3,7 @@ import asyncio
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from memory_agent.longterm import LongTermHit
-from memory_agent.longterm_middleware import LongTermMemoryMiddleware
+from memory_agent.longterm import LongTermHit, LongTermMemoryMiddleware
 from tests.fakes import FakeLongTermMemory
 
 

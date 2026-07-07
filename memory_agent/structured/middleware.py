@@ -30,10 +30,11 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveM
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from memory_agent.memory import Memory
-from memory_agent.selector import MemorySelector
-from memory_agent.transcript import Transcript, Turn
-from memory_agent.updater import MemoryUpdater, UpdateFailed
+from memory_agent.models.transcript import Turn
+from memory_agent.structured.memory import Memory
+from memory_agent.structured.selector import MemorySelector
+from memory_agent.structured.transcript import Transcript
+from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,10 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         self.updater = updater
         self.max_tokens = max_tokens
         self.evict_fraction = evict_fraction
-        self.keep_messages = keep_messages
+        # A pre-existing clamp in _find_cutoff already guarantees at least one
+        # message survives eviction; clamp here so the configured value never
+        # silently diverges from the effective floor.
+        self.keep_messages = max(1, keep_messages)
         self.max_memory_tokens = (
             max_memory_tokens if max_memory_tokens is not None else max_tokens // 2
         )
@@ -302,18 +306,20 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         return ""
 
     def wrap_model_call(self, request: "ModelRequest[Any]", handler: Callable[..., Any]) -> Any:
-        """Inject the rendered structured memory into the system prompt."""
+        """Inject the rendered structured memory into the system prompt.
+
+        The token budget is enforced once, by the selector. Rendering must not
+        re-apply `max_tokens`: `Memory.render` has no notion of pinned
+        sections, so a second budget pass would omit exactly the pinned
+        entries the selector guarantees.
+        """
         query = self._query_from_messages(list(request.messages))
         selected_entries = self.memory_selector.select(
             memory=self.memory,
             query=query,
             max_tokens=self.max_memory_tokens,
         )
-        rendered = self.memory.render(
-            max_tokens=self.max_memory_tokens,
-            token_estimator=_char_token_estimator,
-            entries=selected_entries,
-        )
+        rendered = self.memory.render(entries=selected_entries)
         if rendered:
             new_prompt = (request.system_prompt or "") + "\n\n# Conversation Memory\n" + rendered
             if hasattr(request, "override"):

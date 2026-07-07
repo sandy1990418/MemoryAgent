@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from memory_agent.agent_builders import build_summary_agent, invoke_agent, print_last_message
-from memory_agent.config import SummaryAgentConfig, load_project_env
+from memory_agent.agents import invoke_agent, print_last_message
+from memory_agent.models.config import SummaryAgentConfig, load_project_env
+from memory_agent.summary import build_summary_agent
 
 
 PROMPTS = [

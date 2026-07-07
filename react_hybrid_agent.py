@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from memory_agent.agent_builders import build_hybrid_agent, invoke_agent, print_last_message
-from memory_agent.config import HybridAgentConfig, load_project_env
+from memory_agent.agents import build_hybrid_agent, invoke_agent, print_last_message
+from memory_agent.models.config import HybridAgentConfig, load_project_env
 
 
 PROMPTS = [
@@ -56,9 +56,15 @@ def main() -> None:
     )
     print(f"\nPersisted {persisted} message(s) to long-term memory at session end.")
     if runtime.long_term_middleware is None:
-        print("Long-term vector memory was disabled because mem0ai is not installed.")
+        print("Long-term vector memory is disabled or mem0ai is not installed.")
     else:
-        print(f"Re-run this script to see cross-session semantic recall from {config.mem0_data_dir}/.")
+        if config.mem0_backend == "local":
+            print(
+                "Re-run this script to see cross-session semantic recall from "
+                f"{config.mem0_data_dir or '.mem0'}/."
+            )
+        else:
+            print("Re-run this script to see cross-session semantic recall from mem0 platform.")
 
     print("\n=== Structured memory (including superseded entries) ===\n")
     print(

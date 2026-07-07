@@ -25,7 +25,6 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +35,8 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage
 
 from memory_agent import AGENT_SECTIONS, Mem0LongTermMemory, Memory, MemoryUpdater, OpenAIClient
-from memory_agent.langchain_middleware import StructuredMemoryMiddleware, _content_to_text
+from memory_agent.models.beam import BeamDeepAgentRunConfig
+from memory_agent.structured.middleware import StructuredMemoryMiddleware, _content_to_text
 from scripts.run_beam_case import (
     DEFAULT_CHAT_PATH,
     DEFAULT_PROBES_PATH,
@@ -54,37 +54,6 @@ from scripts.run_beam_case import (
 )
 
 SEARCH_TOOL_NAME = "search_long_term_memory"
-
-
-@dataclass(frozen=True)
-class BeamDeepAgentRunConfig:
-    chat: Path = DEFAULT_CHAT_PATH
-    probes: Path = DEFAULT_PROBES_PATH
-    topics: Path = DEFAULT_TOPICS_PATH
-    results_dir: Path = DEFAULT_RESULTS_DIR
-    store_dir: Path | None = None
-    output: Path | None = None
-    env_file: Path = Path(".env")
-    user_id: str = "beam-100k-case-1"
-    memory_mode: str = "structured_mem0"
-    top_k: int = 8
-    max_hit_chars: int = 6000
-    max_active_context_chars: int = 12000
-    skip_ingest: bool = False
-    answer_model: str = "gpt-4o-mini"
-    structured_model: str = "gpt-4o-mini"
-    structured_max_tokens: int = 12000
-    structured_max_memory_tokens: int = 3000
-    structured_answer_tokens: int = 4000
-    structured_evict_fraction: float = 0.5
-    structured_keep_messages: int = 2
-    structured_flush_final: bool = True
-    mem0_llm_model: str = "gpt-4o-mini"
-    recursion_limit: int = 50
-
-    @classmethod
-    def from_args(cls, args: argparse.Namespace) -> "BeamDeepAgentRunConfig":
-        return cls(**vars(args))
 
 
 def final_ai_text(messages: list[AnyMessage]) -> str:

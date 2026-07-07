@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from memory_agent.agent_builders import build_structured_agent, invoke_agent, print_last_message
-from memory_agent.config import StructuredAgentConfig, load_project_env
+from memory_agent.agents import build_structured_agent, invoke_agent, print_last_message
+from memory_agent.models.config import StructuredAgentConfig, load_project_env
 
 
 PROMPTS = [

@@ -1,4 +1,4 @@
-from memory_agent.llm import OpenAIClient
+from memory_agent.clients.llm import OpenAIClient
 
 
 class FakeChatModel:

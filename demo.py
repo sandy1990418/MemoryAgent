@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 
 from memory_agent import CHAT_SECTIONS, MemorySession, MemoryUpdater, OpenAIClient
-from memory_agent.config import SessionDemoConfig, load_project_env
+from memory_agent.models.config import SessionDemoConfig, load_project_env
 
 PROMPTS = [
     "Hi, my name is Hannah.",

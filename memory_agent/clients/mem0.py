@@ -1,32 +1,19 @@
-"""Long-term vector memory abstraction backed by mem0.
-
-The core package stays free of network dependencies; `mem0` is only imported
-lazily inside the factory classmethods of the adapter, mirroring how
-`OpenAIClient` treats `langchain_openai` in `memory_agent/llm.py`.
-"""
+"""mem0-backed long-term memory adapter."""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import Any, Protocol
 
-
-@dataclass(frozen=True)
-class LongTermHit:
-    """One memory recalled from the long-term vector store."""
-
-    text: str
-    score: float | None = None
-    metadata: dict | None = None
+from memory_agent.models.longterm import LongTermHit
 
 
 class LongTermMemory(Protocol):
-    """Minimal interface the rest of the package depends on.
+    """Minimal long-term memory interface used by middleware.
 
-    `messages` is a list of `{"role": ..., "content": ...}` dicts (roles
-    "user" / "assistant"). Implementations decide how to distill and store
-    them. `search` returns the most relevant stored memories for a query.
+    `messages` is a list of `{"role": ..., "content": ...}` dicts.
+    Implementations decide how to distill and store them. `search` returns the
+    most relevant stored memories for a query.
     """
 
     def add(self, messages: list[dict], user_id: str, metadata: dict | None = None) -> None:

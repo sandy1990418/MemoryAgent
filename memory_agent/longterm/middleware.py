@@ -17,7 +17,8 @@ from typing import Any, Callable
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 
-from memory_agent.longterm import LongTermHit, LongTermMemory
+from memory_agent.clients.mem0 import LongTermMemory
+from memory_agent.models.longterm import LongTermHit
 
 logger = logging.getLogger(__name__)
 

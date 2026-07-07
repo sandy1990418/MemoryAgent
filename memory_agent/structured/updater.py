@@ -6,10 +6,10 @@ import json
 import re
 from typing import Callable
 
-from memory_agent.llm import LLMClient
-from memory_agent.memory import Memory
-from memory_agent.sections import SectionConfig
-from memory_agent.transcript import Turn
+from memory_agent.clients.llm import LLMClient
+from memory_agent.models.sections import SectionConfig
+from memory_agent.models.transcript import Turn
+from memory_agent.structured.memory import Memory
 
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 _TURN_SUFFIX_RE = re.compile(r"\s*\(turns?\s+([0-9,\-\s]+)\)\s*$", re.IGNORECASE)

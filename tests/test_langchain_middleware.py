@@ -6,10 +6,10 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from memory_agent.langchain_middleware import StructuredMemoryMiddleware
-from memory_agent.memory import Memory
-from memory_agent.sections import CHAT_SECTIONS
-from memory_agent.updater import MemoryUpdater
+from memory_agent.models.sections import CHAT_SECTIONS
+from memory_agent.structured.memory import Memory
+from memory_agent.structured.middleware import StructuredMemoryMiddleware
+from memory_agent.structured.updater import MemoryUpdater
 from tests.fakes import ScriptedLLM
 
 

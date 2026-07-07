@@ -3,14 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 
-
-@dataclass
-class Turn:
-    id: int
-    role: str
-    content: str
+from memory_agent.models.transcript import Turn
 
 
 class Transcript:

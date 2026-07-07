@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from memory_agent.memory import Memory, MemoryEntry
+from memory_agent.models.memory import MemoryEntry, SelectedMemory
+from memory_agent.structured.memory import Memory
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 
@@ -17,13 +17,6 @@ def _default_token_estimator(text: str) -> int:
 
 def _tokens(text: str) -> set[str]:
     return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
-
-
-@dataclass(frozen=True)
-class SelectedMemory:
-    entry: MemoryEntry
-    score: float
-    reasons: tuple[str, ...]
 
 
 class MemorySelector:

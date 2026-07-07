@@ -1,5 +1,5 @@
-from memory_agent.memory import Memory
-from memory_agent.sections import CHAT_SECTIONS
+from memory_agent.models.sections import CHAT_SECTIONS
+from memory_agent.structured.memory import Memory
 
 
 def make_memory() -> Memory:

@@ -2,24 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Callable
 
-from memory_agent.sections import CHAT_SECTIONS, SectionConfig
+from memory_agent.models.memory import MemoryEntry
+from memory_agent.models.sections import CHAT_SECTIONS, SectionConfig
 
 
 def _default_token_estimator(text: str) -> int:
     return max(1, len(text) // 4)
-
-
-@dataclass
-class MemoryEntry:
-    id: str
-    section: str
-    text: str
-    provenance: list[int]
-    status: str = "active"
-    note: str = ""
 
 
 class Memory:

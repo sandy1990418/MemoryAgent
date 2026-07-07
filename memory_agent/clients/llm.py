@@ -1,6 +1,4 @@
-"""LLM client abstraction. Core package stays free of network dependencies;
-`langchain_openai` is only imported lazily inside OpenAIClient.
-"""
+"""LLM client abstractions and adapters."""
 
 from __future__ import annotations
 
@@ -8,6 +6,8 @@ from typing import Any, Callable, Protocol
 
 
 class LLMClient(Protocol):
+    """Minimal interface required by memory updater/session code."""
+
     def complete(self, system: str, messages: list[dict], model: str | None = None) -> str:
         ...
 
@@ -15,20 +15,10 @@ class LLMClient(Protocol):
 class OpenAIClient:
     """Thin wrapper around `langchain_openai.ChatOpenAI`.
 
-    `model` may carry an "openai:" prefix (matching the existing demo's
-    env-var convention); the prefix is stripped before calling the API.
-
-    `ChatOpenAI` binds its model name at construction time, but `complete()`
-    accepts a per-call `model` override. To reconcile the two, chat model
-    instances are cached in `self._chat_models`, keyed by the resolved
-    (prefix-stripped) model name, and are only built the first time a given
-    model name is used.
-
-    For tests, pass `chat_model_factory` — a callable that takes a resolved
-    model name and returns a `BaseChatModel`-like object (only `.invoke` is
-    required) — to swap in a network-free fake instead of a real
-    `ChatOpenAI`. This is the only supported dependency-injection seam; it
-    keeps the constructor free of network calls when a factory is supplied.
+    `model` may carry an "openai:" prefix matching the demo env-var
+    convention; the prefix is stripped before calling the API. The class caches
+    ChatOpenAI instances by resolved model name so per-call model overrides do
+    not rebuild the same model repeatedly.
     """
 
     def __init__(
@@ -68,14 +58,7 @@ class OpenAIClient:
 
     @staticmethod
     def _extract_text(response: Any) -> str:
-        """Pull the assistant's text out of a chat model response.
-
-        Prefers `AIMessage.text` (a property on langchain-core >= 1.0),
-        which already normalizes both plain-string `content` and
-        list-of-content-block `content`. Falls back to inspecting
-        `.content` directly for lightweight test doubles that don't
-        implement `.text`. Returns "" if no text is found.
-        """
+        """Pull the assistant text out of a chat model response."""
         text_accessor = getattr(response, "text", None)
         if text_accessor is not None:
             return str(text_accessor)

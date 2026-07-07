@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 
-from memory_agent.llm import LLMClient
-from memory_agent.memory import Memory
-from memory_agent.sections import CHAT_SECTIONS, SectionConfig
-from memory_agent.selector import MemorySelector
-from memory_agent.transcript import Transcript
-from memory_agent.updater import MemoryUpdater, UpdateFailed
-from memory_agent.window import WorkingWindow
+from memory_agent.clients.llm import LLMClient
+from memory_agent.models.sections import CHAT_SECTIONS, SectionConfig
+from memory_agent.structured.memory import Memory
+from memory_agent.structured.selector import MemorySelector
+from memory_agent.structured.transcript import Transcript
+from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
+from memory_agent.structured.window import WorkingWindow
 
 logger = logging.getLogger(__name__)
 
