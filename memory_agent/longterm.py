@@ -2,7 +2,7 @@
 
 The core package stays free of network dependencies; `mem0` is only imported
 lazily inside the factory classmethods of the adapter, mirroring how
-`OpenAIClient` treats `openai` in `memory_agent/llm.py`.
+`OpenAIClient` treats `langchain_openai` in `memory_agent/llm.py`.
 """
 
 from __future__ import annotations

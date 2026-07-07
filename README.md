@@ -37,6 +37,17 @@ assembly lives inside the package:
 - `scripts/run_beam_case.py`: BEAM one-case benchmark runner. It uses a
   `BeamRunConfig` object internally and supports `structured_mem0` and
   `raw_mem0` modes.
+- `scripts/run_beam_case_deepagent.py`: deepagents variant of the BEAM runner.
+  The answering stage uses `create_deep_agent` with a `search_long_term_memory`
+  tool, so the agent performs its own (possibly multi-step) mem0 retrieval
+  instead of receiving pre-retrieved top-k context. `deepagents` requires
+  Python >= 3.11, so it lives in a separate venv:
+
+  ```bash
+  python3.12 -m venv .venv-deepagents
+  .venv-deepagents/bin/pip install -r requirements-deepagents.txt
+  .venv-deepagents/bin/python scripts/run_beam_case_deepagent.py
+  ```
 
 ## Primary Path: ReAct + SummarizationMiddleware
 
