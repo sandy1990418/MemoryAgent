@@ -13,6 +13,52 @@ from memory_agent.structured.memory import Memory
 
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 _TURN_SUFFIX_RE = re.compile(r"\s*\(turns?\s+([0-9,\-\s]+)\)\s*$", re.IGNORECASE)
+_MONTH_NAMES = (
+    "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    "Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
+)
+_EXACT_VALUE_PATTERNS = [
+    re.compile(
+        rf"\b(?:{_MONTH_NAMES})\.?\s+\d{{1,2}},\s+\d{{4}}\s*-\s*"
+        rf"(?:{_MONTH_NAMES})\.?\s+\d{{1,2}},\s+\d{{4}}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:{_MONTH_NAMES})\.?\s+\d{{1,2}}\s*-\s*"
+        rf"(?:(?:{_MONTH_NAMES})\.?\s+)?\d{{1,2}},\s+\d{{4}}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(rf"\b(?:{_MONTH_NAMES})\.?\s+\d{{1,2}},\s+\d{{4}}\b", re.IGNORECASE),
+    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+    re.compile(
+        r"\b(?:Python|Flask(?:-Login|-SQLAlchemy|-Migrate|-WTF|-Argon2|-Talisman)?|"
+        r"SQLite|Jinja2|Bootstrap|Chart\.js|Marshmallow|SQLAlchemy|Gunicorn|Redis|"
+        r"PostgreSQL|Loggly|WCAG|flake8|black|pytest|bcrypt|Argon2)"
+        r"\s+v?\d+(?:\.\d+){0,3}(?:\s+[A-Z]{1,3})?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|MB|GB|fps|%)\b", re.IGNORECASE),
+    re.compile(
+        r"\b\d+(?:\.\d+)?\s+"
+        r"(?:workers?|commits?|branches?|users?|failed login attempts?|attempts?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bport\s+\d{2,5}\b", re.IGNORECASE),
+    re.compile(r"\b(?:pull request|PR)\s+#?\d+\b", re.IGNORECASE),
+    re.compile(r"\bv\d+(?:\.\d+){1,3}\b", re.IGNORECASE),
+    re.compile(r"(?<!\w)/(?:[\w.-]+/)*[\w.-]+"),
+    re.compile(r"\b[A-Za-z_][\w.-]*\.(?:py|html|css|js|json|log|yml|yaml|md|txt)\b"),
+    re.compile(
+        r"\b(?:TemplateNotFound|OperationalError|KeyError|TypeError|ValueError)"
+        r"(?::\s*['\"]?[\w.-]+['\"]?)?",
+    ),
+]
+_STATUS_CHANGE_CUE_RE = re.compile(
+    r"\b(?:never|not anymore|no longer|changed my mind|actually|instead|"
+    r"contradiction|contradictory|starting from scratch)\b",
+    re.IGNORECASE,
+)
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 class UpdateFailed(Exception):
@@ -186,6 +232,7 @@ class MemoryUpdater:
             if ops is None:
                 raise UpdateFailed(f"Could not parse a JSON ops array from LLM response: {response!r}")
             ops = self._normalize_ops(ops, memory)
+            ops = self._with_deterministic_extracts(ops, memory, evicted_turns)
 
             provenance_rejections = self._validate_provenance(ops, evicted_turns)
             if provenance_rejections:
@@ -261,6 +308,169 @@ class MemoryUpdater:
 
             normalized_ops.append(normalized)
         return normalized_ops
+
+    def _with_deterministic_extracts(
+        self,
+        ops: list[dict],
+        memory: Memory,
+        evicted_turns: list[Turn],
+    ) -> list[dict]:
+        generated_ops = [
+            *self._deterministic_exact_value_ops(ops, memory, evicted_turns),
+            *self._deterministic_status_change_ops(ops, memory, evicted_turns),
+        ]
+        if not generated_ops:
+            return ops
+        non_noop_ops = [
+            op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
+        ]
+        return [*non_noop_ops, *generated_ops]
+
+    def _deterministic_exact_value_ops(
+        self,
+        ops: list[dict],
+        memory: Memory,
+        evicted_turns: list[Turn],
+    ) -> list[dict]:
+        if not self._has_section("exact_values"):
+            return []
+
+        seen = self._active_or_pending_text_keys(memory, ops, "exact_values")
+        generated: list[dict] = []
+        for turn in evicted_turns:
+            if turn.role != "user":
+                continue
+            for value in self._extract_exact_values(turn.content):
+                if self._has_seen_text(value, seen):
+                    continue
+                key = self._text_key(value)
+                seen.add(key)
+                generated.append(
+                    {
+                        "op": "ADD",
+                        "section": "exact_values",
+                        "text": value,
+                        "provenance": [turn.id],
+                    }
+                )
+
+        return generated
+
+    def _deterministic_status_change_ops(
+        self,
+        ops: list[dict],
+        memory: Memory,
+        evicted_turns: list[Turn],
+    ) -> list[dict]:
+        if not self._has_section("status_changes"):
+            return []
+
+        seen = self._active_or_pending_text_keys(memory, ops, "status_changes")
+        generated: list[dict] = []
+        for turn in evicted_turns:
+            if turn.role != "user":
+                continue
+            snippet = self._extract_status_change_snippet(turn.content)
+            if snippet is None:
+                continue
+            text = f"User stated: {snippet}"
+            if self._has_seen_text(text, seen):
+                continue
+            key = self._text_key(text)
+            seen.add(key)
+            generated.append(
+                {
+                    "op": "ADD",
+                    "section": "status_changes",
+                    "text": text,
+                    "provenance": [turn.id],
+                }
+            )
+
+        return generated
+
+    def _has_section(self, section_key: str) -> bool:
+        return any(section.key == section_key for section in self.sections)
+
+    @staticmethod
+    def _active_or_pending_text_keys(memory: Memory, ops: list[dict], section: str) -> set[str]:
+        keys = {
+            MemoryUpdater._text_key(entry.text)
+            for entry in memory.entries.values()
+            if entry.section == section and entry.status == "active"
+        }
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            if op.get("op") != "ADD" or op.get("section") != section:
+                continue
+            text = op.get("text")
+            if isinstance(text, str):
+                keys.add(MemoryUpdater._text_key(text))
+        return keys
+
+    @staticmethod
+    def _extract_exact_values(content: str) -> list[str]:
+        values: list[str] = []
+        seen: set[str] = set()
+        prose = content.split("```", 1)[0]
+        for pattern in _EXACT_VALUE_PATTERNS:
+            for match in pattern.finditer(prose):
+                value = MemoryUpdater._clean_exact_value(match.group(0))
+                if not value:
+                    continue
+                if MemoryUpdater._has_seen_text(value, seen):
+                    continue
+                key = MemoryUpdater._text_key(value)
+                seen.add(key)
+                values.append(value)
+        return values
+
+    @staticmethod
+    def _clean_exact_value(value: str) -> str:
+        value = value.strip().strip("`")
+        value = value.strip(".,;:()[]{}")
+        value = _WHITESPACE_RE.sub(" ", value).strip()
+        if value.lower() in {"chart.js"}:
+            return ""
+        return value
+
+    @staticmethod
+    def _extract_status_change_snippet(content: str) -> str | None:
+        prose = content.split("```", 1)[0]
+        match = _STATUS_CHANGE_CUE_RE.search(prose)
+        if not match:
+            return None
+
+        start = max(prose.rfind(".", 0, match.start()), prose.rfind("\n", 0, match.start()))
+        end_candidates = [
+            index
+            for index in (
+                prose.find(".", match.end()),
+                prose.find("?", match.end()),
+                prose.find("!", match.end()),
+                prose.find("\n", match.end()),
+            )
+            if index != -1
+        ]
+        start = 0 if start == -1 else start + 1
+        end = min(end_candidates) + 1 if end_candidates else len(prose)
+        snippet = _WHITESPACE_RE.sub(" ", prose[start:end]).strip()
+        snippet = snippet.rstrip(" ->")
+        if not snippet:
+            return None
+        if len(snippet) > 170:
+            snippet = snippet[:167].rstrip() + "..."
+        return snippet
+
+    @staticmethod
+    def _text_key(text: str) -> str:
+        return _WHITESPACE_RE.sub(" ", text).strip().lower()
+
+    @staticmethod
+    def _has_seen_text(text: str, seen: set[str]) -> bool:
+        key = MemoryUpdater._text_key(text)
+        return any(key == old or key in old or old in key for old in seen)
 
     @staticmethod
     def _normalize_text_provenance(op: dict) -> None:

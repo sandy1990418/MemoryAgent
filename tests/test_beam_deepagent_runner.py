@@ -1,6 +1,6 @@
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from scripts.run_beam_case_deepagent import collect_tool_trace, final_ai_text
+from scripts.run_beam_case_deepagent import build_agent_system_prompt, collect_tool_trace, final_ai_text
 
 
 def _search_call(query: str, call_id: str) -> dict:
@@ -51,3 +51,17 @@ def test_collect_tool_trace_keeps_only_search_calls_in_order():
 
     assert [entry["args"]["query"] for entry in trace] == ["alpha", "beta"]
     assert all(entry["name"] == "search_long_term_memory" for entry in trace)
+
+
+def test_deepagent_system_prompt_requires_supported_concise_answers():
+    prompt = build_agent_system_prompt(
+        structured_middleware=None,
+        active_messages=[HumanMessage(content="recent")],
+        structured_answer_tokens=500,
+        max_active_context_chars=500,
+    )
+
+    assert "Do not infer background, previous projects, user feedback" in prompt
+    assert "there is contradictory information" in prompt
+    assert "obey any requested item count exactly" in prompt
+    assert "Keep answers concise" in prompt

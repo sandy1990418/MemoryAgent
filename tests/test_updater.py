@@ -121,6 +121,91 @@ def test_exact_values_prefix_sections_are_normalized():
     assert mem.entries["V2"].text == "2026-07-07"
 
 
+def test_exact_values_are_extracted_when_llm_noops():
+    response = '[{"op": "NOOP"}]'
+    updater = make_updater(lambda system, messages: response)
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [
+            Turn(
+                id=1,
+                role="user",
+                content=(
+                    "I'm using Flask 2.3.1, SQLite 3.39, and Bootstrap 5.3. "
+                    "The homepage responds in 150ms by April 15, 2024."
+                ),
+            )
+        ],
+    )
+
+    assert rejected == []
+    assert len(applied) == 5
+    exact_values = [
+        entry.text for entry in mem.entries.values() if entry.section == "exact_values"
+    ]
+    assert exact_values == [
+        "April 15, 2024",
+        "Flask 2.3.1",
+        "SQLite 3.39",
+        "Bootstrap 5.3",
+        "150ms",
+    ]
+
+
+def test_deterministic_exact_values_dedupe_pending_llm_ops():
+    response = (
+        '[{"op": "ADD", "section": "exact_values", '
+        '"text": "Flask 2.3.1", "provenance": [1]}]'
+    )
+    updater = make_updater(lambda system, messages: response)
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [Turn(id=1, role="user", content="The app uses Flask 2.3.1.")],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert [entry.text for entry in mem.entries.values()] == ["Flask 2.3.1"]
+
+
+def test_status_change_snippets_are_extracted_with_agent_sections():
+    response = '[{"op": "NOOP"}]'
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: response),
+        sections=AGENT_SECTIONS,
+    )
+    mem = Memory(sections=AGENT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [
+            Turn(
+                id=58,
+                role="user",
+                content=(
+                    "I've never written any Flask routes or handled HTTP requests "
+                    "in this project, so I'm starting from scratch. ```python\n@app.route('/')\n```"
+                ),
+            )
+        ],
+    )
+
+    assert rejected == []
+    status_entries = [
+        entry for entry in mem.entries.values() if entry.section == "status_changes"
+    ]
+    assert len(status_entries) == 1
+    assert status_entries[0].text == (
+        "User stated: I've never written any Flask routes or handled HTTP requests "
+        "in this project, so I'm starting from scratch."
+    )
+    assert status_entries[0].provenance == [58]
+
+
 def test_numeric_update_id_is_rejected_to_avoid_turn_id_confusion():
     responses = iter(
         [

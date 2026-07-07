@@ -470,8 +470,16 @@ def answer_question(
         "it if it conflicts with # Long-Term Memory. Use # Long-Term Memory as "
         "raw supporting recall from mem0. If the answer is not supported by the "
         "provided context, say that the provided chat does not contain enough "
-        "information. Follow any remembered user instructions that are relevant "
-        "to the question."
+        "information. Do not infer background, previous projects, user feedback, "
+        "causes, or outcomes from nearby project facts; those details must be "
+        "explicitly supported. For contradiction questions, if memory contains "
+        "both a denial/correction and an affirmative project fact, explicitly "
+        "state that there is contradictory information and ask which statement "
+        "is correct. For ordering or temporal questions, use turn ids, chat ids, "
+        "and provenance to preserve chronology, and obey any requested item "
+        "count exactly. Keep answers concise and do not include tutorials or "
+        "extra implementation advice. Follow any remembered user instructions "
+        "that are relevant to the question."
     )
     topic_text = json.dumps(topic, ensure_ascii=False)
     user = (

@@ -1,4 +1,10 @@
-from scripts.run_beam_case import judge_response, normalize_judge_checks, parse_judge_response, rubric_hit
+from scripts.run_beam_case import (
+    answer_question,
+    judge_response,
+    normalize_judge_checks,
+    parse_judge_response,
+    rubric_hit,
+)
 
 
 class FakeJudgeLLM:
@@ -9,6 +15,10 @@ class FakeJudgeLLM:
     def complete(self, system, messages, model=None):
         self.calls.append({"system": system, "messages": messages, "model": model})
         return self.response
+
+
+class FakeAnswerLLM(FakeJudgeLLM):
+    pass
 
 
 def test_rubric_hit_does_not_use_numeric_shortcut_without_numbers():
@@ -91,3 +101,24 @@ def test_judge_response_returns_normalized_checks_from_llm_json():
     assert [check["passed"] for check in checks] == [True, False]
     assert llm.calls[0]["model"] == "judge-model"
     assert "impartial evaluator" in llm.calls[0]["system"]
+
+
+def test_answer_question_prompt_requires_supported_concise_answers():
+    llm = FakeAnswerLLM("ok")
+
+    response = answer_question(
+        llm=llm,
+        model="answer-model",
+        topic={"title": "Budget tracker"},
+        question_type="abstention",
+        question="Can you tell me about my previous projects?",
+        context="No retrieved memory.",
+    )
+
+    assert response == "ok"
+    assert llm.calls[0]["model"] == "answer-model"
+    system = llm.calls[0]["system"]
+    assert "Do not infer background, previous projects, user feedback" in system
+    assert "there is contradictory information" in system
+    assert "obey any requested item count exactly" in system
+    assert "Keep answers concise" in system
