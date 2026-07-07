@@ -46,6 +46,7 @@ class StructuredAgentConfig:
     thread_id: str = "react-structured-memory-demo"
     max_tokens: int = 600
     max_memory_tokens: int = 600
+    keep_messages: int = 4
 
     @classmethod
     def from_env(cls) -> "StructuredAgentConfig":
@@ -56,6 +57,7 @@ class StructuredAgentConfig:
             thread_id=os.getenv("THREAD_ID", cls.thread_id),
             max_tokens=_env_int("STRUCTURED_MAX_TOKENS", cls.max_tokens),
             max_memory_tokens=_env_int("STRUCTURED_MAX_MEMORY_TOKENS", cls.max_memory_tokens),
+            keep_messages=_env_int("STRUCTURED_KEEP_MESSAGES", cls.keep_messages),
         )
 
 
@@ -66,6 +68,7 @@ class HybridAgentConfig:
     thread_id: str = "react-hybrid-memory-demo"
     structured_max_tokens: int = 220
     structured_max_memory_tokens: int = 600
+    structured_keep_messages: int = 4
     mem0_user_id: str = "demo-user"
     mem0_data_dir: str = ".mem0"
     mem0_llm_model: str = "gpt-5.4-nano"
@@ -84,6 +87,10 @@ class HybridAgentConfig:
             structured_max_memory_tokens=_env_int(
                 "STRUCTURED_MAX_MEMORY_TOKENS",
                 cls.structured_max_memory_tokens,
+            ),
+            structured_keep_messages=_env_int(
+                "STRUCTURED_KEEP_MESSAGES",
+                cls.structured_keep_messages,
             ),
             mem0_user_id=os.getenv("MEM0_USER_ID", cls.mem0_user_id),
             mem0_data_dir=os.getenv("MEM0_DATA_DIR", cls.mem0_data_dir),

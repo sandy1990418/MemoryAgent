@@ -38,6 +38,16 @@ CHAT_SECTIONS: list[SectionConfig] = [
         title="Open Questions",
         description="Open questions that still need resolution",
     ),
+    SectionConfig(
+        key="exact_values",
+        prefix="V",
+        title="Exact Values",
+        description=(
+            "Exact values that must be preserved verbatim: numbers, quantities, "
+            "dates, versions, identifiers, file paths, URLs. Never paraphrase, "
+            "round, or reword."
+        ),
+    ),
 ]
 
 AGENT_SECTIONS: list[SectionConfig] = [

@@ -104,6 +104,7 @@ export MAIN_MODEL="openai:gpt-5.5"
 export MEMORY_MODEL="openai:gpt-5.4-mini"
 export STRUCTURED_MAX_TOKENS="220"
 export STRUCTURED_MAX_MEMORY_TOKENS="600"
+export STRUCTURED_KEEP_MESSAGES="4"
 export MEM0_LLM_MODEL="gpt-4o-mini"
 export MEM0_USER_ID="demo-user"
 export MEM0_DATA_DIR=".mem0"
@@ -148,6 +149,13 @@ python demo_react.py
 Use this path only after the simple summary version is not enough. It is useful
 when you need provenance, conflict history, or stronger guarantees that failed
 memory updates do not drop messages.
+
+Preferences and goal entries are pinned, so they are always kept in injected
+memory regardless of the token budget. The `exact_values` section preserves
+numbers, dates, versions, identifiers, paths, and URLs verbatim. Tool outputs
+are deterministically truncated before the updater LLM sees them
+(`max_tool_turn_chars`, default 2000 chars), avoiding wasted tokens on
+re-derivable output.
 
 ## Update Policy
 

@@ -39,6 +39,8 @@ def make_middleware(
     script=add_all_evicted_script,
     memory=None,
     max_memory_tokens=None,
+    keep_messages=2,
+    max_tool_turn_chars=2000,
 ):
     updater = make_updater(script)
     return StructuredMemoryMiddleware(
@@ -46,7 +48,9 @@ def make_middleware(
         updater=updater,
         max_tokens=max_tokens,
         evict_fraction=evict_fraction,
+        keep_messages=keep_messages,
         max_memory_tokens=max_memory_tokens,
+        max_tool_turn_chars=max_tool_turn_chars,
         token_counter=count_messages,
     )
 
@@ -70,6 +74,17 @@ def test_under_threshold_returns_none_but_mirrors_transcript():
 
     assert result is None
     assert len(middleware.transcript) == 3
+
+
+def test_over_budget_within_keep_messages_returns_none():
+    middleware = make_middleware(max_tokens=2, keep_messages=3)
+    messages = linear_messages(3)
+
+    result = middleware.before_model({"messages": messages}, None)
+
+    assert result is None
+    assert len(middleware.transcript) == 3
+    assert middleware.memory.entries == {}
 
 
 def test_over_threshold_evicts_and_populates_memory_with_correct_provenance():
@@ -98,6 +113,20 @@ def test_over_threshold_evicts_and_populates_memory_with_correct_provenance():
     facts_entries = [e for e in middleware.memory.entries.values() if e.section == "facts"]
     assert len(facts_entries) == 1
     assert sorted(facts_entries[0].provenance) == expected_turn_ids
+
+
+def test_after_eviction_preserves_at_least_keep_messages():
+    middleware = make_middleware(max_tokens=6, evict_fraction=0.5, keep_messages=4)
+    messages = linear_messages(10)
+
+    result = middleware.before_model({"messages": messages}, None)
+
+    assert result is not None
+    preserved = result["messages"][1:]
+    assert len(preserved) >= 4
+    assert [message.id for message in preserved] == [
+        message.id for message in messages[-len(preserved) :]
+    ]
 
 
 def test_safe_cutoff_keeps_tool_call_pairs_together():
@@ -173,6 +202,46 @@ def test_mirroring_is_idempotent_across_calls():
     assert first is None
     assert second is None
     assert len(middleware.transcript) == 3
+
+
+def test_long_tool_message_is_truncated_before_mirroring():
+    middleware = make_middleware(max_tokens=10, max_tool_turn_chars=50)
+    long_content = "x" * 120
+    message = ToolMessage(content=long_content, tool_call_id="call1", name="search")
+
+    result = middleware.before_model({"messages": [message]}, None)
+
+    assert result is None
+    turn = middleware.transcript.all()[0]
+    assert turn.role == "tool"
+    assert "[tool output truncated before memory extraction" in turn.content
+    assert long_content not in turn.content
+
+
+def test_long_human_message_is_not_truncated_before_mirroring():
+    middleware = make_middleware(max_tokens=10, max_tool_turn_chars=50)
+    long_content = "x" * 120
+    message = HumanMessage(content=long_content)
+
+    result = middleware.before_model({"messages": [message]}, None)
+
+    assert result is None
+    turn = middleware.transcript.all()[0]
+    assert turn.role == "user"
+    assert turn.content == long_content
+
+
+def test_tool_truncation_can_be_disabled():
+    middleware = make_middleware(max_tokens=10, max_tool_turn_chars=None)
+    long_content = "x" * 120
+    message = ToolMessage(content=long_content, tool_call_id="call1", name="search")
+
+    result = middleware.before_model({"messages": [message]}, None)
+
+    assert result is None
+    turn = middleware.transcript.all()[0]
+    assert turn.role == "tool"
+    assert turn.content == f"[search] {long_content}"
 
 
 def test_wrap_model_call_injects_rendered_memory_into_system_prompt():

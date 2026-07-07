@@ -82,6 +82,7 @@ def build_structured_middleware(config: StructuredAgentConfig) -> StructuredMemo
         memory=memory,
         updater=updater,
         max_tokens=config.max_tokens,
+        keep_messages=config.keep_messages,
         max_memory_tokens=config.max_memory_tokens,
     )
 
@@ -107,6 +108,7 @@ def _structured_config_from_hybrid(config: HybridAgentConfig) -> StructuredAgent
         thread_id=config.thread_id,
         max_tokens=config.structured_max_tokens,
         max_memory_tokens=config.structured_max_memory_tokens,
+        keep_messages=config.structured_keep_messages,
     )
 
 

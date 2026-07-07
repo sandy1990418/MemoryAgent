@@ -56,6 +56,7 @@ class BeamRunConfig:
     structured_max_memory_tokens: int = 3000
     structured_answer_tokens: int = 4000
     structured_evict_fraction: float = 0.5
+    structured_keep_messages: int = 2
     structured_flush_final: bool = True
     mem0_llm_model: str = "gpt-4o-mini"
 
@@ -436,6 +437,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             ),
             max_tokens=args.structured_max_tokens,
             evict_fraction=args.structured_evict_fraction,
+            keep_messages=args.structured_keep_messages,
             max_memory_tokens=args.structured_max_memory_tokens,
         )
 
@@ -615,6 +617,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--structured-max-memory-tokens", type=int, default=3000)
     parser.add_argument("--structured-answer-tokens", type=int, default=4000)
     parser.add_argument("--structured-evict-fraction", type=float, default=0.5)
+    parser.add_argument("--structured-keep-messages", type=int, default=2)
     parser.add_argument("--no-structured-flush-final", dest="structured_flush_final", action="store_false")
     parser.set_defaults(structured_flush_final=True)
     parser.add_argument("--mem0-llm-model", default=os.getenv("MEM0_LLM_MODEL", "gpt-4o-mini"))

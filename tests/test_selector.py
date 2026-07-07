@@ -68,10 +68,55 @@ def test_selector_excludes_superseded_entries():
 
 def test_render_can_render_only_selected_entries():
     memory = make_memory()
-    selector = MemorySelector(token_estimator=count_entries)
+    selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())
 
     selected = selector.select(memory=memory, query="favorite color green is", max_tokens=1)
     rendered = memory.render(entries=selected)
 
     assert "favorite color is green" in rendered
     assert "use file storage" not in rendered
+
+
+def test_pinned_preferences_win_budget_over_relevant_fact():
+    memory = make_memory()
+    selector = MemorySelector(token_estimator=count_entries)
+
+    selected = selector.select(memory=memory, query="favorite color green is", max_tokens=1)
+
+    selected_ids = [entry.id for entry in selected]
+    assert "U1" in selected_ids
+    assert "F1" not in selected_ids
+
+
+def test_empty_pinned_sections_restores_pure_budget_behavior():
+    memory = make_memory()
+    selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())
+
+    selected = selector.select(
+        memory=memory,
+        query="What did we decide about storage for the cache?",
+        max_tokens=1,
+    )
+
+    assert [entry.id for entry in selected] == ["D1"]
+
+
+def test_pinned_entry_is_included_even_when_over_budget_alone():
+    memory = Memory(sections=CHAT_SECTIONS)
+    applied, rejected = memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "preferences",
+                "text": "prefers a very detailed explanation with all relevant tradeoffs",
+                "provenance": [1],
+            }
+        ]
+    )
+    assert rejected == []
+    assert len(applied) == 1
+    selector = MemorySelector(token_estimator=count_entries)
+
+    selected = selector.select(memory=memory, query="anything", max_tokens=0)
+
+    assert [entry.id for entry in selected] == ["U1"]

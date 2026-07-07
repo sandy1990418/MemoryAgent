@@ -104,8 +104,8 @@ class StructuredMemoryMiddleware(AgentMiddleware):
     Borrows `SummarizationMiddleware`'s safe-cutoff and message-id mechanics
     (see module docstring) but hands evicted messages to a `MemoryUpdater`
     instead of an LLM summarization call, and never loses messages on
-    failure. The rendered memory is injected into the system prompt on every
-    model call.
+    failure. At least `keep_messages` recent messages are preserved verbatim.
+    The rendered memory is injected into the system prompt on every model call.
     """
 
     def __init__(
@@ -114,7 +114,9 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         updater: MemoryUpdater,
         max_tokens: int,
         evict_fraction: float = 0.5,
+        keep_messages: int = 20,
         max_memory_tokens: int | None = None,
+        max_tool_turn_chars: int | None = 2000,
         transcript: Transcript | None = None,
         token_counter: TokenCounter = count_tokens_approximately,
         memory_selector: MemorySelector | None = None,
@@ -124,9 +126,11 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         self.updater = updater
         self.max_tokens = max_tokens
         self.evict_fraction = evict_fraction
+        self.keep_messages = keep_messages
         self.max_memory_tokens = (
             max_memory_tokens if max_memory_tokens is not None else max_tokens // 2
         )
+        self.max_tool_turn_chars = max_tool_turn_chars
         self.transcript = transcript if transcript is not None else Transcript()
         self.token_counter = token_counter
         self.memory_selector = memory_selector or MemorySelector(token_estimator=_char_token_estimator)
@@ -142,11 +146,27 @@ class StructuredMemoryMiddleware(AgentMiddleware):
                 message.id = str(uuid.uuid4())
 
     def _mirror_messages(self, messages: list[AnyMessage]) -> None:
-        """Mirror not-yet-seen messages into the transcript. Idempotent."""
+        """Mirror not-yet-seen messages into the transcript. Idempotent.
+
+        Tool output is deterministically bounded before updater-LLM extraction.
+        Tool results are re-derivable by re-running the tool, so sending huge
+        outputs to the updater wastes tokens and risks invented details from
+        paraphrase or truncation.
+        """
         for message in messages:
             if message.id in self._turn_id_by_message_id:
                 continue
             role, content = _message_to_turn_fields(message)
+            if (
+                role == "tool"
+                and self.max_tool_turn_chars is not None
+                and len(content) > self.max_tool_turn_chars
+            ):
+                content = (
+                    content[: self.max_tool_turn_chars]
+                    + "\n[tool output truncated before memory extraction; "
+                    "re-run the tool for the full output]"
+                )
             turn = self.transcript.append(role, content)
             self._turn_id_by_message_id[message.id] = turn.id
 
@@ -191,8 +211,8 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         Uses the same binary-search-for-a-token-budget shape as
         `SummarizationMiddleware._find_token_based_cutoff`, targeting
         `max_tokens * (1 - evict_fraction)` tokens remaining, then snaps to a
-        safe cutoff via `_find_safe_cutoff_point`. Always leaves at least the
-        2 most recent messages preserved.
+        safe cutoff via `_find_safe_cutoff_point`. Always leaves at least
+        `keep_messages` recent messages preserved when that many exist.
         """
         if not messages:
             return 0
@@ -222,7 +242,7 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         if cutoff_candidate >= len(messages):
             cutoff_candidate = len(messages) - 1 if len(messages) > 1 else 0
 
-        min_preserved = min(2, len(messages))
+        min_preserved = min(self.keep_messages, len(messages))
         max_cutoff = len(messages) - min_preserved
         cutoff_candidate = min(cutoff_candidate, max_cutoff)
         if cutoff_candidate <= 0:
@@ -231,8 +251,8 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         safe_cutoff = self._find_safe_cutoff_point(messages, cutoff_candidate)
         if safe_cutoff > max_cutoff:
             # The fallback branch of _find_safe_cutoff_point advanced past a
-            # run of orphaned ToolMessages; respect the "keep at least 2"
-            # floor instead by walking back to the nearest non-ToolMessage.
+            # run of orphaned ToolMessages; respect the configured tail floor
+            # instead by walking back to the nearest non-ToolMessage.
             safe_cutoff = max_cutoff
             while safe_cutoff > 0 and isinstance(messages[safe_cutoff], ToolMessage):
                 safe_cutoff -= 1

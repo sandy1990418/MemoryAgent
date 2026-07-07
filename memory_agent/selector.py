@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterable
 
 from memory_agent.memory import Memory, MemoryEntry
 
@@ -31,12 +31,16 @@ class MemorySelector:
 
     This is intentionally deterministic. It is not semantic search and does not
     need embeddings. The goal is to stop blindly rendering every active memory
-    entry once a single session grows large.
+    entry once a single session grows large. Entries in pinned sections are
+    always selected even when they exceed the nominal prompt budget.
     """
+
+    DEFAULT_PINNED_SECTIONS = frozenset({"preferences", "goal"})
 
     DEFAULT_SECTION_PRIORITIES: dict[str, float] = {
         "preferences": 100.0,
         "goal": 95.0,
+        "exact_values": 92.0,
         "progress": 90.0,
         "open_questions": 85.0,
         "decisions": 80.0,
@@ -49,11 +53,17 @@ class MemorySelector:
         self,
         section_priorities: dict[str, float] | None = None,
         token_estimator: Callable[[str], int] | None = None,
+        pinned_sections: Iterable[str] | None = None,
     ) -> None:
         self.section_priorities = dict(self.DEFAULT_SECTION_PRIORITIES)
         if section_priorities:
             self.section_priorities.update(section_priorities)
         self.token_estimator = token_estimator or _default_token_estimator
+        self.pinned_sections = (
+            self.DEFAULT_PINNED_SECTIONS
+            if pinned_sections is None
+            else frozenset(pinned_sections)
+        )
 
     def select(
         self,
@@ -88,13 +98,25 @@ class MemorySelector:
         if max_tokens is None:
             return candidates
 
-        selected: list[SelectedMemory] = []
+        # Pinned sections are a hard guarantee: include them even if rendering
+        # them alone exceeds max_tokens. Budget only gates non-pinned entries.
+        pinned_ids = {
+            candidate.entry.id
+            for candidate in candidates
+            if candidate.entry.section in self.pinned_sections
+        }
+        selected_ids = set(pinned_ids)
         for candidate in candidates:
-            projected_entries = [item.entry for item in selected] + [candidate.entry]
+            if candidate.entry.id in pinned_ids:
+                continue
+            projected_ids = selected_ids | {candidate.entry.id}
+            projected_entries = [
+                item.entry for item in candidates if item.entry.id in projected_ids
+            ]
             rendered = memory.render(entries=projected_entries)
             if self.token_estimator(rendered) <= max_tokens:
-                selected.append(candidate)
-        return selected
+                selected_ids.add(candidate.entry.id)
+        return [candidate for candidate in candidates if candidate.entry.id in selected_ids]
 
     def _score(self, entry: MemoryEntry, query_tokens: set[str]) -> SelectedMemory:
         score = self.section_priorities.get(entry.section, 40.0)

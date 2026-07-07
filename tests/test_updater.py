@@ -1,7 +1,7 @@
 import pytest
 
 from memory_agent.memory import Memory
-from memory_agent.sections import CHAT_SECTIONS
+from memory_agent.sections import AGENT_SECTIONS, CHAT_SECTIONS
 from memory_agent.transcript import Turn
 from memory_agent.updater import MemoryUpdater, UpdateFailed
 from tests.fakes import ScriptedLLM
@@ -57,6 +57,68 @@ def test_prefix_op_with_add_payload_is_normalized_to_add():
     assert len(applied) == 1
     assert mem.entries["F1"].section == "facts"
     assert mem.entries["F1"].text == "SQLite database is configured"
+
+
+def test_exact_values_rule_is_included_in_prompt():
+    updater = make_updater(lambda system, messages: '[{"op": "NOOP"}]')
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    system, _messages = updater._build_prompt(
+        mem,
+        [Turn(id=1, role="user", content="The version is 1.2.3.")],
+    )
+
+    assert "MUST be captured verbatim in the exact_values section" in system
+
+
+def test_exact_values_add_applies_with_agent_sections():
+    mem = Memory(sections=AGENT_SECTIONS)
+
+    applied, rejected = mem.apply_ops_atomically(
+        [
+            {
+                "op": "ADD",
+                "section": "exact_values",
+                "text": "Node version is 22.11.0",
+                "provenance": [1],
+            }
+        ]
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert mem.entries["V1"].section == "exact_values"
+    assert mem.entries["V1"].text == "Node version is 22.11.0"
+
+
+def test_exact_values_prefix_sections_are_normalized():
+    responses = iter(
+        [
+            '[{"op": "ADD", "section": "V", "text": "/tmp/report.json", "provenance": [1]}]',
+            '[{"op": "ADD", "section": "v", "text": "2026-07-07", "provenance": [2]}]',
+        ]
+    )
+    updater = make_updater(lambda system, messages: next(responses))
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [Turn(id=1, role="user", content="The path is /tmp/report.json")],
+    )
+    assert rejected == []
+    assert len(applied) == 1
+
+    applied, rejected = updater.update(
+        mem,
+        [Turn(id=2, role="user", content="The date is 2026-07-07")],
+    )
+    assert rejected == []
+    assert len(applied) == 1
+
+    assert mem.entries["V1"].section == "exact_values"
+    assert mem.entries["V1"].text == "/tmp/report.json"
+    assert mem.entries["V2"].section == "exact_values"
+    assert mem.entries["V2"].text == "2026-07-07"
 
 
 def test_numeric_update_id_is_normalized_when_unique():
