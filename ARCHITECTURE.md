@@ -368,6 +368,17 @@ Memory quality policy:
   important after the turn. Ordinary one-off help requests should usually be
   `NOOP` or become concise `facts`/`progress` only when they contain durable
   state.
+- `status_changes` captures contradictions, corrections, reversals, denials,
+  and latest-vs-previous truths. This section is intentionally rendered before
+  generic facts so contradiction-resolution questions can see it.
+- `timeline` captures ordered milestones and event sequences. This section is
+  intentionally rendered before generic facts/open questions so chronology
+  questions can see it.
+
+BEAM answering uses question-specific structured-memory selection before
+building the answer context. This prevents generic facts and open questions
+from crowding out status-change or timeline entries that are relevant to a
+specific probing question.
 
 ## Configuration Flow
 

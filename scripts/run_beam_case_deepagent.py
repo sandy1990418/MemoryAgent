@@ -162,11 +162,27 @@ def ask_agent(
     question_type: str,
     question: str,
     recursion_limit: int,
+    structured_middleware: StructuredMemoryMiddleware | None = None,
+    structured_answer_tokens: int = 4000,
 ) -> tuple[str, list[dict[str, Any]], int]:
     topic_text = json.dumps(topic, ensure_ascii=False)
+    if structured_middleware is None:
+        relevant_memory = "(StructuredMemoryMiddleware was not used.)"
+    else:
+        selected_entries = structured_middleware.memory_selector.select(
+            memory=structured_middleware.memory,
+            query=question,
+            max_tokens=structured_answer_tokens,
+        )
+        relevant_memory = (
+            structured_middleware.memory.render(entries=selected_entries)
+            or "(No relevant structured memory entries.)"
+        )
     user = (
         f"Topic metadata:\n{topic_text}\n\n"
         f"Question type: {question_type}\n\n"
+        "# Question-Relevant Structured Memory\n"
+        f"{relevant_memory}\n\n"
         f"Probing question:\n{question}\n\n"
         f"Use the {SEARCH_TOOL_NAME} tool to retrieve supporting evidence "
         "before you answer."
@@ -334,6 +350,8 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
                 question_type=question_type,
                 question=question,
                 recursion_limit=args.recursion_limit,
+                structured_middleware=structured_middleware,
+                structured_answer_tokens=args.structured_answer_tokens,
             )
             total_tool_calls += len(tool_trace)
             rubric_checks = [rubric_hit(response, line) for line in item.get("rubric", [])]

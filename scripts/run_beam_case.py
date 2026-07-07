@@ -399,15 +399,21 @@ def build_answer_context(
     max_hit_chars: int,
     max_active_context_chars: int,
     structured_answer_tokens: int,
+    query: str = "",
 ) -> str:
     if structured_middleware is None:
         conversation_memory = "(StructuredMemoryMiddleware was not used.)"
         working_tail = "(No structured working-context tail.)"
     else:
-        conversation_memory = structured_middleware.memory.render(
+        selected_entries = structured_middleware.memory_selector.select(
+            memory=structured_middleware.memory,
+            query=query,
             max_tokens=structured_answer_tokens,
-            include_superseded=True,
-        ) or "(No structured memory entries.)"
+        )
+        conversation_memory = (
+            structured_middleware.memory.render(entries=selected_entries)
+            or "(No relevant structured memory entries.)"
+        )
         working_tail = render_message_tail(active_messages, max_active_context_chars)
 
     return (
@@ -621,6 +627,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                     max_hit_chars=args.max_hit_chars,
                     max_active_context_chars=args.max_active_context_chars,
                     structured_answer_tokens=args.structured_answer_tokens,
+                    query=question,
                 ),
             )
             rubric_checks = [rubric_hit(response, line) for line in item.get("rubric", [])]

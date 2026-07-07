@@ -386,9 +386,11 @@ def test_prompt_includes_memory_quality_rules():
     system = captured["system"]
     assert "Keep entries atomic and concise" in system
     assert "Do not save generic assistant advice" in system
+    assert "Do not infer missing details" in system
     assert "Do not turn every user request into an open question" in system
     assert "Preserve exact dates, versions, counts" in system
     assert "Use status_changes for explicit contradictions" in system
+    assert "I never" in system
     assert "Use timeline for ordered phases" in system
 
 
