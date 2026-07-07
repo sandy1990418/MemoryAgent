@@ -28,7 +28,8 @@ class MemorySelector:
     always selected even when they exceed the nominal prompt budget.
     """
 
-    DEFAULT_PINNED_SECTIONS = frozenset({"preferences", "goal"})
+    # Status changes are rare, high-value contradiction/correction records.
+    DEFAULT_PINNED_SECTIONS = frozenset({"preferences", "goal", "status_changes"})
 
     DEFAULT_SECTION_PRIORITIES: dict[str, float] = {
         "preferences": 100.0,

@@ -85,8 +85,10 @@ TIMELINE = SectionConfig(
     prefix="M",
     title="Timeline",
     description=(
-        "Ordered project milestones, dates, phases, and event sequences that "
-        "may be needed to answer chronology questions."
+        "Explicitly stated dated milestones or phase plans (e.g., 'Phase 2: "
+        "Nov 16 - Dec 15'). Do not use this section to record which topic the "
+        "user raised first - that ordering is derived automatically from each "
+        "entry's turn provenance and needs no separate entry here."
     ),
 )
 

@@ -144,3 +144,105 @@ def test_render_excludes_superseded_by_default_and_includes_on_request():
     assert "use file storage" in full_render
     assert "Superseded" in full_render
     assert "switched to file storage" in full_render
+
+
+def test_render_chronological_empty_memory_returns_empty_string():
+    mem = make_memory()
+
+    assert mem.render_chronological() == ""
+
+
+def test_render_chronological_orders_entries_by_first_provenance_across_sections():
+    mem = make_memory()
+    mem.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "decisions",
+                "text": "later decision",
+                "provenance": [20],
+            },
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "earliest fact",
+                "provenance": [5, 9],
+            },
+            {
+                "op": "ADD",
+                "section": "preferences",
+                "text": "middle preference",
+                "provenance": [10],
+            },
+        ]
+    )
+
+    rendered = mem.render_chronological()
+
+    assert rendered.index("[F1] earliest fact") < rendered.index("[U1] middle preference")
+    assert rendered.index("[U1] middle preference") < rendered.index("[D1] later decision")
+
+
+def test_render_chronological_ties_fall_back_to_entry_id():
+    mem = make_memory()
+    mem.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "second id same turn",
+                "provenance": [7],
+            },
+            {
+                "op": "ADD",
+                "section": "decisions",
+                "text": "first id same turn",
+                "provenance": [7],
+            },
+        ]
+    )
+
+    rendered = mem.render_chronological()
+
+    assert rendered.index("[D1] first id same turn") < rendered.index("[F1] second id same turn")
+
+
+def test_render_chronological_budget_keeps_contiguous_prefix_and_footer():
+    mem = make_memory()
+    mem.apply_ops(
+        [
+            {"op": "ADD", "section": "facts", "text": "first", "provenance": [1]},
+            {"op": "ADD", "section": "facts", "text": "second", "provenance": [2]},
+            {"op": "ADD", "section": "facts", "text": "third", "provenance": [3]},
+        ]
+    )
+
+    rendered = mem.render_chronological(
+        max_tokens=3,
+        token_estimator=lambda text: text.count("\n") + 1,
+    )
+
+    assert "[F1] first" in rendered
+    assert "[F2] second" in rendered
+    assert "[F3] third" not in rendered
+    assert "1 memory item(s) omitted because of the token budget." in rendered
+
+
+def test_render_chronological_can_exclude_sections():
+    mem = make_memory()
+    mem.apply_ops(
+        [
+            {"op": "ADD", "section": "facts", "text": "topical fact", "provenance": [3]},
+            {
+                "op": "ADD",
+                "section": "exact_values",
+                "text": "Flask 2.3.1",
+                "provenance": [1],
+            },
+        ]
+    )
+
+    rendered = mem.render_chronological(exclude_sections={"exact_values"})
+
+    assert "topical fact" in rendered
+    assert "Flask 2.3.1" not in rendered

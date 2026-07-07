@@ -229,6 +229,52 @@ class Memory:
 
         return "\n".join(lines).rstrip("\n")
 
+    def render_chronological(
+        self,
+        entries: list[MemoryEntry] | None = None,
+        max_tokens: int | None = None,
+        token_estimator: Callable[[str], int] | None = None,
+        exclude_sections: frozenset[str] | set[str] | None = None,
+    ) -> str:
+        estimator = token_estimator or _default_token_estimator
+        source_entries = list(self.entries.values()) if entries is None else list(entries)
+        active_entries = [
+            entry
+            for entry in source_entries
+            if entry.status == "active"
+            and (exclude_sections is None or entry.section not in exclude_sections)
+        ]
+        if not active_entries:
+            return ""
+
+        sorted_entries = sorted(
+            active_entries,
+            key=lambda entry: (
+                min(entry.provenance) if entry.provenance else float("inf"),
+                entry.id,
+            ),
+        )
+        lines = ["## Chronological Order (earliest mention first)"]
+        omitted = 0
+
+        for entry in sorted_entries:
+            line = f"- [{entry.id}] {entry.text} {self._format_provenance(entry.provenance)}"
+            if max_tokens is None:
+                lines.append(line)
+                continue
+
+            projected = "\n".join([*lines, line]).rstrip("\n")
+            if estimator(projected) <= max_tokens:
+                lines.append(line)
+            else:
+                omitted = len(sorted_entries) - (len(lines) - 1)
+                break
+
+        if omitted:
+            lines.append(f"{omitted} memory item(s) omitted because of the token budget.")
+
+        return "\n".join(lines).rstrip("\n")
+
     @staticmethod
     def _format_provenance(provenance: list[int]) -> str:
         if not provenance:

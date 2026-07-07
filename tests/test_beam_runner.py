@@ -1,5 +1,13 @@
+from types import SimpleNamespace
+
+from langchain_core.messages import HumanMessage
+
+from memory_agent.models.sections import CHAT_SECTIONS
+from memory_agent.structured.memory import Memory
+from memory_agent.structured.selector import MemorySelector
 from scripts.run_beam_case import (
     answer_question,
+    build_answer_context,
     judge_response,
     normalize_judge_checks,
     parse_judge_response,
@@ -122,3 +130,46 @@ def test_answer_question_prompt_requires_supported_concise_answers():
     assert "there is contradictory information" in system
     assert "obey any requested item count exactly" in system
     assert "Keep answers concise" in system
+
+
+def test_build_answer_context_includes_chronological_order_block():
+    memory = Memory(sections=CHAT_SECTIONS)
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "first topic was Flask routing",
+                "provenance": [4],
+            },
+            {
+                "op": "ADD",
+                "section": "decisions",
+                "text": "second topic was deployment",
+                "provenance": [8],
+            },
+        ]
+    )
+    structured_middleware = SimpleNamespace(
+        memory=memory,
+        memory_selector=MemorySelector(),
+    )
+
+    context = build_answer_context(
+        structured_middleware=structured_middleware,
+        active_messages=[HumanMessage(content="recent")],
+        hits=[],
+        max_hit_chars=500,
+        max_active_context_chars=500,
+        structured_answer_tokens=500,
+        query="What came first?",
+    )
+
+    assert "# Chronological Order" in context
+    assert "Entries ordered by when they were first mentioned" in context
+    chronological_block = context.split("# Chronological Order", 1)[1].split(
+        "# Working Conversation Tail", 1
+    )[0]
+    assert chronological_block.index("[F1] first topic was Flask routing") < chronological_block.index(
+        "[D1] second topic was deployment"
+    )

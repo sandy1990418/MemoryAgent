@@ -198,9 +198,8 @@ class MemoryUpdater:
             "\"which is correct\". Include the subject and latest truth; "
             "SUPERSEDE the old active entry only when its exact id appears in "
             "Current memory.\n"
-            "   - Use timeline for ordered phases, dates, milestones, and event "
-            "sequences. This should support questions asking what happened first, "
-            "next, or in chronological order.\n"
+            "   - Use timeline only for explicitly stated dated or staged "
+            "milestones, phases, and plans, not for general topic-raise ordering.\n"
             "16. Respond with a JSON array of ops only. Do not include prose, markdown, "
             "or explanations.\n\n"
             "Current memory, including superseded entries:\n"
@@ -219,6 +218,11 @@ class MemoryUpdater:
         return system, messages
 
     def update(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[list[dict], list[dict]]:
+        deterministic_ops = self._deterministic_ops(memory, evicted_turns)
+        det_applied: list[dict] = []
+        if deterministic_ops:
+            det_applied, _det_rejected = memory.apply_ops_atomically(deterministic_ops)
+
         system, messages = self._build_prompt(memory, evicted_turns)
 
         last_rejected: list[dict] = []
@@ -232,7 +236,12 @@ class MemoryUpdater:
             if ops is None:
                 raise UpdateFailed(f"Could not parse a JSON ops array from LLM response: {response!r}")
             ops = self._normalize_ops(ops, memory)
-            ops = self._with_deterministic_extracts(ops, memory, evicted_turns)
+            ops = self._drop_duplicate_deterministic_adds(ops, memory)
+            ops = [
+                op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
+            ]
+            if not ops:
+                return det_applied, []
 
             provenance_rejections = self._validate_provenance(ops, evicted_turns)
             if provenance_rejections:
@@ -241,13 +250,13 @@ class MemoryUpdater:
                 applied, rejected = memory.apply_ops_atomically(ops)
 
             if not rejected:
-                return applied, []
+                return det_applied + applied, []
 
             last_rejected = rejected
             if attempt < self.max_retries:
                 messages = self._retry_messages(messages, ops, rejected)
 
-        return [], last_rejected
+        return det_applied, last_rejected
 
     @staticmethod
     def _retry_messages(messages: list[dict], ops: list[dict], rejected: list[dict]) -> list[dict]:
@@ -309,33 +318,21 @@ class MemoryUpdater:
             normalized_ops.append(normalized)
         return normalized_ops
 
-    def _with_deterministic_extracts(
-        self,
-        ops: list[dict],
-        memory: Memory,
-        evicted_turns: list[Turn],
-    ) -> list[dict]:
-        generated_ops = [
-            *self._deterministic_exact_value_ops(ops, memory, evicted_turns),
-            *self._deterministic_status_change_ops(ops, memory, evicted_turns),
+    def _deterministic_ops(self, memory: Memory, evicted_turns: list[Turn]) -> list[dict]:
+        return [
+            *self._deterministic_exact_value_ops(memory, evicted_turns),
+            *self._deterministic_status_change_ops(memory, evicted_turns),
         ]
-        if not generated_ops:
-            return ops
-        non_noop_ops = [
-            op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
-        ]
-        return [*non_noop_ops, *generated_ops]
 
     def _deterministic_exact_value_ops(
         self,
-        ops: list[dict],
         memory: Memory,
         evicted_turns: list[Turn],
     ) -> list[dict]:
         if not self._has_section("exact_values"):
             return []
 
-        seen = self._active_or_pending_text_keys(memory, ops, "exact_values")
+        seen = self._active_text_keys(memory, "exact_values")
         generated: list[dict] = []
         for turn in evicted_turns:
             if turn.role != "user":
@@ -358,14 +355,13 @@ class MemoryUpdater:
 
     def _deterministic_status_change_ops(
         self,
-        ops: list[dict],
         memory: Memory,
         evicted_turns: list[Turn],
     ) -> list[dict]:
         if not self._has_section("status_changes"):
             return []
 
-        seen = self._active_or_pending_text_keys(memory, ops, "status_changes")
+        seen = self._active_text_keys(memory, "status_changes")
         generated: list[dict] = []
         for turn in evicted_turns:
             if turn.role != "user":
@@ -389,25 +385,43 @@ class MemoryUpdater:
 
         return generated
 
+    def _drop_duplicate_deterministic_adds(self, ops: list[dict], memory: Memory) -> list[dict]:
+        relevant_sections = {"exact_values", "status_changes"}
+        active_keys_by_section: dict[str, set[str]] = {}
+        filtered: list[dict] = []
+
+        for op in ops:
+            if not isinstance(op, dict):
+                filtered.append(op)
+                continue
+            if op.get("op") != "ADD" or op.get("section") not in relevant_sections:
+                filtered.append(op)
+                continue
+
+            section = op["section"]
+            text = op.get("text")
+            if not isinstance(text, str):
+                filtered.append(op)
+                continue
+
+            if section not in active_keys_by_section:
+                active_keys_by_section[section] = self._active_text_keys(memory, section)
+            if self._has_seen_text(text, active_keys_by_section[section]):
+                continue
+            filtered.append(op)
+
+        return filtered
+
     def _has_section(self, section_key: str) -> bool:
         return any(section.key == section_key for section in self.sections)
 
     @staticmethod
-    def _active_or_pending_text_keys(memory: Memory, ops: list[dict], section: str) -> set[str]:
-        keys = {
+    def _active_text_keys(memory: Memory, section: str) -> set[str]:
+        return {
             MemoryUpdater._text_key(entry.text)
             for entry in memory.entries.values()
             if entry.section == section and entry.status == "active"
         }
-        for op in ops:
-            if not isinstance(op, dict):
-                continue
-            if op.get("op") != "ADD" or op.get("section") != section:
-                continue
-            text = op.get("text")
-            if isinstance(text, str):
-                keys.add(MemoryUpdater._text_key(text))
-        return keys
 
     @staticmethod
     def _extract_exact_values(content: str) -> list[str]:
@@ -460,7 +474,19 @@ class MemoryUpdater:
         if not snippet:
             return None
         if len(snippet) > 170:
-            snippet = snippet[:167].rstrip() + "..."
+            cue = _STATUS_CHANGE_CUE_RE.search(snippet)
+            if cue is None:
+                snippet = snippet[:167].rstrip() + "..."
+            else:
+                # Center the truncation window on the cue so the negation or
+                # correction phrase (and its nearby subject) always survives;
+                # a head-anchored cut can drop a cue sitting late in a long
+                # run-on sentence.
+                window_start = max(0, cue.start() - 60)
+                window_end = min(len(snippet), cue.end() + 110)
+                head = "..." if window_start > 0 else ""
+                tail = "..." if window_end < len(snippet) else ""
+                snippet = head + snippet[window_start:window_end].strip() + tail
         return snippet
 
     @staticmethod

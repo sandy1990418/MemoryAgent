@@ -154,7 +154,7 @@ def test_exact_values_are_extracted_when_llm_noops():
     ]
 
 
-def test_deterministic_exact_values_dedupe_pending_llm_ops():
+def test_llm_duplicate_add_of_deterministic_value_is_dropped():
     response = (
         '[{"op": "ADD", "section": "exact_values", '
         '"text": "Flask 2.3.1", "provenance": [1]}]'
@@ -195,6 +195,41 @@ def test_status_change_snippets_are_extracted_with_agent_sections():
     )
 
     assert rejected == []
+    status_entries = [
+        entry for entry in mem.entries.values() if entry.section == "status_changes"
+    ]
+    assert len(status_entries) == 1
+    assert status_entries[0].text == (
+        "User stated: I've never written any Flask routes or handled HTTP requests "
+        "in this project, so I'm starting from scratch."
+    )
+    assert status_entries[0].provenance == [58]
+
+
+def test_deterministic_status_change_survives_rejected_llm_batch():
+    response = '[{"op": "UPDATE", "id": "C999", "text": "bad update", "provenance": [58]}]'
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: response),
+        sections=AGENT_SECTIONS,
+    )
+    mem = Memory(sections=AGENT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [
+            Turn(
+                id=58,
+                role="user",
+                content=(
+                    "I've never written any Flask routes or handled HTTP requests "
+                    "in this project, so I'm starting from scratch."
+                ),
+            )
+        ],
+    )
+
+    assert len(applied) == 1
+    assert len(rejected) == 1
     status_entries = [
         entry for entry in mem.entries.values() if entry.section == "status_changes"
     ]
@@ -476,7 +511,7 @@ def test_prompt_includes_memory_quality_rules():
     assert "Preserve exact dates, versions, counts" in system
     assert "Use status_changes for explicit contradictions" in system
     assert "I never" in system
-    assert "Use timeline for ordered phases" in system
+    assert "Use timeline only for explicitly stated dated or staged milestones" in system
 
 
 def test_transport_error_raises_update_failed():
@@ -489,3 +524,25 @@ def test_transport_error_raises_update_failed():
 
     with pytest.raises(UpdateFailed):
         updater.update(mem, turns)
+
+
+def test_status_change_snippet_truncation_keeps_late_cue_phrase():
+    """A cue buried past char 170 of a run-on sentence must survive truncation.
+
+    Regression: turn 108 of the BEAM 100K case buries "never actually
+    integrated" ~150 chars into one long sentence; a head-anchored cut
+    dropped the denial and stored only the sentence's unrelated opening.
+    """
+    padding = (
+        "I'm trying to optimize the dashboard API response time, which has "
+        "recently improved to 250ms after adding some caching tweaks, but I "
+        "want to make sure I'm using the latest versions of my dependencies, "
+        "like Flask-Login, which I've never actually integrated into this "
+        "project, so I'm starting from scratch - can you help me implement "
+        "user session management with Flask-Login 0.6.2"
+    )
+    snippet = MemoryUpdater._extract_status_change_snippet(padding)
+
+    assert snippet is not None
+    assert "never" in snippet
+    assert "Flask-Login" in snippet

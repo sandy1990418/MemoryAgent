@@ -122,8 +122,11 @@ def build_agent_system_prompt(
     return (
         "You answer BEAM long-term-memory probing questions.\n"
         f"Always call the {SEARCH_TOOL_NAME} tool to gather supporting recall "
-        "before answering; issue multiple searches with different phrasings "
-        "when one search does not cover the question. Use only the # Conversation "
+        "before answering. First decompose the question into its distinct "
+        "facets (sub-topics, features, time periods, or claimed items), then "
+        "issue one search per facet: at least 2 searches for any question, and "
+        "at least 4 for comprehensive summary or multi-part questions (pass "
+        "limit=12 for broad questions). Use only the # Conversation "
         "Memory and # Working Conversation Tail sections below plus what the tool "
         "returns. The # Conversation Memory section is the structured current "
         "state produced by StructuredMemoryMiddleware; prefer it if it conflicts "
@@ -131,13 +134,38 @@ def build_agent_system_prompt(
         "context, say that the provided chat does not contain enough information. "
         "Do not infer background, previous projects, user feedback, causes, or "
         "outcomes from nearby project facts; those details must be explicitly "
-        "supported. For contradiction questions, if memory contains both a "
+        "supported. When a question asks about something never explicitly "
+        "discussed (personal background, earlier projects, feedback details), "
+        "composing an answer from adjacent or current-project facts is wrong: "
+        "abstain and say the information is not in the chat. "
+        "For contradiction questions, if memory contains both a "
         "denial/correction and an affirmative project fact, explicitly state "
         "that there is contradictory information and ask which statement is "
-        "correct. For ordering or temporal questions, use turn ids, chat ids, "
-        "and provenance to preserve chronology, and obey any requested item "
-        "count exactly. Keep answers concise and do not include tutorials or "
-        "extra implementation advice. Follow any remembered user instructions "
+        "correct. For contradiction_resolution questions specifically, always "
+        "issue at least two searches before answering: one for the topic as "
+        "asked, and a second using negation phrasing (e.g., 'never', 'have not', "
+        "'not yet', 'no longer') to check whether the user also denied, "
+        "corrected, or reversed that claim elsewhere. Only conclude there is no "
+        "contradiction after both searches turn up consistent information. "
+        "For ordering or temporal questions, answer from the # Chronological "
+        "Order section in the question message: it reflects the order topics "
+        "were actually first raised. Do not answer from planned schedules or "
+        "phase plans found in timeline entries. Use turn ids, chat ids, "
+        "and provenance to verify chronology, and obey any requested item "
+        "count exactly by grouping related work into exactly that many items. "
+        "For 'how many' questions, search each candidate item "
+        "separately, enumerate every distinct mention across sessions, and "
+        "state the total count explicitly at the start of the answer. When "
+        "retrieved evidence contains exact identifiers - version numbers, "
+        "algorithm or library names, error messages, tool or platform names, "
+        "dates - repeat them verbatim in the answer instead of paraphrasing. "
+        "Keep answers concise and do not include tutorials or "
+        "extra implementation advice - except for comprehensive summary "
+        "questions, where completeness beats brevity: enumerate every distinct "
+        "incident, error resolved, tool adopted, and enhancement found in "
+        "retrieval, naming exact libraries, algorithms, error types, and "
+        "platforms verbatim rather than generalizing them away. Follow any "
+        "remembered user instructions "
         "that are relevant to the question.\n\n"
         "# Conversation Memory\n"
         f"{conversation_memory}\n\n"
@@ -176,6 +204,8 @@ def ask_agent(
     topic_text = json.dumps(topic, ensure_ascii=False)
     if structured_middleware is None:
         relevant_memory = "(StructuredMemoryMiddleware was not used.)"
+        chronological = "(StructuredMemoryMiddleware was not used.)"
+        denials = "(StructuredMemoryMiddleware was not used.)"
     else:
         selected_entries = structured_middleware.memory_selector.select(
             memory=structured_middleware.memory,
@@ -186,14 +216,49 @@ def ask_agent(
             structured_middleware.memory.render(entries=selected_entries)
             or "(No relevant structured memory entries.)"
         )
+        chronological = (
+            structured_middleware.memory.render_chronological(
+                max_tokens=structured_answer_tokens // 2,
+                # Identifier entries (versions, dates, paths) drown out the
+                # topical mention-order signal ordering questions need.
+                exclude_sections={"exact_values"},
+            )
+            or "(No chronological memory entries.)"
+        )
+        # A small answering model reliably misses a lone status_changes entry
+        # buried among a hundred others, then trusts affirmative retrieval
+        # hits instead. Surface denials/corrections in their own block right
+        # next to the question so the conflict cannot be overlooked.
+        denial_entries = [
+            entry
+            for entry in structured_middleware.memory.entries.values()
+            if entry.section == "status_changes" and entry.status == "active"
+        ]
+        denials = (
+            structured_middleware.memory.render(entries=denial_entries)
+            or "(No recorded denials or corrections.)"
+        )
     user = (
         f"Topic metadata:\n{topic_text}\n\n"
         f"Question type: {question_type}\n\n"
         "# Question-Relevant Structured Memory\n"
         f"{relevant_memory}\n\n"
+        "# Chronological Order\n"
+        "Entries ordered by when they were first mentioned (earliest first); use this "
+        "to answer ordering or sequence questions.\n"
+        f"{chronological}\n\n"
+        "# Recorded Denials and Corrections\n"
+        "Explicit user statements denying, correcting, or reversing earlier claims. "
+        "Before answering, check whether any entry below is about the same subject "
+        "as the question. If one conflicts with affirmative facts from memory or "
+        "retrieval, you MUST state there is contradictory information, quote both "
+        "sides, and ask which statement is correct - do not silently pick one side.\n"
+        f"{denials}\n\n"
         f"Probing question:\n{question}\n\n"
         f"Use the {SEARCH_TOOL_NAME} tool to retrieve supporting evidence "
-        "before you answer. If the retrieved evidence is only topically related "
+        "before you answer: decompose the question into facets and issue one "
+        "search per facet (minimum 2 searches; at least 4 for comprehensive "
+        "summary questions). If the retrieved evidence is only topically related "
         "but does not directly answer the question, say the provided chat does "
         "not contain enough information."
     )

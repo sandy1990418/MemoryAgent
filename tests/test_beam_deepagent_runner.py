@@ -1,6 +1,16 @@
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from scripts.run_beam_case_deepagent import build_agent_system_prompt, collect_tool_trace, final_ai_text
+from memory_agent.models.sections import AGENT_SECTIONS
+from memory_agent.structured.memory import Memory
+from memory_agent.structured.middleware import StructuredMemoryMiddleware
+from memory_agent.structured.updater import MemoryUpdater
+from scripts.run_beam_case_deepagent import (
+    ask_agent,
+    build_agent_system_prompt,
+    collect_tool_trace,
+    final_ai_text,
+)
+from tests.fakes import ScriptedLLM
 
 
 def _search_call(query: str, call_id: str) -> dict:
@@ -63,5 +73,116 @@ def test_deepagent_system_prompt_requires_supported_concise_answers():
 
     assert "Do not infer background, previous projects, user feedback" in prompt
     assert "there is contradictory information" in prompt
+    assert "For contradiction_resolution questions specifically" in prompt
+    assert "second using negation phrasing" in prompt
     assert "obey any requested item count exactly" in prompt
     assert "Keep answers concise" in prompt
+    assert "issue one search per facet" in prompt
+    assert "state the total count explicitly" in prompt
+    assert "repeat them verbatim" in prompt
+
+
+class FakeAgent:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def invoke(self, state, config=None):
+        self.calls.append({"state": state, "config": config})
+        return {"messages": [AIMessage(content="ok")]}
+
+
+def test_ask_agent_includes_chronological_order_with_structured_memory():
+    memory = Memory(sections=AGENT_SECTIONS)
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "first topic was Flask routing",
+                "provenance": [11],
+            },
+            {
+                "op": "ADD",
+                "section": "progress",
+                "text": "second topic was deployment",
+                "provenance": [22],
+            },
+        ]
+    )
+    structured_middleware = StructuredMemoryMiddleware(
+        memory=memory,
+        updater=MemoryUpdater(
+            llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+            sections=AGENT_SECTIONS,
+        ),
+        max_tokens=1000,
+    )
+    agent = FakeAgent()
+
+    response, _tool_trace, _message_count = ask_agent(
+        agent=agent,
+        topic={"title": "Budget tracker"},
+        question_type="event_ordering",
+        question="Which topic came first?",
+        recursion_limit=10,
+        structured_middleware=structured_middleware,
+        structured_answer_tokens=500,
+    )
+
+    assert response == "ok"
+    user_message = agent.calls[0]["state"]["messages"][0]["content"]
+    assert "# Chronological Order" in user_message
+    assert "Entries ordered by when they were first mentioned" in user_message
+    chronological_block = user_message.split("# Chronological Order", 1)[1].split(
+        "Probing question:", 1
+    )[0]
+    assert chronological_block.index("[F1] first topic was Flask routing") < chronological_block.index(
+        "[P1] second topic was deployment"
+    )
+
+def test_ask_agent_surfaces_recorded_denials_block():
+    memory = Memory(sections=AGENT_SECTIONS)
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "status_changes",
+                "text": "User stated: I've never integrated Flask-Login into this project.",
+                "provenance": [108],
+            },
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "User is integrating Flask-Login v0.6.2 for session management.",
+                "provenance": [66],
+            },
+        ]
+    )
+    structured_middleware = StructuredMemoryMiddleware(
+        memory=memory,
+        updater=MemoryUpdater(
+            llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+            sections=AGENT_SECTIONS,
+        ),
+        max_tokens=1000,
+    )
+    agent = FakeAgent()
+
+    ask_agent(
+        agent=agent,
+        topic={"title": "Budget tracker"},
+        question_type="contradiction_resolution",
+        question="Have I integrated Flask-Login?",
+        recursion_limit=10,
+        structured_middleware=structured_middleware,
+        structured_answer_tokens=500,
+    )
+
+    user_message = agent.calls[0]["state"]["messages"][0]["content"]
+    assert "# Recorded Denials and Corrections" in user_message
+    denials_block = user_message.split("# Recorded Denials and Corrections", 1)[1].split(
+        "Probing question:", 1
+    )[0]
+    assert "I've never integrated Flask-Login" in denials_block
+    assert "Flask-Login v0.6.2 for session management" not in denials_block
+    assert "which statement is correct" in denials_block
