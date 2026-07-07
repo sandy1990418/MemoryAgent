@@ -33,8 +33,10 @@ class MemorySelector:
     DEFAULT_SECTION_PRIORITIES: dict[str, float] = {
         "preferences": 100.0,
         "goal": 95.0,
+        "status_changes": 94.0,
         "exact_values": 92.0,
         "progress": 90.0,
+        "timeline": 88.0,
         "open_questions": 85.0,
         "decisions": 80.0,
         "tool_facts": 70.0,

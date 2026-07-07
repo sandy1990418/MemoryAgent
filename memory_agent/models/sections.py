@@ -78,6 +78,24 @@ AGENT_SECTIONS: list[SectionConfig] = [
         ),
     ),
     SectionConfig(
+        key="timeline",
+        prefix="M",
+        title="Timeline",
+        description=(
+            "Ordered project milestones, dates, phases, and event sequences that "
+            "may be needed to answer chronology questions."
+        ),
+    ),
+    SectionConfig(
+        key="status_changes",
+        prefix="C",
+        title="Status Changes",
+        description=(
+            "Explicit corrections, contradictions, reversals, or latest-vs-previous "
+            "state changes. Capture both the changed subject and the current truth."
+        ),
+    ),
+    SectionConfig(
         key="tool_facts",
         prefix="T",
         title="Tool Facts",

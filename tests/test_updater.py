@@ -7,9 +7,9 @@ from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
 from tests.fakes import ScriptedLLM
 
 
-def make_updater(script):
+def make_updater(script, **kwargs):
     llm = ScriptedLLM(script)
-    return MemoryUpdater(llm=llm, sections=CHAT_SECTIONS)
+    return MemoryUpdater(llm=llm, sections=CHAT_SECTIONS, **kwargs)
 
 
 def test_fenced_json_array_parsed_and_applied():
@@ -98,7 +98,7 @@ def test_exact_values_prefix_sections_are_normalized():
             '[{"op": "ADD", "section": "v", "text": "2026-07-07", "provenance": [2]}]',
         ]
     )
-    updater = make_updater(lambda system, messages: next(responses))
+    updater = make_updater(lambda system, messages: next(responses), max_retries=0)
     mem = Memory(sections=CHAT_SECTIONS)
 
     applied, rejected = updater.update(
@@ -128,7 +128,7 @@ def test_numeric_update_id_is_rejected_to_avoid_turn_id_confusion():
             '[{"op": "UPDATE", "id": 1, "text": "ship MVP by Friday", "provenance": [2]}]',
         ]
     )
-    updater = make_updater(lambda system, messages: next(responses))
+    updater = make_updater(lambda system, messages: next(responses), max_retries=0)
     mem = Memory(sections=CHAT_SECTIONS)
 
     applied, rejected = updater.update(mem, [Turn(id=1, role="user", content="ship MVP")])
@@ -151,7 +151,7 @@ def test_numeric_update_id_is_rejected_to_avoid_turn_id_confusion():
 
 def test_numeric_supersede_id_is_rejected_to_avoid_turn_id_confusion():
     response = '[{"op": "SUPERSEDE", "id": 3, "reason": "new preference statement"}]'
-    updater = make_updater(lambda system, messages: response)
+    updater = make_updater(lambda system, messages: response, max_retries=0)
     mem = Memory(sections=CHAT_SECTIONS)
     mem.apply_ops(
         [
@@ -173,6 +173,44 @@ def test_numeric_supersede_id_is_rejected_to_avoid_turn_id_confusion():
     assert len(rejected) == 1
     assert "not turn_id values" in rejected[0]["reason"]
     assert mem.entries["U1"].status == "active"
+
+
+def test_rejected_ops_are_retried_with_validation_feedback():
+    responses = iter(
+        [
+            '[{"op": "SUPERSEDE", "id": "U28", "reason": "hallucinated id"}]',
+            (
+                '[{"op": "ADD", "section": "preferences", '
+                '"text": "User wants pragmatic security best practices for auth.", '
+                '"provenance": [185]}]'
+            ),
+        ]
+    )
+    captured_messages = []
+
+    def script(system, messages):
+        captured_messages.append(messages)
+        return next(responses)
+
+    updater = make_updater(script)
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [
+            Turn(
+                id=185,
+                role="user",
+                content="Always provide pragmatic security best practices for auth.",
+            )
+        ],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert mem.entries["U1"].text == "User wants pragmatic security best practices for auth."
+    assert len(captured_messages) == 2
+    assert "rejected by validation" in captured_messages[1][-1]["content"]
 
 
 def test_exact_string_update_id_still_updates_entry():
@@ -350,6 +388,8 @@ def test_prompt_includes_memory_quality_rules():
     assert "Do not save generic assistant advice" in system
     assert "Do not turn every user request into an open question" in system
     assert "Preserve exact dates, versions, counts" in system
+    assert "Use status_changes for explicit contradictions" in system
+    assert "Use timeline for ordered phases" in system
 
 
 def test_transport_error_raises_update_failed():
