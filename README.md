@@ -110,6 +110,19 @@ python3.12 -m venv .venv-deepagents
 .venv-deepagents/bin/python scripts/run_beam_case_deepagent.py
 ```
 
+BEAM runners report a cheap heuristic rubric score by default. To also run an
+LLM judge over each rubric, pass `--judge-model` or set `BEAM_JUDGE_MODEL`:
+
+```bash
+python scripts/run_beam_case.py --judge-model gpt-5.4-nano
+
+.venv-deepagents/bin/python scripts/run_beam_case_deepagent.py \
+  --judge-model gpt-5.4-nano
+```
+
+The output JSON then includes both `heuristic_rubric_rate` and
+`judge_rubric_rate`, plus per-question `judge_checks` with short reasons.
+
 ## Configuration
 
 All runnable demos call `load_project_env()`, which loads `.env` from the repo

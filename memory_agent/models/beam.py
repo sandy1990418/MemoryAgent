@@ -38,6 +38,7 @@ class BeamRunConfig:
     structured_keep_messages: int = 2
     structured_flush_final: bool = True
     mem0_llm_model: str = "gpt-4o-mini"
+    judge_model: str | None = None
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "BeamRunConfig":

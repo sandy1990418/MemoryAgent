@@ -46,6 +46,7 @@ from scripts.run_beam_case import (
     build_context,
     flatten_chunks,
     flatten_message_batches,
+    judge_response,
     load_json,
     load_topic,
     reference_answer,
@@ -284,6 +285,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
             max_active_context_chars=args.max_active_context_chars,
         ),
     )
+    judge_llm = OpenAIClient(args.judge_model) if args.judge_model else None
 
     output: dict[str, Any] = {
         "run_id": run_id,
@@ -293,6 +295,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
         "topics": str(args.topics),
         "store_dir": str(store_dir),
         "answer_model": args.answer_model,
+        "judge_model": args.judge_model,
         "structured_model": args.structured_model if structured_middleware is not None else None,
         "search_tool_default_limit": args.top_k,
         "recursion_limit": args.recursion_limit,
@@ -313,11 +316,15 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
     total_hits = 0
     total_rubrics = 0
     total_tool_calls = 0
+    total_judge_hits = 0
+    total_judge_rubrics = 0
     for question_type, items in probes.items():
         print(f"Answering {question_type}: {len(items)} question(s)", flush=True)
         category_results = []
         category_hits = 0
         category_rubrics = 0
+        category_judge_hits = 0
+        category_judge_rubrics = 0
 
         for item_index, item in enumerate(items):
             question = item["question"]
@@ -334,10 +341,31 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
             category_hits += hit_count
             category_rubrics += len(rubric_checks)
 
+            judge_checks = []
+            judge_hit_count = 0
+            if judge_llm is not None:
+                judge_checks = judge_response(
+                    llm=judge_llm,
+                    model=args.judge_model,
+                    question_type=question_type,
+                    question=question,
+                    reference=reference_answer(item),
+                    response=response,
+                    rubric_lines=list(item.get("rubric", [])),
+                )
+                judge_hit_count = sum(1 for check in judge_checks if check["passed"])
+                category_judge_hits += judge_hit_count
+                category_judge_rubrics += len(judge_checks)
+
             print(
                 f"  {question_type}[{item_index}] "
                 f"heuristic={hit_count}/{len(rubric_checks)} "
-                f"searches={len(tool_trace)}",
+                f"searches={len(tool_trace)}"
+                + (
+                    f" judge={judge_hit_count}/{len(judge_checks)}"
+                    if judge_llm is not None
+                    else ""
+                ),
                 flush=True,
             )
             category_results.append(
@@ -352,17 +380,27 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
                     "rubric_checks": rubric_checks,
                     "heuristic_rubric_hits": hit_count,
                     "heuristic_rubric_total": len(rubric_checks),
+                    "judge_checks": judge_checks if judge_llm is not None else None,
+                    "judge_rubric_hits": judge_hit_count if judge_llm is not None else None,
+                    "judge_rubric_total": len(judge_checks) if judge_llm is not None else None,
                 }
             )
 
         total_hits += category_hits
         total_rubrics += category_rubrics
+        total_judge_hits += category_judge_hits
+        total_judge_rubrics += category_judge_rubrics
         output["results"][question_type] = category_results
         output["summary"][question_type] = {
             "heuristic_rubric_hits": category_hits,
             "heuristic_rubric_total": category_rubrics,
             "heuristic_rubric_rate": round(category_hits / category_rubrics, 3)
             if category_rubrics
+            else None,
+            "judge_rubric_hits": category_judge_hits if judge_llm is not None else None,
+            "judge_rubric_total": category_judge_rubrics if judge_llm is not None else None,
+            "judge_rubric_rate": round(category_judge_hits / category_judge_rubrics, 3)
+            if judge_llm is not None and category_judge_rubrics
             else None,
         }
 
@@ -383,7 +421,16 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
         "heuristic_rubric_hits": total_hits,
         "heuristic_rubric_total": total_rubrics,
         "heuristic_rubric_rate": round(total_hits / total_rubrics, 3) if total_rubrics else None,
-        "note": "Heuristic only. Official BEAM evaluation uses LLM-as-judge over rubrics.",
+        "judge_rubric_hits": total_judge_hits if judge_llm is not None else None,
+        "judge_rubric_total": total_judge_rubrics if judge_llm is not None else None,
+        "judge_rubric_rate": round(total_judge_hits / total_judge_rubrics, 3)
+        if judge_llm is not None and total_judge_rubrics
+        else None,
+        "note": (
+            "Heuristic plus local LLM-as-judge over rubrics."
+            if judge_llm is not None
+            else "Heuristic only. Pass --judge-model or set BEAM_JUDGE_MODEL to run LLM-as-judge."
+        ),
     }
 
     with output_path.open("w", encoding="utf-8") as f:
@@ -428,6 +475,7 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(structured_flush_final=True)
     parser.add_argument("--mem0-llm-model", default=os.getenv("MEM0_LLM_MODEL", "gpt-4o-mini"))
     parser.add_argument("--recursion-limit", type=int, default=50)
+    parser.add_argument("--judge-model", default=os.getenv("BEAM_JUDGE_MODEL") or None)
     return parser.parse_args()
 
 

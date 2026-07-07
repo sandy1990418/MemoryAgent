@@ -143,6 +143,111 @@ def rubric_hit(response: str, rubric_line: str) -> dict[str, Any]:
     }
 
 
+def parse_judge_response(response: str) -> dict[str, Any] | None:
+    text = response.strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    fence_re = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+    for match in fence_re.finditer(text):
+        try:
+            parsed = json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
+
+
+def normalize_judge_checks(
+    parsed: dict[str, Any] | None,
+    rubric_lines: list[str],
+) -> list[dict[str, Any]]:
+    raw_checks = parsed.get("checks") if isinstance(parsed, dict) else None
+    if not isinstance(raw_checks, list):
+        return [
+            {
+                "rubric": rubric,
+                "target": rubric_target(rubric),
+                "passed": False,
+                "reason": "judge response could not be parsed",
+            }
+            for rubric in rubric_lines
+        ]
+
+    checks: list[dict[str, Any]] = []
+    for index, rubric in enumerate(rubric_lines):
+        raw_check = raw_checks[index] if index < len(raw_checks) else {}
+        if not isinstance(raw_check, dict):
+            raw_check = {}
+        checks.append(
+            {
+                "rubric": rubric,
+                "target": rubric_target(rubric),
+                "passed": bool(raw_check.get("passed")),
+                "reason": str(raw_check.get("reason") or "").strip(),
+            }
+        )
+    return checks
+
+
+def judge_response(
+    llm: OpenAIClient,
+    model: str,
+    question_type: str,
+    question: str,
+    reference: str,
+    response: str,
+    rubric_lines: list[str],
+) -> list[dict[str, Any]]:
+    if not rubric_lines:
+        return []
+
+    system = (
+        "You are an impartial evaluator for a long-term-memory benchmark. "
+        "Grade only whether the assistant response satisfies each rubric. "
+        "Use the question, optional reference answer, and rubric text as the "
+        "source of truth. Mark a rubric passed only when the response explicitly "
+        "or unambiguously entails it. Do not give credit for unrelated extra "
+        "detail. Return JSON only with this shape: "
+        "{\"checks\": [{\"passed\": true|false, \"reason\": \"short reason\"}, ...]}."
+    )
+    payload = {
+        "question_type": question_type,
+        "question": question,
+        "reference_answer": reference,
+        "assistant_response": response,
+        "rubrics": rubric_lines,
+    }
+    raw = llm.complete(
+        system=system,
+        messages=[
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False, indent=2),
+            }
+        ],
+        model=model,
+    )
+    return normalize_judge_checks(parse_judge_response(raw), rubric_lines)
+
+
 def flatten_chunks(chat: list[dict[str, Any]]) -> list[BeamChunk]:
     chunks: list[BeamChunk] = []
     for batch_index, batch in enumerate(chat, start=1):
@@ -462,6 +567,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             )
 
     llm = OpenAIClient(args.answer_model)
+    judge_llm = OpenAIClient(args.judge_model) if args.judge_model else None
     output: dict[str, Any] = {
         "run_id": run_id,
         "memory_mode": args.memory_mode,
@@ -470,6 +576,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "topics": str(args.topics),
         "store_dir": str(store_dir),
         "answer_model": args.answer_model,
+        "judge_model": args.judge_model,
         "structured_model": args.structured_model if structured_middleware is not None else None,
         "retrieval_top_k": args.top_k,
         "topic": topic,
@@ -488,11 +595,15 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
 
     total_hits = 0
     total_rubrics = 0
+    total_judge_hits = 0
+    total_judge_rubrics = 0
     for question_type, items in probes.items():
         print(f"Answering {question_type}: {len(items)} question(s)", flush=True)
         category_results = []
         category_hits = 0
         category_rubrics = 0
+        category_judge_hits = 0
+        category_judge_rubrics = 0
 
         for item_index, item in enumerate(items):
             question = item["question"]
@@ -517,9 +628,30 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             category_hits += hit_count
             category_rubrics += len(rubric_checks)
 
+            judge_checks = []
+            judge_hit_count = 0
+            if judge_llm is not None:
+                judge_checks = judge_response(
+                    llm=judge_llm,
+                    model=args.judge_model,
+                    question_type=question_type,
+                    question=question,
+                    reference=reference_answer(item),
+                    response=response,
+                    rubric_lines=list(item.get("rubric", [])),
+                )
+                judge_hit_count = sum(1 for check in judge_checks if check["passed"])
+                category_judge_hits += judge_hit_count
+                category_judge_rubrics += len(judge_checks)
+
             print(
                 f"  {question_type}[{item_index}] "
                 f"heuristic={hit_count}/{len(rubric_checks)}"
+                + (
+                    f" judge={judge_hit_count}/{len(judge_checks)}"
+                    if judge_llm is not None
+                    else ""
+                )
                 ,
                 flush=True,
             )
@@ -540,17 +672,27 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                     "rubric_checks": rubric_checks,
                     "heuristic_rubric_hits": hit_count,
                     "heuristic_rubric_total": len(rubric_checks),
+                    "judge_checks": judge_checks if judge_llm is not None else None,
+                    "judge_rubric_hits": judge_hit_count if judge_llm is not None else None,
+                    "judge_rubric_total": len(judge_checks) if judge_llm is not None else None,
                 }
             )
 
         total_hits += category_hits
         total_rubrics += category_rubrics
+        total_judge_hits += category_judge_hits
+        total_judge_rubrics += category_judge_rubrics
         output["results"][question_type] = category_results
         output["summary"][question_type] = {
             "heuristic_rubric_hits": category_hits,
             "heuristic_rubric_total": category_rubrics,
             "heuristic_rubric_rate": round(category_hits / category_rubrics, 3)
             if category_rubrics
+            else None,
+            "judge_rubric_hits": category_judge_hits if judge_llm is not None else None,
+            "judge_rubric_total": category_judge_rubrics if judge_llm is not None else None,
+            "judge_rubric_rate": round(category_judge_hits / category_judge_rubrics, 3)
+            if judge_llm is not None and category_judge_rubrics
             else None,
         }
 
@@ -570,7 +712,16 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "heuristic_rubric_hits": total_hits,
         "heuristic_rubric_total": total_rubrics,
         "heuristic_rubric_rate": round(total_hits / total_rubrics, 3) if total_rubrics else None,
-        "note": "Heuristic only. Official BEAM evaluation uses LLM-as-judge over rubrics.",
+        "judge_rubric_hits": total_judge_hits if judge_llm is not None else None,
+        "judge_rubric_total": total_judge_rubrics if judge_llm is not None else None,
+        "judge_rubric_rate": round(total_judge_hits / total_judge_rubrics, 3)
+        if judge_llm is not None and total_judge_rubrics
+        else None,
+        "note": (
+            "Heuristic plus local LLM-as-judge over rubrics."
+            if judge_llm is not None
+            else "Heuristic only. Pass --judge-model or set BEAM_JUDGE_MODEL to run LLM-as-judge."
+        ),
     }
 
     with output_path.open("w", encoding="utf-8") as f:
@@ -614,6 +765,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-structured-flush-final", dest="structured_flush_final", action="store_false")
     parser.set_defaults(structured_flush_final=True)
     parser.add_argument("--mem0-llm-model", default=os.getenv("MEM0_LLM_MODEL", "gpt-4o-mini"))
+    parser.add_argument("--judge-model", default=os.getenv("BEAM_JUDGE_MODEL") or None)
     return parser.parse_args()
 
 
