@@ -120,7 +120,7 @@ class Memory:
             text = op.get("text")
             provenance = op.get("provenance", [])
             if entry_id not in self.entries:
-                return f"unknown id: {entry_id}"
+                return self._unknown_entry_id_reason(entry_id)
             entry = self.entries[entry_id]
             if entry.status == "superseded":
                 return f"cannot update superseded entry: {entry_id}"
@@ -136,13 +136,22 @@ class Memory:
             entry_id = op.get("id")
             reason = op.get("reason", "")
             if entry_id not in self.entries:
-                return f"unknown id: {entry_id}"
+                return self._unknown_entry_id_reason(entry_id)
             entry = self.entries[entry_id]
             entry.status = "superseded"
             entry.note = reason
             return True
 
         return f"unknown op: {kind}"
+
+    @staticmethod
+    def _unknown_entry_id_reason(entry_id: object) -> str:
+        if isinstance(entry_id, int) or (isinstance(entry_id, str) and entry_id.isdigit()):
+            return (
+                f"unknown memory entry id: {entry_id}; UPDATE/SUPERSEDE ids must be "
+                "exact current memory entry ids like F1, U2, or G3, not turn_id values"
+            )
+        return f"unknown memory entry id: {entry_id}"
 
     def render(
         self,

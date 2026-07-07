@@ -356,6 +356,19 @@ Supported operations:
 The Python layer validates shape, IDs, sections, and provenance. The LLM still
 owns the semantic choice.
 
+Memory quality policy:
+
+- Entries should be atomic and concise.
+- Exact dates, versions, counts, durations, percentages, latencies, endpoints,
+  table/column names, file names, error messages, library names, and deployment
+  targets should be preserved in `exact_values` when they may matter later.
+- Generic assistant advice and example code should not become memory unless the
+  user accepts, decides, implements, observes, or reports it.
+- `open_questions` is only for unresolved blockers or decisions that remain
+  important after the turn. Ordinary one-off help requests should usually be
+  `NOOP` or become concise `facts`/`progress` only when they contain durable
+  state.
+
 ## Configuration Flow
 
 ```mermaid

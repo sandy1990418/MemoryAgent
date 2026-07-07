@@ -66,6 +66,8 @@ demo.py                    uses memory_agent.structured directly
 
 ## Setup
 
+Main demos use the default project venv:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -95,6 +97,17 @@ Run structured memory plus mem0:
 
 ```bash
 python react_hybrid_agent.py
+```
+
+The DeepAgents BEAM runner is optional and requires Python >= 3.11. Do not
+install `requirements-deepagents.txt` into the main Python 3.10 `.venv`; pip
+will reject `deepagents` with a `Requires-Python >=3.11` error. Use a separate
+venv:
+
+```bash
+python3.12 -m venv .venv-deepagents
+.venv-deepagents/bin/pip install -r requirements-deepagents.txt
+.venv-deepagents/bin/python scripts/run_beam_case_deepagent.py
 ```
 
 ## Configuration

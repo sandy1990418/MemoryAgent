@@ -24,19 +24,29 @@ CHAT_SECTIONS: list[SectionConfig] = [
         key="preferences",
         prefix="U",
         title="User Preferences",
-        description="User preferences and relevant background",
+        description=(
+            "Durable user preferences and stable background that should guide "
+            "future responses. Do not store temporary task requests here."
+        ),
     ),
     SectionConfig(
         key="facts",
         prefix="F",
         title="Facts",
-        description="Facts established during the conversation",
+        description=(
+            "Durable facts about the user, project, implemented features, stack, "
+            "constraints, errors, and observed results."
+        ),
     ),
     SectionConfig(
         key="open_questions",
         prefix="Q",
         title="Open Questions",
-        description="Open questions that still need resolution",
+        description=(
+            "Explicit unresolved decisions, blockers, or follow-up questions that "
+            "remain important after the current turn. Do not store ordinary "
+            "one-off help requests."
+        ),
     ),
     SectionConfig(
         key="exact_values",
@@ -62,7 +72,10 @@ AGENT_SECTIONS: list[SectionConfig] = [
         key="progress",
         prefix="P",
         title="Progress",
-        description="Plan and execution progress",
+        description=(
+            "Chronological milestones, completed work, active sprint focus, and "
+            "measured progress. Keep entries concise and tied to source turns."
+        ),
     ),
     SectionConfig(
         key="tool_facts",

@@ -121,11 +121,65 @@ def test_exact_values_prefix_sections_are_normalized():
     assert mem.entries["V2"].text == "2026-07-07"
 
 
-def test_numeric_update_id_is_normalized_when_unique():
+def test_numeric_update_id_is_rejected_to_avoid_turn_id_confusion():
     responses = iter(
         [
             '[{"op": "ADD", "section": "decisions", "text": "ship MVP", "provenance": [1]}]',
             '[{"op": "UPDATE", "id": 1, "text": "ship MVP by Friday", "provenance": [2]}]',
+        ]
+    )
+    updater = make_updater(lambda system, messages: next(responses))
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(mem, [Turn(id=1, role="user", content="ship MVP")])
+    assert rejected == []
+    assert len(applied) == 1
+
+    applied, rejected = updater.update(
+        mem,
+        [Turn(id=2, role="user", content="ship MVP by Friday")],
+    )
+
+    assert applied == []
+    assert len(rejected) == 1
+    assert rejected[0]["reason"] == (
+        "unknown memory entry id: 1; UPDATE/SUPERSEDE ids must be exact current "
+        "memory entry ids like F1, U2, or G3, not turn_id values"
+    )
+    assert mem.entries["D1"].text == "ship MVP"
+
+
+def test_numeric_supersede_id_is_rejected_to_avoid_turn_id_confusion():
+    response = '[{"op": "SUPERSEDE", "id": 3, "reason": "new preference statement"}]'
+    updater = make_updater(lambda system, messages: response)
+    mem = Memory(sections=CHAT_SECTIONS)
+    mem.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "preferences",
+                "text": "User prefers terse answers",
+                "provenance": [1],
+            }
+        ]
+    )
+
+    applied, rejected = updater.update(
+        mem,
+        [Turn(id=3, role="user", content="I prefer pragmatic security enhancements.")],
+    )
+
+    assert applied == []
+    assert len(rejected) == 1
+    assert "not turn_id values" in rejected[0]["reason"]
+    assert mem.entries["U1"].status == "active"
+
+
+def test_exact_string_update_id_still_updates_entry():
+    responses = iter(
+        [
+            '[{"op": "ADD", "section": "decisions", "text": "ship MVP", "provenance": [1]}]',
+            '[{"op": "UPDATE", "id": "D1", "text": "ship MVP by Friday", "provenance": [2]}]',
         ]
     )
     updater = make_updater(lambda system, messages: next(responses))
@@ -173,6 +227,25 @@ def test_text_suffix_turns_are_normalized_to_provenance():
     assert len(applied) == 1
     assert mem.entries["F1"].text == "SQLite is configured."
     assert mem.entries["F1"].provenance == [2, 3]
+
+
+def test_text_suffix_turns_are_stripped_even_when_provenance_exists():
+    response = (
+        '[{"op": "ADD", "section": "facts", '
+        '"text": "Chart.js is configured. (turns 7)", "provenance": [7]}]'
+    )
+    updater = make_updater(lambda system, messages: response)
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [Turn(id=7, role="user", content="Chart.js is configured")],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert mem.entries["F1"].text == "Chart.js is configured."
+    assert mem.entries["F1"].provenance == [7]
 
 
 def test_garbage_response_raises_update_failed():
@@ -234,6 +307,10 @@ def test_prompt_requires_supersede_add_for_reversals():
     assert "MUST SUPERSEDE the old active entry" in system
     assert "then ADD a new replacement entry" in system
     assert "Never use UPDATE for that case" in system
+    assert "Never use a turn_id" in system
+    assert '{"id": 3} is always invalid' in system
+    assert "If no exact current entry id exists, use ADD instead" in system
+    assert "If Current memory has no exact conflicting active entry id" in system
 
 
 def test_prompt_guards_against_cross_subject_supersede_and_duplicates():
@@ -254,6 +331,25 @@ def test_prompt_guards_against_cross_subject_supersede_and_duplicates():
     assert "Do not supersede identity or background facts" in system
     assert "use UPDATE to merge/refine it instead of adding a duplicate" in system
     assert "dependency/version-number preferences" in system
+
+
+def test_prompt_includes_memory_quality_rules():
+    captured = {}
+
+    def script(system, messages):
+        captured["system"] = system
+        return '[{"op": "NOOP"}]'
+
+    updater = make_updater(script)
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    updater.update(mem, [Turn(id=1, role="user", content="How do I add an index?")])
+
+    system = captured["system"]
+    assert "Keep entries atomic and concise" in system
+    assert "Do not save generic assistant advice" in system
+    assert "Do not turn every user request into an open question" in system
+    assert "Preserve exact dates, versions, counts" in system
 
 
 def test_transport_error_raises_update_failed():

@@ -319,6 +319,31 @@ def build_answer_context(
     )
 
 
+def structured_memory_stats(memory: Memory | None) -> dict[str, Any]:
+    if memory is None:
+        return {}
+
+    entries = list(memory.entries.values())
+    active_entries = [entry for entry in entries if entry.status == "active"]
+    section_counts: dict[str, int] = {}
+    for entry in active_entries:
+        section_counts[entry.section] = section_counts.get(entry.section, 0) + 1
+
+    total_chars = sum(len(entry.text) for entry in active_entries)
+    return {
+        "total_entries": len(entries),
+        "active_entries": len(active_entries),
+        "superseded_entries": len(entries) - len(active_entries),
+        "section_counts": dict(sorted(section_counts.items())),
+        "avg_active_entry_chars": round(total_chars / len(active_entries), 1)
+        if active_entries
+        else 0,
+        "long_active_entries_over_180_chars": sum(
+            1 for entry in active_entries if len(entry.text) > 180
+        ),
+    }
+
+
 def answer_question(
     llm: OpenAIClient,
     model: str,
@@ -539,6 +564,9 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         ),
         "structured_active_messages": len(active_messages) if structured_middleware is not None else 0,
         "questions_answered": sum(len(items) for items in probes.values()),
+        "structured_memory_stats": structured_memory_stats(
+            structured_middleware.memory if structured_middleware is not None else None
+        ),
         "heuristic_rubric_hits": total_hits,
         "heuristic_rubric_total": total_rubrics,
         "heuristic_rubric_rate": round(total_hits / total_rubrics, 3) if total_rubrics else None,

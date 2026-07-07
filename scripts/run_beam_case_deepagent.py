@@ -51,6 +51,7 @@ from scripts.run_beam_case import (
     reference_answer,
     render_message_tail,
     rubric_hit,
+    structured_memory_stats,
 )
 
 SEARCH_TOOL_NAME = "search_long_term_memory"
@@ -376,6 +377,9 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
         "structured_active_messages": len(active_messages) if structured_middleware is not None else 0,
         "questions_answered": sum(len(items) for items in probes.values()),
         "search_tool_calls": total_tool_calls,
+        "structured_memory_stats": structured_memory_stats(
+            structured_middleware.memory if structured_middleware is not None else None
+        ),
         "heuristic_rubric_hits": total_hits,
         "heuristic_rubric_total": total_rubrics,
         "heuristic_rubric_rate": round(total_hits / total_rubrics, 3) if total_rubrics else None,
