@@ -3,7 +3,7 @@
 This runner answers one BEAM chat case and writes both a detailed local trace
 and BEAM-compatible answer/evaluation files. BEAM's official evaluation scores
 each probing-question rubric with an LLM-as-judge on a 0.0/0.5/1.0 scale; the
-same rubric-level judge shape is used here when --judge-model is provided.
+same rubric-level judge shape is used here by default unless --no-judge is set.
 """
 
 from __future__ import annotations
@@ -32,6 +32,10 @@ from memory_agent.models.beam import (
     DEFAULT_PROBES_PATH,
     DEFAULT_RESULTS_DIR,
     DEFAULT_TOPICS_PATH,
+    DEFAULT_BEAM_JUDGE_MODEL,
+    DEFAULT_BEAM_MEMORY_MODEL,
+    DEFAULT_BEAM_MODEL,
+    DEFAULT_MEM0_LLM_MODEL,
     BeamChunk,
     BeamRunConfig,
 )
@@ -423,11 +427,37 @@ def flatten_message_batches(chat: list[dict[str, Any]]) -> list[list[AnyMessage]
     return batches
 
 
-def load_topic(topics: list[dict[str, Any]], topic_id: int = 1) -> dict[str, Any]:
+def load_topic(topics: Any, topic_id: int = 1) -> dict[str, Any]:
+    if isinstance(topics, dict):
+        return topics
+    if not isinstance(topics, list):
+        return {}
     for topic in topics:
-        if topic.get("id") == topic_id:
+        if isinstance(topic, dict) and topic.get("id") == topic_id:
             return topic
     return {}
+
+
+def select_probes(
+    probes: dict[str, list[dict[str, Any]]],
+    question_types: list[str] | tuple[str, ...] | None = None,
+    max_questions_per_type: int | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    selected_keys = set(question_types or probes.keys())
+    unknown = sorted(selected_keys - set(probes.keys()))
+    if unknown:
+        raise ValueError(f"Unknown BEAM question type(s): {', '.join(unknown)}")
+
+    selected: dict[str, list[dict[str, Any]]] = {}
+    for question_type, items in probes.items():
+        if question_type not in selected_keys:
+            continue
+        selected[question_type] = (
+            list(items[:max_questions_per_type])
+            if max_questions_per_type is not None
+            else list(items)
+        )
+    return selected
 
 
 def apply_message_update(messages: list[AnyMessage], update: dict[str, Any] | None) -> list[AnyMessage]:
@@ -714,49 +744,61 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set; add it to .env or the environment.")
 
+    use_mem0 = args.memory_mode in ("structured_mem0", "raw_mem0")
+    use_structured = args.memory_mode in ("structured_mem0", "structured_only")
+
     run_id = time.strftime("%Y%m%d-%H%M%S")
     results_dir = args.results_dir
     results_dir.mkdir(parents=True, exist_ok=True)
-    store_dir = args.store_dir or results_dir / f"mem0_store_{run_id}"
     output_path = args.output or results_dir / f"memory_agent_{args.memory_mode}_results_{run_id}.json"
     answers_output_path = args.answers_output or default_answers_output_path(output_path)
     evaluation_output_path = args.evaluation_output or default_evaluation_output_path(
         answers_output_path
     )
 
-    os.environ.setdefault("MEM0_DIR", str(store_dir))
-    os.environ.setdefault("MEM0_TELEMETRY", "False")
-
     chat = load_json(args.chat)
-    probes = load_json(args.probes)
+    probes = select_probes(
+        load_json(args.probes),
+        question_types=args.question_types,
+        max_questions_per_type=args.max_questions_per_type,
+    )
     topics = load_json(args.topics)
     topic = load_topic(topics)
     chunks = flatten_chunks(chat)
     message_batches = flatten_message_batches(chat)
 
-    memory = Mem0LongTermMemory.from_local(
-        data_dir=str(store_dir),
-        collection_name="beam_100k_case_1",
-        llm_model=args.mem0_llm_model,
-        infer=False,
-    )
+    memory = None
+    store_dir = None
+    if use_mem0:
+        store_dir = args.store_dir or results_dir / f"mem0_store_{run_id}"
+        os.environ.setdefault("MEM0_DIR", str(store_dir))
+        os.environ.setdefault("MEM0_TELEMETRY", "False")
 
-    if args.skip_ingest:
-        print(f"Skipping ingestion and reusing {store_dir}", flush=True)
+        memory = Mem0LongTermMemory.from_local(
+            data_dir=str(store_dir),
+            collection_name="beam_100k_case_1",
+            llm_model=args.mem0_llm_model,
+            infer=False,
+        )
+
+        if args.skip_ingest:
+            print(f"Skipping ingestion and reusing {store_dir}", flush=True)
+        else:
+            print(f"Ingesting {len(chunks)} raw BEAM chunks into {store_dir}", flush=True)
+            for index, chunk in enumerate(chunks, start=1):
+                memory.add(
+                    [{"role": "user", "content": chunk.text}],
+                    user_id=args.user_id,
+                    metadata=chunk.metadata,
+                )
+                if index % 25 == 0 or index == len(chunks):
+                    print(f"  ingested {index}/{len(chunks)}", flush=True)
     else:
-        print(f"Ingesting {len(chunks)} raw BEAM chunks into {store_dir}", flush=True)
-        for index, chunk in enumerate(chunks, start=1):
-            memory.add(
-                [{"role": "user", "content": chunk.text}],
-                user_id=args.user_id,
-                metadata=chunk.metadata,
-            )
-            if index % 25 == 0 or index == len(chunks):
-                print(f"  ingested {index}/{len(chunks)}", flush=True)
+        print("mem0 disabled (structured_only): skipping store and ingestion", flush=True)
 
     structured_middleware: StructuredMemoryMiddleware | None = None
     active_messages: list[AnyMessage] = []
-    if args.memory_mode == "structured_mem0":
+    if use_structured:
         structured_middleware = StructuredMemoryMiddleware(
             memory=Memory(sections=AGENT_SECTIONS),
             updater=MemoryUpdater(
@@ -807,7 +849,8 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "chat": str(args.chat),
         "probes": str(args.probes),
         "topics": str(args.topics),
-        "store_dir": str(store_dir),
+        "store_dir": str(store_dir) if store_dir is not None else None,
+        "output": str(output_path),
         "answers_output": str(answers_output_path),
         "evaluation_output": str(evaluation_output_path) if args.judge_model else None,
         "answer_model": args.answer_model,
@@ -846,7 +889,11 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
 
         for item_index, item in enumerate(items):
             question = item["question"]
-            hits = memory.search(question, user_id=args.user_id, limit=args.top_k)
+            hits = (
+                memory.search(question, user_id=args.user_id, limit=args.top_k)
+                if memory is not None
+                else []
+            )
             response = answer_question(
                 llm=llm,
                 model=args.answer_model,
@@ -954,7 +1001,8 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         }
 
     output["summary"]["overall"] = {
-        "chunks_ingested": len(chunks),
+        "chunks_available": len(chunks),
+        "chunks_ingested": len(chunks) if use_mem0 and not args.skip_ingest else 0,
         "structured_entries": (
             len(structured_middleware.memory.entries) if structured_middleware is not None else 0
         ),
@@ -981,7 +1029,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "note": (
             "Heuristic plus BEAM-style local LLM-as-judge over rubrics."
             if judge_llm is not None
-            else "Heuristic only. Pass --judge-model or set BEAM_JUDGE_MODEL to run BEAM-style LLM-as-judge."
+            else "Heuristic only. BEAM-style LLM-as-judge is disabled by --no-judge."
         ),
     }
 
@@ -1027,25 +1075,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--evaluation-output",
         type=Path,
-        help="Optional BEAM-style judge evaluation JSON path; used with --judge-model.",
+        help="Optional BEAM-style judge evaluation JSON path; used when judge is enabled.",
     )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--user-id", default="beam-100k-case-1")
     parser.add_argument(
         "--memory-mode",
-        choices=("structured_mem0", "raw_mem0"),
-        default="structured_mem0",
-        help="structured_mem0 uses StructuredMemoryMiddleware plus mem0 retrieval; raw_mem0 keeps the old raw mem0-only behavior.",
+        choices=("structured_only", "structured_mem0", "raw_mem0"),
+        default="structured_only",
+        help=(
+            "structured_only answers from StructuredMemoryMiddleware summaries "
+            "without mem0; structured_mem0 adds mem0 retrieval; raw_mem0 skips "
+            "structured summaries and uses only mem0 retrieval."
+        ),
     )
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--max-hit-chars", type=int, default=6000)
     parser.add_argument("--max-active-context-chars", type=int, default=12000)
-    parser.add_argument("--skip-ingest", action="store_true")
-    parser.add_argument("--answer-model", default=os.getenv("BEAM_ANSWER_MODEL", "gpt-4o-mini"))
     parser.add_argument(
-        "--structured-model",
-        default=os.getenv("BEAM_MEMORY_MODEL", os.getenv("MEMORY_MODEL", "gpt-4o-mini")),
+        "--question-types",
+        nargs="+",
+        help="Optional BEAM question types to answer, e.g. information_extraction temporal_reasoning.",
     )
+    parser.add_argument(
+        "--max-questions-per-type",
+        type=int,
+        help="Optional cap per selected question type for quick smoke tests.",
+    )
+    parser.add_argument("--skip-ingest", action="store_true")
+    parser.add_argument("--answer-model", default=DEFAULT_BEAM_MODEL)
+    parser.add_argument("--structured-model", default=DEFAULT_BEAM_MEMORY_MODEL)
     parser.add_argument("--structured-max-tokens", type=int, default=12000)
     parser.add_argument("--structured-max-memory-tokens", type=int, default=3000)
     parser.add_argument("--structured-answer-tokens", type=int, default=4000)
@@ -1053,8 +1112,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--structured-keep-messages", type=int, default=2)
     parser.add_argument("--no-structured-flush-final", dest="structured_flush_final", action="store_false")
     parser.set_defaults(structured_flush_final=True)
-    parser.add_argument("--mem0-llm-model", default=os.getenv("MEM0_LLM_MODEL", "gpt-4o-mini"))
-    parser.add_argument("--judge-model", default=os.getenv("BEAM_JUDGE_MODEL") or None)
+    parser.add_argument("--mem0-llm-model", default=DEFAULT_MEM0_LLM_MODEL)
+    parser.add_argument(
+        "--judge-model",
+        default=DEFAULT_BEAM_JUDGE_MODEL,
+        help="LLM-as-judge model. Defaults to BEAM_JUDGE_MODEL or the answer model default.",
+    )
+    parser.add_argument(
+        "--no-judge",
+        dest="judge_model",
+        action="store_const",
+        const=None,
+        help="Disable BEAM-style LLM-as-judge and report only heuristic rubric scores.",
+    )
     return parser.parse_args()
 
 

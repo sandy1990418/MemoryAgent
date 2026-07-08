@@ -110,13 +110,16 @@ python3.12 -m venv .venv-deepagents
 .venv-deepagents/bin/python scripts/run_beam_case_deepagent.py
 ```
 
-BEAM runners report a cheap heuristic rubric score by default and always write
-a BEAM-compatible answers JSON next to the detailed trace. To also run a
-BEAM-style LLM judge over each rubric, pass `--judge-model` or set
-`BEAM_JUDGE_MODEL`:
+BEAM runners report a cheap heuristic rubric score, run a BEAM-style LLM judge
+by default, and always write a BEAM-compatible answers JSON next to the
+detailed trace. The judge model defaults to `BEAM_JUDGE_MODEL`, then
+`BEAM_ANSWER_MODEL`, then `gpt-5.4-nano`. Override it with `--judge-model`, or
+disable judge calls with `--no-judge`:
 
 ```bash
-python scripts/run_beam_case.py --judge-model gpt-5.4-nano
+python scripts/run_beam_case.py
+
+python scripts/run_beam_case.py --no-judge
 
 .venv-deepagents/bin/python scripts/run_beam_case_deepagent.py \
   --judge-model gpt-5.4-nano
@@ -124,9 +127,21 @@ python scripts/run_beam_case.py --judge-model gpt-5.4-nano
 
 The detailed output JSON then includes `heuristic_rubric_rate`,
 `judge_rubric_rate`, and BEAM-style `judge_score`, plus per-question
-`judge_checks` with `score` and `reason`. With `--judge-model`, the runner also
+`judge_checks` with `score` and `reason`. With judge enabled, the runner also
 writes an `evaluation-*.json` file shaped like BEAM's evaluator output, with
 `llm_judge_score` and `llm_judge_responses`.
+
+To smoke-test a few downloaded BEAM cases from `BEAM/chats/100K` using only
+structured summary memory (no mem0 ingestion/retrieval), run:
+
+```bash
+python scripts/run_beam_cases.py --max-cases 3 \
+  --question-types information_extraction temporal_reasoning \
+  --max-questions-per-type 1
+```
+
+Use `--case-ids 1 2 3` for explicit cases. Results are written under
+`data/beam/results/100K/<case_id>/`, plus a `batch_manifest_*.json` summary.
 
 ## Configuration
 

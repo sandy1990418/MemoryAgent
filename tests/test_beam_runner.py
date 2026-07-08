@@ -11,9 +11,11 @@ from scripts.run_beam_case import (
     beam_evaluation_from_results,
     build_answer_context,
     judge_response,
+    load_topic,
     normalize_judge_checks,
     parse_judge_response,
     rubric_hit,
+    select_probes,
 )
 
 
@@ -183,6 +185,27 @@ def test_beam_compatible_answers_and_evaluation_shapes():
         },
     ]
     assert evaluation["event_ordering"][0]["tau_norm"] == 1.0
+
+
+def test_load_topic_accepts_case_topic_json_dict():
+    topic = {"id": 7, "title": "Case topic"}
+
+    assert load_topic(topic) == topic
+
+
+def test_select_probes_filters_types_and_caps_questions():
+    probes = {
+        "information_extraction": [{"question": "a"}, {"question": "b"}],
+        "temporal_reasoning": [{"question": "c"}],
+    }
+
+    selected = select_probes(
+        probes,
+        question_types=["information_extraction"],
+        max_questions_per_type=1,
+    )
+
+    assert selected == {"information_extraction": [{"question": "a"}]}
 
 
 def test_answer_question_prompt_requires_supported_concise_answers():
