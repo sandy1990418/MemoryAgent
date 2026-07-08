@@ -1,4 +1,4 @@
-from memory_agent.models.sections import CHAT_SECTIONS
+from memory_agent.models.sections import CHAT_SECTIONS, EXACT_VALUES
 from memory_agent.structured.memory import Memory
 
 
@@ -146,6 +146,23 @@ def test_render_excludes_superseded_by_default_and_includes_on_request():
     assert "switched to file storage" in full_render
 
 
+def test_render_omits_turn_provenance_suffixes():
+    mem = make_memory()
+    mem.apply_ops(
+        [
+            {"op": "ADD", "section": "facts", "text": "user prefers concise memory", "provenance": [179]},
+        ]
+    )
+
+    rendered = mem.render()
+    chronological = mem.render_chronological()
+
+    assert "(turns 179)" not in rendered
+    assert "(turns 179)" not in chronological
+    assert "[F1] user prefers concise memory" in rendered
+    assert "[F1] user prefers concise memory" in chronological
+
+
 def test_render_chronological_empty_memory_returns_empty_string():
     mem = make_memory()
 
@@ -229,7 +246,7 @@ def test_render_chronological_budget_keeps_contiguous_prefix_and_footer():
 
 
 def test_render_chronological_can_exclude_sections():
-    mem = make_memory()
+    mem = Memory(sections=[*CHAT_SECTIONS, EXACT_VALUES])
     mem.apply_ops(
         [
             {"op": "ADD", "section": "facts", "text": "topical fact", "provenance": [3]},

@@ -358,10 +358,13 @@ owns the semantic choice.
 
 Memory quality policy:
 
-- Entries should be atomic and concise.
-- Exact dates, versions, counts, durations, percentages, latencies, endpoints,
+- Entries should be concise but aggregated around durable subjects such as the
+  current stack, deployment status, testing progress, security posture, active
+  blockers, and user preferences.
+- Important dates, versions, counts, durations, percentages, endpoints,
   table/column names, file names, error messages, library names, and deployment
-  targets should be preserved in `exact_values` when they may matter later.
+  targets should be embedded in the smallest relevant summary entry. They are
+  not split into a standalone exact-value inventory by default.
 - Generic assistant advice and example code should not become memory unless the
   user accepts, decides, implements, observes, or reports it.
 - `open_questions` is only for unresolved blockers or decisions that remain

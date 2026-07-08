@@ -35,6 +35,7 @@ from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
 from memory_agent.structured.transcript import Transcript
 from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
+from memory_agent.structured.verifier import MemoryUpdateVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +122,16 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         transcript: Transcript | None = None,
         token_counter: TokenCounter = count_tokens_approximately,
         memory_selector: MemorySelector | None = None,
+        update_verifier: MemoryUpdateVerifier | None = None,
     ) -> None:
         super().__init__()
         self.memory = memory
         self.updater = updater
+        # Semantic invariant check on updater output (defense-in-depth); pass
+        # an explicit verifier to customize, or disable via a stub that always
+        # passes. Default on: it only fires when the deterministic extraction
+        # pipeline itself regressed.
+        self.update_verifier = update_verifier if update_verifier is not None else MemoryUpdateVerifier()
         self.max_tokens = max_tokens
         self.evict_fraction = evict_fraction
         # A pre-existing clamp in _find_cutoff already guarantees at least one
@@ -289,6 +296,19 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         if rejected:
             logger.warning(
                 "Memory updater produced rejected ops; keeping messages for retry: %s", rejected
+            )
+            return None
+
+        verification = self.update_verifier.verify(
+            evicted_turns=evicted_turns,
+            applied_ops=_applied,
+            rejected_ops=rejected,
+            memory=self.memory,
+        )
+        if not verification.passed:
+            logger.warning(
+                "Memory update failed semantic verification; keeping messages for retry: %s",
+                verification.errors,
             )
             return None
 

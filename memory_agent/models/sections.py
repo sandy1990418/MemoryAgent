@@ -45,9 +45,9 @@ EXACT_VALUES = SectionConfig(
     prefix="V",
     title="Exact Values",
     description=(
-        "Exact values that must be preserved verbatim: numbers, quantities, "
-        "dates, versions, identifiers, file paths, URLs. Never paraphrase, "
-        "round, or reword."
+        "Optional legacy exact-value inventory for numbers, dates, versions, "
+        "identifiers, file paths, and URLs. Not included in default memory "
+        "sections; prefer embedding important values in concise subject entries."
     ),
 )
 
@@ -120,7 +120,6 @@ FAILED_ATTEMPTS = SectionConfig(
 CHAT_SECTIONS: list[SectionConfig] = [
     DECISIONS,
     PREFERENCES,
-    EXACT_VALUES,
     FACTS,
     OPEN_QUESTIONS,
 ]
@@ -128,7 +127,6 @@ CHAT_SECTIONS: list[SectionConfig] = [
 AGENT_SECTIONS: list[SectionConfig] = [
     DECISIONS,
     PREFERENCES,
-    EXACT_VALUES,
     STATUS_CHANGES,
     TIMELINE,
     GOAL,

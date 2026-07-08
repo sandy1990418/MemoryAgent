@@ -196,7 +196,7 @@ class Memory:
             if not section_entries:
                 continue
             entry_lines = [
-                f"- [{e.id}] {e.text} {self._format_provenance(e.provenance)}"
+                f"- [{e.id}] {e.text}"
                 for e in section_entries
             ]
             append_entry_block(f"## {cfg.title}", entry_lines)
@@ -206,9 +206,8 @@ class Memory:
             if superseded_entries:
                 entry_lines = []
                 for e in superseded_entries:
-                    prov = self._format_provenance(e.provenance)
                     note = f" - {e.note}" if e.note else ""
-                    entry_lines.append(f"- [{e.id}] {e.text} {prov}{note}")
+                    entry_lines.append(f"- [{e.id}] {e.text}{note}")
                 append_entry_block("## Superseded", entry_lines)
 
         if self.narrative:
@@ -258,7 +257,7 @@ class Memory:
         omitted = 0
 
         for entry in sorted_entries:
-            line = f"- [{entry.id}] {entry.text} {self._format_provenance(entry.provenance)}"
+            line = f"- [{entry.id}] {entry.text}"
             if max_tokens is None:
                 lines.append(line)
                 continue
@@ -274,15 +273,6 @@ class Memory:
             lines.append(f"{omitted} memory item(s) omitted because of the token budget.")
 
         return "\n".join(lines).rstrip("\n")
-
-    @staticmethod
-    def _format_provenance(provenance: list[int]) -> str:
-        if not provenance:
-            return "(turns -)"
-        lo, hi = min(provenance), max(provenance)
-        if lo == hi:
-            return f"(turns {lo})"
-        return f"(turns {lo}-{hi})"
 
     def set_narrative(self, text: str) -> None:
         self.narrative = text

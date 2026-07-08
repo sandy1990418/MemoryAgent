@@ -110,8 +110,10 @@ python3.12 -m venv .venv-deepagents
 .venv-deepagents/bin/python scripts/run_beam_case_deepagent.py
 ```
 
-BEAM runners report a cheap heuristic rubric score by default. To also run an
-LLM judge over each rubric, pass `--judge-model` or set `BEAM_JUDGE_MODEL`:
+BEAM runners report a cheap heuristic rubric score by default and always write
+a BEAM-compatible answers JSON next to the detailed trace. To also run a
+BEAM-style LLM judge over each rubric, pass `--judge-model` or set
+`BEAM_JUDGE_MODEL`:
 
 ```bash
 python scripts/run_beam_case.py --judge-model gpt-5.4-nano
@@ -120,8 +122,11 @@ python scripts/run_beam_case.py --judge-model gpt-5.4-nano
   --judge-model gpt-5.4-nano
 ```
 
-The output JSON then includes both `heuristic_rubric_rate` and
-`judge_rubric_rate`, plus per-question `judge_checks` with short reasons.
+The detailed output JSON then includes `heuristic_rubric_rate`,
+`judge_rubric_rate`, and BEAM-style `judge_score`, plus per-question
+`judge_checks` with `score` and `reason`. With `--judge-model`, the runner also
+writes an `evaluation-*.json` file shaped like BEAM's evaluator output, with
+`llm_judge_score` and `llm_judge_responses`.
 
 ## Configuration
 

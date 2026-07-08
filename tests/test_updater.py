@@ -1,6 +1,6 @@
 import pytest
 
-from memory_agent.models.sections import AGENT_SECTIONS, CHAT_SECTIONS
+from memory_agent.models.sections import AGENT_SECTIONS, CHAT_SECTIONS, EXACT_VALUES
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
@@ -59,7 +59,7 @@ def test_prefix_op_with_add_payload_is_normalized_to_add():
     assert mem.entries["F1"].text == "SQLite database is configured"
 
 
-def test_exact_values_rule_is_included_in_prompt():
+def test_exact_values_are_not_in_default_prompt():
     updater = make_updater(lambda system, messages: '[{"op": "NOOP"}]')
     mem = Memory(sections=CHAT_SECTIONS)
 
@@ -68,11 +68,13 @@ def test_exact_values_rule_is_included_in_prompt():
         [Turn(id=1, role="user", content="The version is 1.2.3.")],
     )
 
-    assert "MUST be captured verbatim in the exact_values section" in system
+    assert 'key="exact_values"' not in system
+    assert "Do not create standalone memory entries just for isolated exact values" in system
+    assert "value inventory" in system
 
 
-def test_exact_values_add_applies_with_agent_sections():
-    mem = Memory(sections=AGENT_SECTIONS)
+def test_exact_values_add_applies_when_explicitly_configured():
+    mem = Memory(sections=[*AGENT_SECTIONS, EXACT_VALUES])
 
     applied, rejected = mem.apply_ops_atomically(
         [
@@ -98,8 +100,13 @@ def test_exact_values_prefix_sections_are_normalized():
             '[{"op": "ADD", "section": "v", "text": "2026-07-07", "provenance": [2]}]',
         ]
     )
-    updater = make_updater(lambda system, messages: next(responses), max_retries=0)
-    mem = Memory(sections=CHAT_SECTIONS)
+    sections = [*CHAT_SECTIONS, EXACT_VALUES]
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: next(responses)),
+        sections=sections,
+        max_retries=0,
+    )
+    mem = Memory(sections=sections)
 
     applied, rejected = updater.update(
         mem,
@@ -118,10 +125,11 @@ def test_exact_values_prefix_sections_are_normalized():
     assert mem.entries["V1"].section == "exact_values"
     assert mem.entries["V1"].text == "/tmp/report.json"
     assert mem.entries["V2"].section == "exact_values"
-    assert mem.entries["V2"].text == "2026-07-07"
+    # Deterministic date extraction now prefixes the same-sentence subject.
+    assert mem.entries["V2"].text == "The date is 2026-07-07"
 
 
-def test_exact_values_are_extracted_when_llm_noops():
+def test_exact_values_are_not_extracted_by_default_when_llm_noops():
     response = '[{"op": "NOOP"}]'
     updater = make_updater(lambda system, messages: response)
     mem = Memory(sections=CHAT_SECTIONS)
@@ -141,20 +149,11 @@ def test_exact_values_are_extracted_when_llm_noops():
     )
 
     assert rejected == []
-    assert len(applied) == 5
-    exact_values = [
-        entry.text for entry in mem.entries.values() if entry.section == "exact_values"
-    ]
-    assert exact_values == [
-        "April 15, 2024",
-        "Flask 2.3.1",
-        "SQLite 3.39",
-        "Bootstrap 5.3",
-        "150ms",
-    ]
+    assert applied == []
+    assert mem.entries == {}
 
 
-def test_llm_duplicate_add_of_deterministic_value_is_dropped():
+def test_exact_values_add_is_rejected_by_default_sections():
     response = (
         '[{"op": "ADD", "section": "exact_values", '
         '"text": "Flask 2.3.1", "provenance": [1]}]'
@@ -167,9 +166,9 @@ def test_llm_duplicate_add_of_deterministic_value_is_dropped():
         [Turn(id=1, role="user", content="The app uses Flask 2.3.1.")],
     )
 
-    assert rejected == []
-    assert len(applied) == 1
-    assert [entry.text for entry in mem.entries.values()] == ["Flask 2.3.1"]
+    assert applied == []
+    assert len(rejected) == 1
+    assert mem.entries == {}
 
 
 def test_status_change_snippets_are_extracted_with_agent_sections():
@@ -504,11 +503,13 @@ def test_prompt_includes_memory_quality_rules():
     updater.update(mem, [Turn(id=1, role="user", content="How do I add an index?")])
 
     system = captured["system"]
-    assert "Keep entries atomic and concise" in system
+    assert "Keep entries concise but aggregated" in system
+    assert "return 0-2 durable ops total" in system
+    assert "Prefer one consolidated entry per subject" in system
     assert "Do not save generic assistant advice" in system
     assert "Do not infer missing details" in system
     assert "Do not turn every user request into an open question" in system
-    assert "Preserve exact dates, versions, counts" in system
+    assert "do not split them into a separate value inventory" in system
     assert "Use status_changes for explicit contradictions" in system
     assert "I never" in system
     assert "Use timeline only for explicitly stated dated or staged milestones" in system
@@ -546,3 +547,126 @@ def test_status_change_snippet_truncation_keeps_late_cue_phrase():
     assert snippet is not None
     assert "never" in snippet
     assert "Flask-Login" in snippet
+
+
+def _add_fact(mem: Memory, text: str, provenance: list[int]) -> None:
+    applied, rejected = mem.apply_ops(
+        [{"op": "ADD", "section": "facts", "text": text, "provenance": provenance}]
+    )
+    assert rejected == []
+
+
+def test_update_context_selects_overlapping_and_always_sections():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=AGENT_SECTIONS,
+        update_context_max_entries=3,
+    )
+    mem = Memory(sections=AGENT_SECTIONS)
+    mem.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "timeline",
+                "text": "Final deployment deadline is April 15, 2024.",
+                "provenance": [9],
+            },
+            {
+                "op": "ADD",
+                "section": "preferences",
+                "text": "User prefers terse answers.",
+                "provenance": [2],
+            },
+        ]
+    )
+    _add_fact(mem, "The weather tool returns JSON payloads.", [30])
+    _add_fact(mem, "Bootstrap grid uses twelve columns.", [31])
+
+    turns = [
+        Turn(
+            id=100,
+            role="user",
+            content="I moved the final deployment deadline to March 15, 2024.",
+        )
+    ]
+    selected = updater._select_update_context_entries(mem, turns)
+    texts = [entry.text for entry in selected]
+
+    assert "User prefers terse answers." in texts  # always-context section
+    assert "Final deployment deadline is April 15, 2024." in texts  # overlap
+    assert "The weather tool returns JSON payloads." not in texts
+    assert "Bootstrap grid uses twelve columns." not in texts
+
+
+def test_build_prompt_uses_targeted_context_when_memory_is_large():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=AGENT_SECTIONS,
+        update_context_max_entries=2,
+    )
+    mem = Memory(sections=AGENT_SECTIONS)
+    mem.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "timeline",
+                "text": "Final deployment deadline is April 15, 2024.",
+                "provenance": [9],
+            }
+        ]
+    )
+    _add_fact(mem, "The weather tool returns JSON payloads.", [30])
+    _add_fact(mem, "Bootstrap grid uses twelve columns.", [31])
+
+    turns = [
+        Turn(
+            id=100,
+            role="user",
+            content="I moved the final deployment deadline to March 15, 2024.",
+        )
+    ]
+    system, _messages = updater._build_prompt(mem, turns)
+
+    assert "Final deployment deadline is April 15, 2024." in system
+    assert "The weather tool returns JSON payloads." not in system
+
+
+def test_build_prompt_renders_full_memory_when_small():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=AGENT_SECTIONS,
+        update_context_max_entries=40,
+    )
+    mem = Memory(sections=AGENT_SECTIONS)
+    _add_fact(mem, "The weather tool returns JSON payloads.", [30])
+
+    turns = [Turn(id=100, role="user", content="Unrelated topic entirely.")]
+    system, _messages = updater._build_prompt(mem, turns)
+
+    assert "The weather tool returns JSON payloads." in system
+
+
+def test_date_extraction_is_disabled_by_default_sections():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=AGENT_SECTIONS,
+    )
+    mem = Memory(sections=AGENT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [
+            Turn(
+                id=1,
+                role="user",
+                content=(
+                    "Great progress so far. The final deployment deadline is "
+                    "March 15, 2024."
+                ),
+            )
+        ],
+    )
+
+    assert rejected == []
+    assert applied == []
+    assert mem.entries == {}

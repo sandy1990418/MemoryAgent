@@ -1,12 +1,14 @@
 """Run one BEAM chat case with structured memory plus local mem0 recall.
 
-This is a smoke-test runner, not the official BEAM evaluator. It uses BEAM's
-probing-question rubrics as local ground-truth hints and reports a heuristic
-rubric hit rate. Official BEAM scoring uses an LLM-as-judge over the same
-rubrics.
+This runner answers one BEAM chat case and writes both a detailed local trace
+and BEAM-compatible answer/evaluation files. BEAM's official evaluation scores
+each probing-question rubric with an LLM-as-judge on a 0.0/0.5/1.0 scale; the
+same rubric-level judge shape is used here when --judge-model is provided.
 """
 
 from __future__ import annotations
+
+# ruff: noqa: E402
 
 import argparse
 import json
@@ -84,6 +86,81 @@ STOPWORDS = {
     "you",
     "your",
 }
+
+
+# Mirrors BEAM's unified_llm_judge_base_prompt structure.
+BEAM_JUDGE_SYSTEM = "You are an expert evaluator."
+
+BEAM_JUDGE_USER_TEMPLATE = """You are an expert evaluator tasked with judging whether the LLM's response demonstrates compliance with the specified RUBRIC CRITERION.
+
+## EVALUATION INPUTS
+- QUESTION (what the user asked): {question}
+- RUBRIC CRITERION (what to check): {rubric}
+- RESPONSE TO EVALUATE: {response}
+
+## EVALUATION RUBRIC
+The rubric defines a specific requirement, constraint, or expected behavior that the LLM response should demonstrate.
+
+**IMPORTANT**: Pay careful attention to whether the rubric specifies:
+- **Positive requirements** (things the response SHOULD include/do)
+- **Negative constraints** (things the response SHOULD NOT include/do, often indicated by "no", "not", "avoid", "absent")
+
+## RESPONSIVENESS REQUIREMENT (anchored to the QUESTION)
+A compliant response must be on-topic with respect to the QUESTION and attempt to answer it.
+- If the response does not address the QUESTION, score **0.0** and stop.
+- For negative constraints, both must hold: (a) the response is responsive to the QUESTION, and (b) the prohibited element is absent.
+
+## SEMANTIC TOLERANCE RULES
+Judge by meaning, not exact wording.
+- Accept paraphrases and synonyms that preserve intent.
+- Case, punctuation, and whitespace differences must be ignored.
+- Numbers, currencies, dates, and durations may appear in equivalent forms.
+- If the rubric expects a number or duration, prefer normalized comparison over string matching.
+
+## STYLE NEUTRALITY
+Ignore tone, politeness, length, and flourish unless the rubric explicitly requires a format/structure.
+- Do not penalize hedging, voice, or verbosity if content satisfies the rubric.
+- Only evaluate format when the rubric explicitly mandates it.
+
+## SCORING SCALE
+- **1.0 (Complete Compliance)**: Fully complies with the rubric criterion.
+- **0.5 (Partial Compliance)**: Partially complies.
+- **0.0 (No Compliance)**: Fails to comply.
+
+## EVALUATION INSTRUCTIONS
+1. Understand whether the rubric asks for something to be present or absent.
+2. Parse compound statements and decide whether all elements are required.
+3. Check compliance with the specific rubric criterion.
+4. Assign score according to the scoring scale.
+5. Provide reasoning for the score.
+
+## OUTPUT FORMAT
+Return your evaluation in JSON format with two fields:
+{{"score": 1.0, "reason": "explanation of whether the rubric criterion was satisfied and why"}}
+NOTE: ONLY output the json object, without any explanation before or after that.
+"""
+
+# Mirrors BEAM's answer_generation_for_rag baseline prompt.
+BEAM_RAG_ANSWER_SYSTEM = "You are an assistant."
+
+BEAM_RAG_ANSWER_TEMPLATE = """You are an assistant that MUST answer questions using ONLY the information provided in the context below.
+
+STRICT INSTRUCTIONS:
+1. Answer ONLY based on the provided context.
+2. Do NOT use your internal knowledge.
+
+CONTEXT:
+{context}
+
+QUESTION:
+{question}
+
+ANSWER REQUIREMENTS:
+- Be direct and concise.
+- Only output the answer to the question without any explanation.
+
+RESPONSE:
+"""
 
 
 def load_json(path: Path) -> Any:
@@ -175,16 +252,37 @@ def parse_judge_response(response: str) -> dict[str, Any] | None:
     return None
 
 
+def normalize_judge_score(value: Any) -> float:
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if score < 0:
+        return 0.0
+    if score > 1:
+        return 1.0
+    return score
+
+
 def normalize_judge_checks(
     parsed: dict[str, Any] | None,
     rubric_lines: list[str],
 ) -> list[dict[str, Any]]:
-    raw_checks = parsed.get("checks") if isinstance(parsed, dict) else None
+    if isinstance(parsed, dict) and isinstance(parsed.get("checks"), list):
+        raw_checks = parsed["checks"]
+    elif isinstance(parsed, dict) and ("score" in parsed or "passed" in parsed):
+        raw_checks = [parsed]
+    else:
+        raw_checks = None
+
     if not isinstance(raw_checks, list):
         return [
             {
                 "rubric": rubric,
                 "target": rubric_target(rubric),
+                "score": 0.0,
                 "passed": False,
                 "reason": "judge response could not be parsed",
             }
@@ -196,11 +294,16 @@ def normalize_judge_checks(
         raw_check = raw_checks[index] if index < len(raw_checks) else {}
         if not isinstance(raw_check, dict):
             raw_check = {}
+        if "score" in raw_check:
+            score = normalize_judge_score(raw_check.get("score"))
+        else:
+            score = 1.0 if bool(raw_check.get("passed")) else 0.0
         checks.append(
             {
                 "rubric": rubric,
                 "target": rubric_target(rubric),
-                "passed": bool(raw_check.get("passed")),
+                "score": score,
+                "passed": score >= 1.0,
                 "reason": str(raw_check.get("reason") or "").strip(),
             }
         )
@@ -219,33 +322,20 @@ def judge_response(
     if not rubric_lines:
         return []
 
-    system = (
-        "You are an impartial evaluator for a long-term-memory benchmark. "
-        "Grade only whether the assistant response satisfies each rubric. "
-        "Use the question, optional reference answer, and rubric text as the "
-        "source of truth. Mark a rubric passed only when the response explicitly "
-        "or unambiguously entails it. Do not give credit for unrelated extra "
-        "detail. Return JSON only with this shape: "
-        "{\"checks\": [{\"passed\": true|false, \"reason\": \"short reason\"}, ...]}."
-    )
-    payload = {
-        "question_type": question_type,
-        "question": question,
-        "reference_answer": reference,
-        "assistant_response": response,
-        "rubrics": rubric_lines,
-    }
-    raw = llm.complete(
-        system=system,
-        messages=[
-            {
-                "role": "user",
-                "content": json.dumps(payload, ensure_ascii=False, indent=2),
-            }
-        ],
-        model=model,
-    )
-    return normalize_judge_checks(parse_judge_response(raw), rubric_lines)
+    checks: list[dict[str, Any]] = []
+    for rubric in rubric_lines:
+        prompt = BEAM_JUDGE_USER_TEMPLATE.format(
+            question=question,
+            rubric=rubric,
+            response=response,
+        )
+        raw = llm.complete(
+            system=BEAM_JUDGE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+        )
+        checks.extend(normalize_judge_checks(parse_judge_response(raw), [rubric]))
+    return checks
 
 
 def flatten_chunks(chat: list[dict[str, Any]]) -> list[BeamChunk]:
@@ -428,18 +518,16 @@ def build_answer_context(
 
     return (
         "# Conversation Memory\n"
-        "Structured current-state memory generated by StructuredMemoryMiddleware. "
-        "Prefer this section if it conflicts with raw long-term recall.\n"
+        "Structured memory summary.\n"
         f"{conversation_memory}\n\n"
         "# Chronological Order\n"
-        "Entries ordered by when they were first mentioned (earliest first); use this "
-        "to answer ordering or sequence questions.\n"
+        "Entries ordered by first mention, earliest first.\n"
         f"{chronological}\n\n"
         "# Working Conversation Tail\n"
-        "Recent active messages not yet evicted into structured memory.\n"
+        "Recent messages not yet folded into memory.\n"
         f"{working_tail}\n\n"
         "# Long-Term Memory\n"
-        "Raw mem0 retrieval from the BEAM transcript.\n"
+        "Retrieved raw transcript snippets.\n"
         f"{build_context(hits, max_hit_chars=max_hit_chars)}"
     )
 
@@ -469,6 +557,130 @@ def structured_memory_stats(memory: Memory | None) -> dict[str, Any]:
     }
 
 
+def judge_score(checks: list[dict[str, Any]]) -> float | None:
+    if not checks:
+        return None
+    return sum(normalize_judge_score(check.get("score")) for check in checks) / len(checks)
+
+
+def target_response_position(response: str, target: str) -> int | None:
+    response_lower = response.lower()
+    target_lower = target.lower()
+    exact_index = response_lower.find(target_lower)
+    if exact_index >= 0:
+        return exact_index
+
+    target_words = content_words(target)
+    if not target_words:
+        return None
+
+    positions = [
+        response_lower.find(word)
+        for word in target_words
+        if response_lower.find(word) >= 0
+    ]
+    if len(positions) / len(target_words) < 0.5:
+        return None
+    return min(positions)
+
+
+def event_ordering_score_from_response(
+    rubric_lines: list[str],
+    response: str,
+) -> dict[str, float]:
+    targets = [rubric_target(line) for line in rubric_lines]
+    positions = [target_response_position(response, target) for target in targets]
+    matched = sum(position is not None for position in positions)
+    recall = matched / len(targets) if targets else 0.0
+    precision = recall
+    f1 = recall
+
+    pair_total = len(targets) * (len(targets) - 1) / 2
+    pair_score = 0.0
+    if pair_total:
+        for left_index, left_position in enumerate(positions):
+            for right_position in positions[left_index + 1 :]:
+                if left_position is None or right_position is None:
+                    continue
+                if left_position < right_position:
+                    pair_score += 1.0
+                elif left_position == right_position:
+                    pair_score += 0.5
+        tau_norm = pair_score / pair_total
+    else:
+        tau_norm = 1.0 if matched else 0.0
+
+    return {
+        "precision": round(precision, 6),
+        "recall": round(recall, 6),
+        "f1": round(f1, 6),
+        "tau_norm": round(tau_norm, 6),
+        "final_score": round(tau_norm * f1, 6),
+    }
+
+
+def beam_answers_from_results(results: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, str]]]:
+    return {
+        question_type: [
+            {
+                "question": str(item.get("question", "")),
+                "llm_response": str(item.get("llm_response", "")),
+            }
+            for item in items
+        ]
+        for question_type, items in results.items()
+    }
+
+
+def beam_evaluation_from_results(
+    results: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    evaluation: dict[str, list[dict[str, Any]]] = {}
+    for question_type, items in results.items():
+        rows = []
+        for item in items:
+            checks = list(item.get("judge_checks") or [])
+            llm_judge_score = judge_score(checks)
+            row: dict[str, Any] = {
+                "question": item.get("question"),
+                "llm_response": item.get("llm_response"),
+                "llm_judge_score": round(llm_judge_score, 6)
+                if llm_judge_score is not None
+                else None,
+                "llm_judge_responses": [
+                    {
+                        "rubric": check.get("rubric"),
+                        "score": normalize_judge_score(check.get("score")),
+                        "reason": check.get("reason", ""),
+                    }
+                    for check in checks
+                ],
+            }
+            if question_type == "event_ordering":
+                row.update(
+                    event_ordering_score_from_response(
+                        [str(check.get("rubric", "")) for check in checks],
+                        str(item.get("llm_response", "")),
+                    )
+                )
+            rows.append(row)
+        evaluation[question_type] = rows
+    return evaluation
+
+
+def default_answers_output_path(output_path: Path) -> Path:
+    stem = output_path.stem
+    if "_results_" in stem:
+        stem = stem.replace("_results_", "_answers_")
+    else:
+        stem = f"{stem}_answers"
+    return output_path.with_name(f"{stem}{output_path.suffix}")
+
+
+def default_evaluation_output_path(answers_path: Path) -> Path:
+    return answers_path.with_name(f"evaluation-{answers_path.name}")
+
+
 def answer_question(
     llm: OpenAIClient,
     model: str,
@@ -477,32 +689,21 @@ def answer_question(
     question: str,
     context: str,
 ) -> str:
-    system = (
-        "You answer BEAM long-term-memory probing questions. Use only the "
-        "provided memory context. The # Conversation Memory section is the "
-        "structured current state produced by StructuredMemoryMiddleware; prefer "
-        "it if it conflicts with # Long-Term Memory. Use # Long-Term Memory as "
-        "raw supporting recall from mem0. If the answer is not supported by the "
-        "provided context, say that the provided chat does not contain enough "
-        "information. Do not infer background, previous projects, user feedback, "
-        "causes, or outcomes from nearby project facts; those details must be "
-        "explicitly supported. For contradiction questions, if memory contains "
-        "both a denial/correction and an affirmative project fact, explicitly "
-        "state that there is contradictory information and ask which statement "
-        "is correct. For ordering or temporal questions, use turn ids, chat ids, "
-        "and provenance to preserve chronology, and obey any requested item "
-        "count exactly. Keep answers concise and do not include tutorials or "
-        "extra implementation advice. Follow any remembered user instructions "
-        "that are relevant to the question."
-    )
     topic_text = json.dumps(topic, ensure_ascii=False)
-    user = (
+    prompt_context = (
         f"Topic metadata:\n{topic_text}\n\n"
         f"Question type: {question_type}\n\n"
-        f"Memory context:\n{context}\n\n"
-        f"Probing question:\n{question}"
+        f"Memory context:\n{context}"
     )
-    return llm.complete(system=system, messages=[{"role": "user", "content": user}], model=model)
+    user = BEAM_RAG_ANSWER_TEMPLATE.format(
+        context=prompt_context,
+        question=question,
+    )
+    return llm.complete(
+        system=BEAM_RAG_ANSWER_SYSTEM,
+        messages=[{"role": "user", "content": user}],
+        model=model,
+    )
 
 
 def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
@@ -518,6 +719,10 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
     results_dir.mkdir(parents=True, exist_ok=True)
     store_dir = args.store_dir or results_dir / f"mem0_store_{run_id}"
     output_path = args.output or results_dir / f"memory_agent_{args.memory_mode}_results_{run_id}.json"
+    answers_output_path = args.answers_output or default_answers_output_path(output_path)
+    evaluation_output_path = args.evaluation_output or default_evaluation_output_path(
+        answers_output_path
+    )
 
     os.environ.setdefault("MEM0_DIR", str(store_dir))
     os.environ.setdefault("MEM0_TELEMETRY", "False")
@@ -603,6 +808,8 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "probes": str(args.probes),
         "topics": str(args.topics),
         "store_dir": str(store_dir),
+        "answers_output": str(answers_output_path),
+        "evaluation_output": str(evaluation_output_path) if args.judge_model else None,
         "answer_model": args.answer_model,
         "judge_model": args.judge_model,
         "structured_model": args.structured_model if structured_middleware is not None else None,
@@ -625,6 +832,8 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
     total_rubrics = 0
     total_judge_hits = 0
     total_judge_rubrics = 0
+    total_judge_score = 0.0
+    total_judge_questions = 0
     for question_type, items in probes.items():
         print(f"Answering {question_type}: {len(items)} question(s)", flush=True)
         category_results = []
@@ -632,6 +841,8 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         category_rubrics = 0
         category_judge_hits = 0
         category_judge_rubrics = 0
+        category_judge_score = 0.0
+        category_judge_questions = 0
 
         for item_index, item in enumerate(items):
             question = item["question"]
@@ -659,6 +870,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
 
             judge_checks = []
             judge_hit_count = 0
+            question_judge_score = None
             if judge_llm is not None:
                 judge_checks = judge_response(
                     llm=judge_llm,
@@ -670,14 +882,21 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                     rubric_lines=list(item.get("rubric", [])),
                 )
                 judge_hit_count = sum(1 for check in judge_checks if check["passed"])
+                question_judge_score = judge_score(judge_checks)
                 category_judge_hits += judge_hit_count
                 category_judge_rubrics += len(judge_checks)
+                if question_judge_score is not None:
+                    category_judge_score += question_judge_score
+                    category_judge_questions += 1
 
+            judge_score_text = (
+                f"{question_judge_score:.3f}" if question_judge_score is not None else "n/a"
+            )
             print(
                 f"  {question_type}[{item_index}] "
                 f"heuristic={hit_count}/{len(rubric_checks)}"
                 + (
-                    f" judge={judge_hit_count}/{len(judge_checks)}"
+                    f" judge={judge_score_text} ({judge_hit_count}/{len(judge_checks)})"
                     if judge_llm is not None
                     else ""
                 )
@@ -702,6 +921,9 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                     "heuristic_rubric_hits": hit_count,
                     "heuristic_rubric_total": len(rubric_checks),
                     "judge_checks": judge_checks if judge_llm is not None else None,
+                    "llm_judge_score": round(question_judge_score, 6)
+                    if question_judge_score is not None
+                    else None,
                     "judge_rubric_hits": judge_hit_count if judge_llm is not None else None,
                     "judge_rubric_total": len(judge_checks) if judge_llm is not None else None,
                 }
@@ -711,6 +933,8 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         total_rubrics += category_rubrics
         total_judge_hits += category_judge_hits
         total_judge_rubrics += category_judge_rubrics
+        total_judge_score += category_judge_score
+        total_judge_questions += category_judge_questions
         output["results"][question_type] = category_results
         output["summary"][question_type] = {
             "heuristic_rubric_hits": category_hits,
@@ -723,6 +947,10 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             "judge_rubric_rate": round(category_judge_hits / category_judge_rubrics, 3)
             if judge_llm is not None and category_judge_rubrics
             else None,
+            "judge_score": round(category_judge_score / category_judge_questions, 3)
+            if judge_llm is not None and category_judge_questions
+            else None,
+            "judge_questions": category_judge_questions if judge_llm is not None else None,
         }
 
     output["summary"]["overall"] = {
@@ -746,17 +974,39 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "judge_rubric_rate": round(total_judge_hits / total_judge_rubrics, 3)
         if judge_llm is not None and total_judge_rubrics
         else None,
+        "judge_score": round(total_judge_score / total_judge_questions, 3)
+        if judge_llm is not None and total_judge_questions
+        else None,
+        "judge_questions": total_judge_questions if judge_llm is not None else None,
         "note": (
-            "Heuristic plus local LLM-as-judge over rubrics."
+            "Heuristic plus BEAM-style local LLM-as-judge over rubrics."
             if judge_llm is not None
-            else "Heuristic only. Pass --judge-model or set BEAM_JUDGE_MODEL to run LLM-as-judge."
+            else "Heuristic only. Pass --judge-model or set BEAM_JUDGE_MODEL to run BEAM-style LLM-as-judge."
         ),
     }
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    answers_output_path.parent.mkdir(parents=True, exist_ok=True)
+    if judge_llm is not None:
+        evaluation_output_path.parent.mkdir(parents=True, exist_ok=True)
+
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
+    with answers_output_path.open("w", encoding="utf-8") as f:
+        json.dump(beam_answers_from_results(output["results"]), f, indent=2, ensure_ascii=False)
+    if judge_llm is not None:
+        with evaluation_output_path.open("w", encoding="utf-8") as f:
+            json.dump(
+                beam_evaluation_from_results(output["results"]),
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
     print(f"Wrote results to {output_path}")
+    print(f"Wrote BEAM-compatible answers to {answers_output_path}")
+    if judge_llm is not None:
+        print(f"Wrote BEAM-style evaluation to {evaluation_output_path}")
     print(json.dumps(output["summary"]["overall"], indent=2))
     return output
 
@@ -769,6 +1019,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
     parser.add_argument("--store-dir", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--answers-output",
+        type=Path,
+        help="Optional BEAM-compatible answers JSON path; defaults next to --output.",
+    )
+    parser.add_argument(
+        "--evaluation-output",
+        type=Path,
+        help="Optional BEAM-style judge evaluation JSON path; used with --judge-model.",
+    )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--user-id", default="beam-100k-case-1")
     parser.add_argument(

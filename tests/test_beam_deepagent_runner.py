@@ -71,15 +71,13 @@ def test_deepagent_system_prompt_requires_supported_concise_answers():
         max_active_context_chars=500,
     )
 
-    assert "Do not infer background, previous projects, user feedback" in prompt
-    assert "there is contradictory information" in prompt
-    assert "For contradiction_resolution questions specifically" in prompt
-    assert "second using negation phrasing" in prompt
-    assert "obey any requested item count exactly" in prompt
-    assert "Keep answers concise" in prompt
-    assert "issue one search per facet" in prompt
-    assert "state the total count explicitly" in prompt
-    assert "repeat them verbatim" in prompt
+    assert "Use the search_long_term_memory tool when the prompt memory" in prompt
+    assert "use a few targeted searches" in prompt
+    assert "Use only available memory and, when a tool is available" in prompt
+    assert "Be concise" in prompt
+    assert "evidence is insufficient" in prompt
+    assert "evidence conflicts" in prompt
+    assert "Use chronological evidence" in prompt
 
 
 class FakeAgent:
@@ -132,7 +130,7 @@ def test_ask_agent_includes_chronological_order_with_structured_memory():
     assert response == "ok"
     user_message = agent.calls[0]["state"]["messages"][0]["content"]
     assert "# Chronological Order" in user_message
-    assert "Entries ordered by when they were first mentioned" in user_message
+    assert "Entries ordered by first mention" in user_message
     chronological_block = user_message.split("# Chronological Order", 1)[1].split(
         "Probing question:", 1
     )[0]
@@ -185,4 +183,60 @@ def test_ask_agent_surfaces_recorded_denials_block():
     )[0]
     assert "I've never integrated Flask-Login" in denials_block
     assert "Flask-Login v0.6.2 for session management" not in denials_block
-    assert "which statement is correct" in denials_block
+    assert "denying, correcting, or reversing" in denials_block
+
+def test_system_prompt_without_retrieval_omits_search_tool():
+    prompt = build_agent_system_prompt(
+        structured_middleware=None,
+        active_messages=[HumanMessage(content="recent")],
+        structured_answer_tokens=500,
+        max_active_context_chars=500,
+        retrieval_enabled=False,
+    )
+
+    assert "search_long_term_memory" not in prompt
+    assert "No retrieval tool is available" in prompt
+    assert "Use only available memory and, when a tool is available" in prompt
+    assert "Be concise" in prompt
+    assert "evidence conflicts" in prompt
+    assert "Use chronological evidence" in prompt
+
+
+def test_ask_agent_without_retrieval_instructs_memory_only_answering():
+    memory = Memory(sections=AGENT_SECTIONS)
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "project uses Flask",
+                "provenance": [3],
+            }
+        ]
+    )
+    structured_middleware = StructuredMemoryMiddleware(
+        memory=memory,
+        updater=MemoryUpdater(
+            llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+            sections=AGENT_SECTIONS,
+        ),
+        max_tokens=1000,
+    )
+    agent = FakeAgent()
+
+    ask_agent(
+        agent=agent,
+        topic={"title": "Budget tracker"},
+        question_type="information_extraction",
+        question="What framework is used?",
+        recursion_limit=10,
+        structured_middleware=structured_middleware,
+        structured_answer_tokens=500,
+        retrieval_enabled=False,
+    )
+
+    user_message = agent.calls[0]["state"]["messages"][0]["content"]
+    assert "Use the search_long_term_memory tool" not in user_message
+    assert "Answer using only the memory sections above" in user_message
+    assert "# Question-Relevant Structured Memory" in user_message
+    assert "# Recorded Denials and Corrections" in user_message

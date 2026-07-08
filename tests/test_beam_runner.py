@@ -7,6 +7,8 @@ from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
 from scripts.run_beam_case import (
     answer_question,
+    beam_answers_from_results,
+    beam_evaluation_from_results,
     build_answer_context,
     judge_response,
     normalize_judge_checks,
@@ -16,13 +18,14 @@ from scripts.run_beam_case import (
 
 
 class FakeJudgeLLM:
-    def __init__(self, response: str) -> None:
-        self.response = response
+    def __init__(self, response: str | list[str]) -> None:
+        self.responses = [response] if isinstance(response, str) else list(response)
         self.calls = []
 
     def complete(self, system, messages, model=None):
         self.calls.append({"system": system, "messages": messages, "model": model})
-        return self.response
+        index = min(len(self.calls) - 1, len(self.responses) - 1)
+        return self.responses[index]
 
 
 class FakeAnswerLLM(FakeJudgeLLM):
@@ -62,7 +65,7 @@ def test_parse_judge_response_accepts_fenced_json_object():
 
 def test_normalize_judge_checks_preserves_rubric_order_and_fills_missing_checks():
     checks = normalize_judge_checks(
-        {"checks": [{"passed": True, "reason": "ok"}]},
+        {"checks": [{"score": 0.5, "reason": "partial"}]},
         [
             "LLM response should mention: Flask 2.3.1",
             "LLM response should mention: SQLite 3.39",
@@ -73,12 +76,14 @@ def test_normalize_judge_checks_preserves_rubric_order_and_fills_missing_checks(
         {
             "rubric": "LLM response should mention: Flask 2.3.1",
             "target": "Flask 2.3.1",
-            "passed": True,
-            "reason": "ok",
+            "score": 0.5,
+            "passed": False,
+            "reason": "partial",
         },
         {
             "rubric": "LLM response should mention: SQLite 3.39",
             "target": "SQLite 3.39",
+            "score": 0.0,
             "passed": False,
             "reason": "",
         },
@@ -87,10 +92,10 @@ def test_normalize_judge_checks_preserves_rubric_order_and_fills_missing_checks(
 
 def test_judge_response_returns_normalized_checks_from_llm_json():
     llm = FakeJudgeLLM(
-        '{"checks": ['
-        '{"passed": true, "reason": "mentions Flask"},'
-        '{"passed": false, "reason": "missing SQLite"}'
-        "]}"
+        [
+            '{"score": 1.0, "reason": "mentions Flask"}',
+            '{"score": 0.0, "reason": "missing SQLite"}',
+        ]
     )
 
     checks = judge_response(
@@ -107,8 +112,77 @@ def test_judge_response_returns_normalized_checks_from_llm_json():
     )
 
     assert [check["passed"] for check in checks] == [True, False]
+    assert [check["score"] for check in checks] == [1.0, 0.0]
+    assert len(llm.calls) == 2
     assert llm.calls[0]["model"] == "judge-model"
-    assert "impartial evaluator" in llm.calls[0]["system"]
+    assert "expert evaluator" in llm.calls[0]["system"]
+    assert "specified RUBRIC CRITERION" in llm.calls[0]["messages"][0]["content"]
+    assert "SCORING SCALE" in llm.calls[0]["messages"][0]["content"]
+
+
+def test_beam_compatible_answers_and_evaluation_shapes():
+    results = {
+        "information_extraction": [
+            {
+                "question": "Which framework is used?",
+                "llm_response": "The project uses Flask 2.3.1.",
+                "judge_checks": [
+                    {
+                        "rubric": "LLM response should mention: Flask 2.3.1",
+                        "score": 1.0,
+                        "reason": "explicitly mentions Flask 2.3.1",
+                    },
+                    {
+                        "rubric": "LLM response should mention: SQLite 3.39",
+                        "score": 0.0,
+                        "reason": "missing SQLite",
+                    },
+                ],
+            }
+        ],
+        "event_ordering": [
+            {
+                "question": "List the order.",
+                "llm_response": "First came setup, then deployment.",
+                "judge_checks": [
+                    {"rubric": "setup", "score": 1.0, "reason": "present"},
+                    {"rubric": "deployment", "score": 1.0, "reason": "present"},
+                ],
+            }
+        ],
+    }
+
+    answers = beam_answers_from_results(results)
+    evaluation = beam_evaluation_from_results(results)
+
+    assert answers == {
+        "information_extraction": [
+            {
+                "question": "Which framework is used?",
+                "llm_response": "The project uses Flask 2.3.1.",
+            }
+        ],
+        "event_ordering": [
+            {
+                "question": "List the order.",
+                "llm_response": "First came setup, then deployment.",
+            }
+        ],
+    }
+    assert evaluation["information_extraction"][0]["llm_judge_score"] == 0.5
+    assert evaluation["information_extraction"][0]["llm_judge_responses"] == [
+        {
+            "rubric": "LLM response should mention: Flask 2.3.1",
+            "score": 1.0,
+            "reason": "explicitly mentions Flask 2.3.1",
+        },
+        {
+            "rubric": "LLM response should mention: SQLite 3.39",
+            "score": 0.0,
+            "reason": "missing SQLite",
+        },
+    ]
+    assert evaluation["event_ordering"][0]["tau_norm"] == 1.0
 
 
 def test_answer_question_prompt_requires_supported_concise_answers():
@@ -125,11 +199,13 @@ def test_answer_question_prompt_requires_supported_concise_answers():
 
     assert response == "ok"
     assert llm.calls[0]["model"] == "answer-model"
-    system = llm.calls[0]["system"]
-    assert "Do not infer background, previous projects, user feedback" in system
-    assert "there is contradictory information" in system
-    assert "obey any requested item count exactly" in system
-    assert "Keep answers concise" in system
+    assert llm.calls[0]["system"] == "You are an assistant."
+    user_prompt = llm.calls[0]["messages"][0]["content"]
+    assert "MUST answer questions using ONLY the information provided" in user_prompt
+    assert "Do NOT use your internal knowledge" in user_prompt
+    assert "ANSWER REQUIREMENTS" in user_prompt
+    assert "Only output the answer to the question" in user_prompt
+    assert "Can you tell me about my previous projects?" in user_prompt
 
 
 def test_build_answer_context_includes_chronological_order_block():
@@ -166,7 +242,7 @@ def test_build_answer_context_includes_chronological_order_block():
     )
 
     assert "# Chronological Order" in context
-    assert "Entries ordered by when they were first mentioned" in context
+    assert "Entries ordered by first mention" in context
     chronological_block = context.split("# Chronological Order", 1)[1].split(
         "# Working Conversation Tail", 1
     )[0]

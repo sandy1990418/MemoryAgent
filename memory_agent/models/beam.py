@@ -22,6 +22,8 @@ class BeamRunConfig:
     results_dir: Path = DEFAULT_RESULTS_DIR
     store_dir: Path | None = None
     output: Path | None = None
+    answers_output: Path | None = None
+    evaluation_output: Path | None = None
     env_file: Path = Path(".env")
     user_id: str = "beam-100k-case-1"
     memory_mode: str = "structured_mem0"
@@ -47,6 +49,9 @@ class BeamRunConfig:
 
 @dataclass(frozen=True)
 class BeamDeepAgentRunConfig(BeamRunConfig):
+    # The deepagent runner defaults to structured-memory-only answering;
+    # mem0-backed retrieval is opt-in via --memory-mode structured_mem0.
+    memory_mode: str = "structured_only"
     recursion_limit: int = 50
 
     @classmethod
