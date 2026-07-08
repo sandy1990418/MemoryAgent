@@ -3,14 +3,33 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+from collections import Counter
 from typing import Callable
 
 from memory_agent.clients.llm import LLMClient
-from memory_agent.models.policy import AGENT_POLICY, MemoryPolicy
+from memory_agent.models.policy import AGENT_POLICY, MemoryPolicy, validate_policy_sections
 from memory_agent.models.sections import SectionConfig
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
+
+logger = logging.getLogger(__name__)
+
+
+def _debug_ops(label: str, ops: list[dict]) -> None:
+    """Log op volume by kind and section; the fastest way to find where an
+    entry explosion (V1~V71-style) is coming from. Enable via DEBUG logging."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    dict_ops = [op for op in ops if isinstance(op, dict)]
+    logger.debug(
+        "%s count=%d by_op=%s by_section=%s",
+        label,
+        len(ops),
+        dict(Counter(op.get("op") for op in dict_ops)),
+        dict(Counter(op.get("section") for op in dict_ops if op.get("section"))),
+    )
 
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 _TURN_SUFFIX_RE = re.compile(r"\s*\(turns?\s+([0-9,\-\s]+)\)\s*$", re.IGNORECASE)
@@ -103,6 +122,24 @@ _STATUS_CHANGE_CUE_RE = re.compile(
     r"|(?:其實|不是|改成|不再|沒有|不要記|改用)",
     re.IGNORECASE,
 )
+# Practical profile: only unambiguous corrections/reversals. Broad cues like
+# "actually"/"instead"/"其實"/"不是" fire on ordinary sentences and turn
+# status_changes into a change-log; that is eval-profile behavior.
+_PRACTICAL_STATUS_CHANGE_CUE_RE = re.compile(
+    r"\b(?:never|not anymore|no longer|changed my mind|correction|"
+    r"contradiction|contradictory|starting from scratch)\b"
+    r"|(?:改成|不再|不要記|改用|更正)",
+    re.IGNORECASE,
+)
+
+
+def status_change_cue_re(policy: MemoryPolicy | None) -> re.Pattern[str]:
+    """Policy-aware cue regex. The extractor and MemoryUpdateVerifier MUST both
+    resolve cues through this helper: if the verifier recognized cues the
+    extractor does not, those turns would fail verification on every retry."""
+    if policy is not None and policy.name == "practical":
+        return _PRACTICAL_STATUS_CHANGE_CUE_RE
+    return _STATUS_CHANGE_CUE_RE
 _WHITESPACE_RE = re.compile(r"\s+")
 _CONTEXT_WORD_RE = re.compile(r"[A-Za-z0-9_./:-]+")
 _CONTEXT_STOPWORDS = {
@@ -114,6 +151,16 @@ _GENERIC_NON_DURABLE_MEMORY_RE = re.compile(
     r"\b(?:user\s+)?(?:asked|asks|inquired|wanted to know|discussed|talked)\s+"
     r"(?:about|whether|how|what|why|when)\b"
     r"|\btopic (?:was|is) discussed\b",
+    re.IGNORECASE,
+)
+# Practical profile stores user-stated durable state only. Entries that
+# attribute content to the assistant (advice, tutorials, proposed schedules)
+# are dropped at the filter, not just discouraged in the prompt.
+_ASSISTANT_ATTRIBUTED_RE = re.compile(
+    r"^\s*(?:the\s+)?assistant\b"
+    r"|\bassistant(?:'s)?\s+(?:stated|said|suggested|recommended|proposed|"
+    r"provided|created|advised|outlined|offered|explained|plan(?:s|ned)?|"
+    r"schedule[sd]?|tutorial|example)\b",
     re.IGNORECASE,
 )
 _DURABLE_USER_STATE_RE = re.compile(
@@ -181,6 +228,9 @@ class MemoryUpdater:
         # Direct construction historically behaved like the richer agent
         # updater. Product builders pass the practical policy explicitly.
         self.policy = policy or AGENT_POLICY
+        # Fail fast on profile/section mismatches instead of silently running
+        # with retention behavior the caller did not intend.
+        validate_policy_sections(self.policy, sections)
         self._section_key_by_prefix = {section.prefix.lower(): section.key for section in sections}
 
     # Sections whose entries are always shown to the updater regardless of
@@ -316,11 +366,7 @@ class MemoryUpdater:
             "progress, security posture, current blocker, or user preference.\n"
             "   - Prefer UPDATE of a matching existing entry over adding a near-duplicate. "
             "If the existing entry already covers the new turn, use NOOP.\n"
-            "   - Preserve important dates, versions, counts, durations, "
-            "percentages, endpoint paths, table/column names, file names, error "
-            "messages, library names, and deployment targets only inside the "
-            "smallest relevant summary entry; do not split them into a separate "
-            "value inventory.\n"
+            f"{self._value_embedding_prompt_rules()}"
             f"{assistant_rules}"
             "   - Do not infer missing details. If the user only mentions a topic "
             "without giving causal details, background, previous projects, or "
@@ -377,6 +423,20 @@ class MemoryUpdater:
         return (
             "   - AGENT PROFILE: retain durable execution state and useful tool-derived "
             "facts, while omitting incidental conversational detail.\n"
+        )
+
+    def _value_embedding_prompt_rules(self) -> str:
+        # Practical profile: the profile rules already forbid isolated values;
+        # re-listing every value kind here would pull extraction back toward
+        # detail-preservation (eval behavior).
+        if self.policy.name == "practical":
+            return ""
+        return (
+            "   - Preserve important dates, versions, counts, durations, "
+            "percentages, endpoint paths, table/column names, file names, error "
+            "messages, library names, and deployment targets only inside the "
+            "smallest relevant summary entry; do not split them into a separate "
+            "value inventory.\n"
         )
 
     def _batch_prompt_rules(self) -> str:
@@ -465,12 +525,14 @@ class MemoryUpdater:
 
     def update(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[list[dict], list[dict]]:
         deterministic_ops = self._deterministic_ops(memory, evicted_turns)
+        _debug_ops("deterministic before filter", deterministic_ops)
         deterministic_ops = self._apply_policy_filter(
             deterministic_ops,
             memory,
             evicted_turns,
             apply_cap=False,
         )
+        _debug_ops("deterministic after filter", deterministic_ops)
         det_applied: list[dict] = []
         if deterministic_ops:
             det_applied, _det_rejected = memory.apply_ops_atomically(deterministic_ops)
@@ -489,7 +551,9 @@ class MemoryUpdater:
                 raise UpdateFailed(f"Could not parse a JSON ops array from LLM response: {response!r}")
             ops = self._normalize_ops(ops, memory)
             ops = self._drop_duplicate_deterministic_adds(ops, memory)
+            _debug_ops("llm before filter", ops)
             ops = self._apply_policy_filter(ops, memory, evicted_turns)
+            _debug_ops("llm after filter", ops)
             ops = [
                 op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
             ]
@@ -593,8 +657,10 @@ class MemoryUpdater:
             return ops
 
         allowed_sections = {section.key for section in self.sections}
-        disallowed_sections = {"timeline", "tool_facts", "exact_values"}
-        ordinary_question = self._is_ordinary_non_durable_batch(evicted_turns)
+        disallowed_sections = {"timeline", "tool_facts", "exact_values", "progress"}
+        ordinary_question = self._is_ordinary_non_durable_batch(
+            evicted_turns, cue_re=status_change_cue_re(self.policy)
+        )
         filtered: list[dict] = []
 
         for op in ops:
@@ -610,11 +676,15 @@ class MemoryUpdater:
                     continue
                 if not isinstance(text, str) or _GENERIC_NON_DURABLE_MEMORY_RE.search(text):
                     continue
+                if _ASSISTANT_ATTRIBUTED_RE.search(text):
+                    continue
                 if ordinary_question:
                     continue
             elif kind == "UPDATE":
                 text = op.get("text")
                 if not isinstance(text, str) or _GENERIC_NON_DURABLE_MEMORY_RE.search(text):
+                    continue
+                if _ASSISTANT_ATTRIBUTED_RE.search(text):
                     continue
                 entry_id = op.get("id")
                 entry = memory.entries.get(entry_id) if isinstance(entry_id, str) else None
@@ -672,7 +742,10 @@ class MemoryUpdater:
         return [op for index, op in enumerate(actionable) if index in keep_indexes]
 
     @staticmethod
-    def _is_ordinary_non_durable_batch(evicted_turns: list[Turn]) -> bool:
+    def _is_ordinary_non_durable_batch(
+        evicted_turns: list[Turn],
+        cue_re: re.Pattern[str] = _STATUS_CHANGE_CUE_RE,
+    ) -> bool:
         user_texts = [
             turn.content.strip()
             for turn in evicted_turns
@@ -685,7 +758,7 @@ class MemoryUpdater:
             return False
         for text in user_texts:
             is_question = text.endswith("?") or bool(_ORDINARY_QUESTION_RE.search(text))
-            if _STATUS_CHANGE_CUE_RE.search(text) and not is_question:
+            if cue_re.search(text) and not is_question:
                 return False
         return True
 
@@ -781,11 +854,12 @@ class MemoryUpdater:
             return []
 
         seen = self._active_text_keys(memory, "status_changes")
+        cue_re = status_change_cue_re(self.policy)
         generated: list[dict] = []
         for turn in evicted_turns:
             if turn.role != "user":
                 continue
-            snippet = self._extract_status_change_snippet(turn.content)
+            snippet = self._extract_status_change_snippet(turn.content, cue_re=cue_re)
             if snippet is None:
                 continue
             text = f"User stated: {snippet}"
@@ -966,9 +1040,12 @@ class MemoryUpdater:
         return value
 
     @staticmethod
-    def _extract_status_change_snippet(content: str) -> str | None:
+    def _extract_status_change_snippet(
+        content: str,
+        cue_re: re.Pattern[str] = _STATUS_CHANGE_CUE_RE,
+    ) -> str | None:
         prose = content.split("```", 1)[0]
-        match = _STATUS_CHANGE_CUE_RE.search(prose)
+        match = cue_re.search(prose)
         if not match:
             return None
 
@@ -995,7 +1072,7 @@ class MemoryUpdater:
         if not snippet:
             return None
         if len(snippet) > 170:
-            cue = _STATUS_CHANGE_CUE_RE.search(snippet)
+            cue = cue_re.search(snippet)
             if cue is None:
                 snippet = snippet[:167].rstrip() + "..."
             else:

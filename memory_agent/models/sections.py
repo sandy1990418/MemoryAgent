@@ -124,12 +124,13 @@ CHAT_SECTIONS: list[SectionConfig] = [
     OPEN_QUESTIONS,
 ]
 
+# No TIMELINE/TOOL_FACTS/EXACT_VALUES/PROGRESS: practical memory keeps a small
+# set of consolidated durable entries; progress-style state folds into facts.
 PRACTICAL_SECTIONS: list[SectionConfig] = [
     DECISIONS,
     PREFERENCES,
     STATUS_CHANGES,
     GOAL,
-    PROGRESS,
     FACTS,
     OPEN_QUESTIONS,
     FAILED_ATTEMPTS,

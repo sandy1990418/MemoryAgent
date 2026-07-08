@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from memory_agent.models.policy import MemoryPolicy
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
-from memory_agent.structured.updater import _STATUS_CHANGE_CUE_RE, MemoryUpdater
+from memory_agent.structured.updater import MemoryUpdater, status_change_cue_re
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,9 @@ class MemoryUpdateVerifier:
     ) -> MemoryUpdateVerification:
         errors: list[str] = []
         policy = self.policy or memory.policy
+        # Same policy-aware cue set as the deterministic extractor: a broader
+        # verifier regex would fail turns the extractor never records, forever.
+        cue_re = status_change_cue_re(policy)
 
         if rejected_ops:
             errors.append(f"Rejected ops exist: {rejected_ops}")
@@ -57,15 +60,15 @@ class MemoryUpdateVerifier:
         for turn in evicted_turns:
             if turn.role != "user":
                 continue
-            if not _STATUS_CHANGE_CUE_RE.search(turn.content):
+            if not cue_re.search(turn.content):
                 continue
             if (
                 policy is not None
                 and policy.name == "practical"
-                and MemoryUpdater._is_ordinary_non_durable_batch([turn])
+                and MemoryUpdater._is_ordinary_non_durable_batch([turn], cue_re=cue_re)
             ):
                 continue
-            if not self._cue_is_recorded(turn, applied_ops, memory):
+            if not self._cue_is_recorded(turn, applied_ops, memory, cue_re):
                 errors.append(
                     f"Status-change cue in turn {turn.id} but the update produced "
                     "neither a status_changes ADD nor a SUPERSEDE, and no active "
@@ -75,7 +78,7 @@ class MemoryUpdateVerifier:
         return MemoryUpdateVerification(passed=not errors, errors=errors)
 
     @staticmethod
-    def _cue_is_recorded(turn: Turn, applied_ops: list[dict], memory: Memory) -> bool:
+    def _cue_is_recorded(turn: Turn, applied_ops: list[dict], memory: Memory, cue_re) -> bool:
         has_status_change_add = any(
             isinstance(op, dict)
             and op.get("op") == "ADD"
@@ -90,7 +93,7 @@ class MemoryUpdateVerifier:
 
         # Escape hatch against infinite retries: the statement may have been
         # recorded by an earlier batch (the updater dedups repeats).
-        snippet = MemoryUpdater._extract_status_change_snippet(turn.content)
+        snippet = MemoryUpdater._extract_status_change_snippet(turn.content, cue_re=cue_re)
         if snippet is None:
             return False
         active_texts = {

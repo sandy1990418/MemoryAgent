@@ -35,6 +35,7 @@ from memory_agent.models.policy import MemoryPolicy
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
 from memory_agent.structured.transcript import Transcript
+from memory_agent.structured.compactor import MemoryCompactor
 from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
 from memory_agent.structured.verifier import MemoryUpdateVerifier
 
@@ -125,11 +126,17 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         memory_selector: MemorySelector | None = None,
         update_verifier: MemoryUpdateVerifier | None = None,
         policy: MemoryPolicy | None = None,
+        compactor: "MemoryCompactor | None" = None,
+        compact_min_active_entries: int = 30,
     ) -> None:
         super().__init__()
         self.memory = memory
         self.updater = updater
         self.policy = policy or memory.policy or updater.policy
+        # Optional subject-level compaction, triggered after successful
+        # evictions once active entries exceed the threshold.
+        self.compactor = compactor
+        self.compact_min_active_entries = compact_min_active_entries
         # Semantic invariant check on updater output (defense-in-depth); pass
         # an explicit verifier to customize, or disable via a stub that always
         # passes. Default on: it only fires when the deterministic extraction
@@ -322,7 +329,33 @@ class StructuredMemoryMiddleware(AgentMiddleware):
             )
             return None
 
+        self._maybe_compact()
+
         return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *preserved]}
+
+    def _maybe_compact(self) -> None:
+        """Consolidate same-subject entries once active memory grows too large.
+
+        Runs only after a fully validated eviction, and never blocks it: the
+        evicted turns are already safely in memory, so a compaction failure
+        just means memory stays more granular until the next attempt.
+        """
+        if self.compactor is None:
+            return
+        active = sum(
+            entry.status == "active" for entry in self.memory.entries.values()
+        )
+        if active <= self.compact_min_active_entries:
+            return
+        try:
+            applied, rejected = self.compactor.compact(self.memory)
+        except UpdateFailed as exc:
+            logger.warning("Memory compaction failed; continuing uncompacted: %s", exc)
+            return
+        if rejected:
+            logger.warning("Memory compaction ops rejected; continuing uncompacted: %s", rejected)
+        elif applied:
+            logger.info("Memory compaction applied %d ops", len(applied))
 
     async def abefore_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
         """Async wrapper: the eviction logic above does no I/O of its own."""

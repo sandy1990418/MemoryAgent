@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 from memory_agent.clients.llm import LLMClient
-from memory_agent.models.policy import MemoryPolicy, get_memory_policy
+from memory_agent.models.policy import MemoryPolicy, get_memory_policy, validate_policy_sections
 from memory_agent.models.sections import SectionConfig
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
@@ -30,6 +30,7 @@ class MemoryCompactor:
         self.llm = llm
         self.sections = sections
         self.policy = policy or get_memory_policy(None)
+        validate_policy_sections(self.policy, sections)
         self.model = model
         self.max_memory_tokens = max_memory_tokens
         self.token_estimator = token_estimator or _default_token_estimator

@@ -48,7 +48,7 @@ from memory_agent.models.beam import (
     BeamRunConfig,
 )
 from memory_agent.structured.middleware import StructuredMemoryMiddleware
-
+from memory_agent.models.sections import sections_for_preset
 
 STOPWORDS = {
     "about",
@@ -810,12 +810,12 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
     structured_middleware: StructuredMemoryMiddleware | None = None
     active_messages: list[AnyMessage] = []
     if use_structured:
-        memory_policy = get_memory_policy("eval")
+        memory_policy = get_memory_policy("practical")
         structured_middleware = StructuredMemoryMiddleware(
             memory=Memory(sections=EVAL_SECTIONS, policy=memory_policy),
             updater=MemoryUpdater(
                 llm=OpenAIClient(args.structured_model),
-                sections=EVAL_SECTIONS,
+                sections=sections_for_preset("practical"),
                 policy=memory_policy,
             ),
             policy=memory_policy,

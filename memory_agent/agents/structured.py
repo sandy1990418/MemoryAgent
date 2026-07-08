@@ -20,10 +20,18 @@ def build_structured_middleware(config: StructuredAgentConfig) -> StructuredMemo
     policy = get_memory_policy(config.memory_profile)
     sections = sections_for_preset(policy.section_preset)
     memory = Memory(sections=sections, policy=policy)
+    llm = OpenAIClient(config.memory_model)
     updater = MemoryUpdater(
-        llm=OpenAIClient(config.memory_model),
+        llm=llm,
         sections=sections,
         policy=policy,
+    )
+    # Practical memory stays small: consolidate same-subject entries once the
+    # active set grows. Eval/agent profiles keep granular entries on purpose.
+    compactor = (
+        MemoryCompactor(llm=llm, sections=sections, policy=policy)
+        if policy.name == "practical"
+        else None
     )
     return StructuredMemoryMiddleware(
         memory=memory,
@@ -32,6 +40,7 @@ def build_structured_middleware(config: StructuredAgentConfig) -> StructuredMemo
         max_tokens=config.max_tokens,
         keep_messages=config.keep_messages,
         max_memory_tokens=config.max_memory_tokens,
+        compactor=compactor,
     )
 
 

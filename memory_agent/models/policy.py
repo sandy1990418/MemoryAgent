@@ -60,3 +60,33 @@ def get_memory_policy(name: str | None) -> MemoryPolicy:
     except KeyError as exc:
         choices = ", ".join(sorted(MEMORY_POLICIES))
         raise ValueError(f"memory profile must be one of: {choices}") from exc
+
+
+# Sections a profile must never operate on. A mismatch between policy and
+# section list is how "policy is on but the output looks unfiltered" bugs
+# happen, so components validate at construction instead of silently running.
+_DISALLOWED_SECTION_KEYS: dict[str, frozenset[str]] = {
+    "practical": frozenset({"exact_values", "timeline", "tool_facts", "progress"}),
+    "agent": frozenset({"exact_values"}),
+    "eval": frozenset(),
+}
+
+
+def validate_policy_sections(policy: MemoryPolicy, sections: list) -> None:
+    """Raise when a policy is paired with sections it is meant to exclude.
+
+    Use `sections_for_preset(policy.section_preset)` to build a matching list.
+    """
+    keys = {section.key for section in sections}
+    disallowed = _DISALLOWED_SECTION_KEYS.get(policy.name, frozenset())
+    conflicts = sorted(keys & disallowed)
+    if conflicts:
+        raise ValueError(
+            f"policy '{policy.name}' disallows sections {conflicts}; "
+            "build sections with sections_for_preset(policy.section_preset)"
+        )
+    if not policy.allow_exact_values and "exact_values" in keys:
+        raise ValueError(
+            f"policy '{policy.name}' has allow_exact_values=False but the "
+            "section list includes exact_values"
+        )
