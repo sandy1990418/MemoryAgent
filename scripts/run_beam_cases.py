@@ -16,6 +16,7 @@ from memory_agent.models.beam import (
     DEFAULT_BEAM_JUDGE_MODEL,
     DEFAULT_BEAM_MEMORY_MODEL,
     DEFAULT_BEAM_MODEL,
+    DEFAULT_BEAM_QUESTION_TYPES,
     DEFAULT_MEM0_LLM_MODEL,
     BeamDeepAgentRunConfig,
     BeamRunConfig,
@@ -199,7 +200,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--question-types",
         nargs="+",
-        help="Optional BEAM question types to answer.",
+        default=list(DEFAULT_BEAM_QUESTION_TYPES),
+        help=(
+            "BEAM question types to answer. Defaults to contradiction_resolution, "
+            "knowledge_update, preference_following, instruction_following, "
+            "abstention, and summarization."
+        ),
+    )
+    parser.add_argument(
+        "--all-question-types",
+        dest="question_types",
+        action="store_const",
+        const=None,
+        help="Run every question type available in each BEAM probe file.",
     )
     parser.add_argument(
         "--max-questions-per-type",

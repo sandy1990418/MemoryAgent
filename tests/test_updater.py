@@ -1,6 +1,7 @@
 import pytest
 
 from memory_agent.models.sections import AGENT_SECTIONS, CHAT_SECTIONS, EXACT_VALUES
+from memory_agent.models.policy import get_memory_policy
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
@@ -105,6 +106,7 @@ def test_exact_values_prefix_sections_are_normalized():
         llm=ScriptedLLM(lambda system, messages: next(responses)),
         sections=sections,
         max_retries=0,
+        policy=get_memory_policy("eval"),
     )
     mem = Memory(sections=sections)
 

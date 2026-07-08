@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 from memory_agent.models.memory import MemoryEntry
+from memory_agent.models.policy import MemoryPolicy
 from memory_agent.models.sections import CHAT_SECTIONS, SectionConfig
 
 
@@ -20,8 +21,13 @@ class Memory:
     never deleted). The only field allowed to freely degrade is `narrative`.
     """
 
-    def __init__(self, sections: list[SectionConfig] | None = None) -> None:
+    def __init__(
+        self,
+        sections: list[SectionConfig] | None = None,
+        policy: MemoryPolicy | None = None,
+    ) -> None:
         self.sections: list[SectionConfig] = sections if sections is not None else list(CHAT_SECTIONS)
+        self.policy = policy
         self._section_by_key: dict[str, SectionConfig] = {s.key: s for s in self.sections}
         self.entries: dict[str, MemoryEntry] = {}
         self.narrative: str = ""
@@ -70,7 +76,7 @@ class Memory:
         return applied, []
 
     def _copy(self) -> "Memory":
-        clone = Memory(sections=list(self.sections))
+        clone = Memory(sections=list(self.sections), policy=self.policy)
         clone.entries = {
             entry_id: MemoryEntry(
                 id=entry.id,

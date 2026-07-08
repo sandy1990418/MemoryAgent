@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from memory_agent.models.policy import MemoryPolicy
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.updater import _STATUS_CHANGE_CUE_RE, MemoryUpdater
@@ -37,6 +38,9 @@ class MemoryUpdateVerification:
 class MemoryUpdateVerifier:
     """Checks BEAM-relevant update invariants before evicted turns are dropped."""
 
+    def __init__(self, policy: MemoryPolicy | None = None) -> None:
+        self.policy = policy
+
     def verify(
         self,
         evicted_turns: list[Turn],
@@ -45,6 +49,7 @@ class MemoryUpdateVerifier:
         memory: Memory,
     ) -> MemoryUpdateVerification:
         errors: list[str] = []
+        policy = self.policy or memory.policy
 
         if rejected_ops:
             errors.append(f"Rejected ops exist: {rejected_ops}")
@@ -53,6 +58,12 @@ class MemoryUpdateVerifier:
             if turn.role != "user":
                 continue
             if not _STATUS_CHANGE_CUE_RE.search(turn.content):
+                continue
+            if (
+                policy is not None
+                and policy.name == "practical"
+                and MemoryUpdater._is_ordinary_non_durable_batch([turn])
+            ):
                 continue
             if not self._cue_is_recorded(turn, applied_ops, memory):
                 errors.append(

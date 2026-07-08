@@ -10,9 +10,17 @@ from memory_agent.models.config import (
 )
 from memory_agent.models.longterm import LongTermHit
 from memory_agent.models.memory import MemoryEntry, SelectedMemory
+from memory_agent.models.policy import MemoryPolicy, get_memory_policy
 from memory_agent.models.runtime import HybridAgentRuntime, StructuredAgentRuntime
-from memory_agent.models.sections import AGENT_SECTIONS, CHAT_SECTIONS, SectionConfig
+from memory_agent.models.sections import (
+    AGENT_SECTIONS,
+    CHAT_SECTIONS,
+    EVAL_SECTIONS,
+    PRACTICAL_SECTIONS,
+    SectionConfig,
+)
 from memory_agent.models.transcript import Turn
+from memory_agent.structured.compactor import MemoryCompactor
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
 from memory_agent.structured.session import MemorySession
@@ -34,8 +42,13 @@ __all__ = [
     "HybridAgentRuntime",
     "Memory",
     "MemoryEntry",
+    "MemoryCompactor",
+    "MemoryPolicy",
+    "get_memory_policy",
     "AGENT_SECTIONS",
     "CHAT_SECTIONS",
+    "EVAL_SECTIONS",
+    "PRACTICAL_SECTIONS",
     "SectionConfig",
     "MemorySelector",
     "SelectedMemory",

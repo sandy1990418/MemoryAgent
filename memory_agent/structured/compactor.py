@@ -1,0 +1,253 @@
+"""Subject-based compaction for structured memory."""
+
+from __future__ import annotations
+
+from typing import Callable
+
+from memory_agent.clients.llm import LLMClient
+from memory_agent.models.policy import MemoryPolicy, get_memory_policy
+from memory_agent.models.sections import SectionConfig
+from memory_agent.structured.memory import Memory
+from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
+
+
+def _default_token_estimator(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+class MemoryCompactor:
+    """Merge active entries by subject without deleting historical entries."""
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        sections: list[SectionConfig],
+        policy: MemoryPolicy | None = None,
+        model: str | None = None,
+        max_memory_tokens: int | None = None,
+        token_estimator: Callable[[str], int] | None = None,
+    ) -> None:
+        self.llm = llm
+        self.sections = sections
+        self.policy = policy or get_memory_policy(None)
+        self.model = model
+        self.max_memory_tokens = max_memory_tokens
+        self.token_estimator = token_estimator or _default_token_estimator
+        self._section_keys = {section.key for section in sections}
+        self._section_key_by_prefix = {
+            section.prefix.lower(): section.key for section in sections
+        }
+
+    def _build_prompt(self, memory: Memory) -> tuple[str, list[dict]]:
+        sections = "\n".join(
+            f'- key="{section.key}": {section.description}' for section in self.sections
+        )
+        rendered = memory.render(
+            include_superseded=True,
+            max_tokens=self.max_memory_tokens,
+            token_estimator=self.token_estimator,
+        ) or "(No memory entries yet.)"
+        system = (
+            "Compact structured memory by semantic subject, not as a transcript "
+            "summary. Return a JSON array containing only SUPERSEDE, ADD, or NOOP.\n\n"
+            "Available sections:\n"
+            f"{sections}\n\n"
+            "Rules:\n"
+            "1. Merge only active entries about the same semantic subject.\n"
+            "2. For each merge, SUPERSEDE every replaced active entry by exact id, "
+            "then ADD one concise canonical entry in the best matching section.\n"
+            "3. Preserve the latest truth, active preferences, confirmed decisions, "
+            "current project state, unresolved blockers, and failed attempts.\n"
+            "4. Canonical ADD provenance must be the union of the source entries' "
+            "provenance turn ids.\n"
+            "5. Never SUPERSEDE an entry unless a canonical ADD preserves its durable "
+            "information. Never delete entries.\n"
+            "6. Never operate on or re-activate a superseded entry. Superseded entries "
+            "are history and must remain superseded.\n"
+            "7. Do not merge entries merely because they occurred near each other or "
+            "share broad words such as project, memory, or API.\n"
+            "8. Use NOOP when no same-subject entries can be safely consolidated.\n"
+            "9. Respond with the JSON array only.\n\n"
+            "Current memory:\n"
+            f"{rendered}"
+        )
+        return system, [
+            {
+                "role": "user",
+                "content": "Return subject-based compaction operations for the active entries.",
+            }
+        ]
+
+    def compact(self, memory: Memory) -> tuple[list[dict], list[dict]]:
+        """Generate, validate, and atomically apply compaction operations."""
+        system, messages = self._build_prompt(memory)
+        try:
+            response = self.llm.complete(system, messages, model=self.model)
+        except Exception as exc:
+            raise UpdateFailed(f"Compactor LLM transport error: {exc}") from exc
+
+        ops = MemoryUpdater._parse_ops(response)
+        if ops is None:
+            raise UpdateFailed(
+                f"Could not parse a JSON compaction ops array from LLM response: {response!r}"
+            )
+        ops = self._normalize_ops(ops)
+        ops = [
+            op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
+        ]
+        if not ops:
+            return [], []
+
+        rejected = self._validate_ops(memory, ops)
+        if rejected:
+            return [], rejected
+
+        before_active = sum(entry.status == "active" for entry in memory.entries.values())
+        candidate = memory._copy()
+        applied, rejected = candidate.apply_ops_atomically(ops)
+        if rejected:
+            return [], rejected
+
+        after_active = sum(entry.status == "active" for entry in candidate.entries.values())
+        if after_active >= before_active:
+            return [], [
+                {
+                    "op": ops,
+                    "reason": "compaction must reduce the number of active entries",
+                }
+            ]
+
+        memory.entries = candidate.entries
+        memory.narrative = candidate.narrative
+        memory._counters = candidate._counters
+        return applied, []
+
+    def _normalize_ops(self, ops: list[dict]) -> list[dict]:
+        normalized: list[dict] = []
+        for op in ops:
+            if not isinstance(op, dict):
+                normalized.append(op)
+                continue
+            item = dict(op)
+            if item.get("op") == "ADD":
+                section = item.get("section")
+                if isinstance(section, str):
+                    item["section"] = self._section_key_by_prefix.get(
+                        section.lower(),
+                        section,
+                    )
+            normalized.append(item)
+        return normalized
+
+    def _validate_ops(self, memory: Memory, ops: list[dict]) -> list[dict]:
+        rejected: list[dict] = []
+        supersede_ids: set[str] = set()
+        adds: list[dict] = []
+
+        for op in ops:
+            if not isinstance(op, dict):
+                rejected.append({"op": op, "reason": "op is not a dict"})
+                continue
+            kind = op.get("op")
+            if kind == "SUPERSEDE":
+                entry_id = op.get("id")
+                entry = memory.entries.get(entry_id) if isinstance(entry_id, str) else None
+                if entry is None:
+                    rejected.append({"op": op, "reason": "unknown memory entry id"})
+                elif entry.status != "active":
+                    rejected.append(
+                        {"op": op, "reason": "cannot compact a superseded entry"}
+                    )
+                elif entry_id in supersede_ids:
+                    rejected.append({"op": op, "reason": "duplicate SUPERSEDE id"})
+                else:
+                    supersede_ids.add(entry_id)
+            elif kind == "ADD":
+                section = op.get("section")
+                text = op.get("text")
+                provenance = op.get("provenance")
+                if section not in self._section_keys:
+                    rejected.append({"op": op, "reason": f"unknown section: {section}"})
+                elif not isinstance(text, str) or not text.strip():
+                    rejected.append({"op": op, "reason": "missing/invalid text"})
+                elif (
+                    not isinstance(provenance, list)
+                    or not provenance
+                    or any(not isinstance(turn_id, int) for turn_id in provenance)
+                ):
+                    rejected.append({"op": op, "reason": "invalid provenance"})
+                else:
+                    adds.append(op)
+            else:
+                rejected.append(
+                    {"op": op, "reason": "compaction only accepts ADD and SUPERSEDE"}
+                )
+
+        if rejected:
+            return rejected
+        if not supersede_ids or not adds:
+            return [
+                {
+                    "op": ops,
+                    "reason": "compaction requires replaced entries and canonical ADDs",
+                }
+            ]
+
+        affected_sections = {
+            memory.entries[entry_id].section for entry_id in supersede_ids
+        }
+        add_sections = {op["section"] for op in adds}
+        protected_sections = {
+            "preferences",
+            "decisions",
+            "failed_attempts",
+            "open_questions",
+        }
+        missing_sections = (affected_sections & protected_sections) - add_sections
+        if missing_sections:
+            return [
+                {
+                    "op": ops,
+                    "reason": (
+                        "canonical ADD missing for affected sections: "
+                        + ", ".join(sorted(missing_sections))
+                    ),
+                }
+            ]
+
+        historical_texts = {
+            self._text_key(entry.text)
+            for entry in memory.entries.values()
+            if entry.status == "superseded"
+        }
+        reactivated = [
+            op for op in adds if self._text_key(op["text"]) in historical_texts
+        ]
+        if reactivated:
+            return [
+                {
+                    "op": reactivated,
+                    "reason": "canonical ADD would re-activate superseded content",
+                }
+            ]
+
+        source_provenance = {
+            turn_id
+            for entry_id in supersede_ids
+            for turn_id in memory.entries[entry_id].provenance
+        }
+        canonical_provenance = {
+            turn_id for op in adds for turn_id in op.get("provenance", [])
+        }
+        if not source_provenance.issubset(canonical_provenance):
+            return [
+                {
+                    "op": adds,
+                    "reason": "canonical provenance must preserve all source turn ids",
+                }
+            ]
+        return []
+
+    @staticmethod
+    def _text_key(text: str) -> str:
+        return " ".join(text.lower().split())

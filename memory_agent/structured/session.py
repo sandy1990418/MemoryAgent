@@ -39,9 +39,10 @@ class MemorySession:
 
         self.transcript = Transcript()
         self.window = WorkingWindow(max_tokens=max_window_tokens)
-        self.memory = Memory(sections=sections)
+        self.memory = Memory(sections=sections, policy=updater.policy)
         self.memory_selector = memory_selector or MemorySelector(
-            token_estimator=self.window.token_estimator
+            token_estimator=self.window.token_estimator,
+            policy=updater.policy,
         )
 
         self.last_system_prompt: str = ""

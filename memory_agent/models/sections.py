@@ -124,6 +124,17 @@ CHAT_SECTIONS: list[SectionConfig] = [
     OPEN_QUESTIONS,
 ]
 
+PRACTICAL_SECTIONS: list[SectionConfig] = [
+    DECISIONS,
+    PREFERENCES,
+    STATUS_CHANGES,
+    GOAL,
+    PROGRESS,
+    FACTS,
+    OPEN_QUESTIONS,
+    FAILED_ATTEMPTS,
+]
+
 AGENT_SECTIONS: list[SectionConfig] = [
     DECISIONS,
     PREFERENCES,
@@ -136,3 +147,22 @@ AGENT_SECTIONS: list[SectionConfig] = [
     OPEN_QUESTIONS,
     FAILED_ATTEMPTS,
 ]
+
+EVAL_SECTIONS: list[SectionConfig] = [
+    *AGENT_SECTIONS,
+    EXACT_VALUES,
+]
+
+
+def sections_for_preset(name: str) -> list[SectionConfig]:
+    """Return a fresh section list for a policy section preset."""
+    presets = {
+        "practical": PRACTICAL_SECTIONS,
+        "agent": AGENT_SECTIONS,
+        "eval": EVAL_SECTIONS,
+    }
+    try:
+        return list(presets[name])
+    except KeyError as exc:
+        choices = ", ".join(sorted(presets))
+        raise ValueError(f"section preset must be one of: {choices}") from exc

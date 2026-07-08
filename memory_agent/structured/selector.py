@@ -6,6 +6,7 @@ import re
 from typing import Callable, Iterable
 
 from memory_agent.models.memory import MemoryEntry, SelectedMemory
+from memory_agent.models.policy import MemoryPolicy
 from memory_agent.structured.memory import Memory
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -82,6 +83,7 @@ class MemorySelector:
         section_priorities: dict[str, float] | None = None,
         token_estimator: Callable[[str], int] | None = None,
         pinned_sections: Iterable[str] | None = None,
+        policy: MemoryPolicy | None = None,
     ) -> None:
         self.section_priorities = dict(self.DEFAULT_SECTION_PRIORITIES)
         if section_priorities:
@@ -92,6 +94,7 @@ class MemorySelector:
             if pinned_sections is None
             else frozenset(pinned_sections)
         )
+        self.policy = policy
 
     def select(
         self,

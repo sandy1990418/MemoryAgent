@@ -1,5 +1,6 @@
 """Structured memory domain and LangChain integration."""
 
+from memory_agent.structured.compactor import MemoryCompactor
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.middleware import StructuredMemoryMiddleware
 from memory_agent.structured.selector import MemorySelector
@@ -10,6 +11,7 @@ from memory_agent.structured.window import WorkingWindow
 
 __all__ = [
     "Memory",
+    "MemoryCompactor",
     "StructuredMemoryMiddleware",
     "MemorySelector",
     "MemorySession",

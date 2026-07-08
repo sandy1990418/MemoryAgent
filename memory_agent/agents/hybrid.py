@@ -25,6 +25,7 @@ def _structured_config_from_hybrid(config: HybridAgentConfig) -> StructuredAgent
         max_tokens=config.structured_max_tokens,
         max_memory_tokens=config.structured_max_memory_tokens,
         keep_messages=config.structured_keep_messages,
+        memory_profile=config.memory_profile,
     )
 
 

@@ -36,12 +36,20 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage
 
-from memory_agent import AGENT_SECTIONS, Mem0LongTermMemory, Memory, MemoryUpdater, OpenAIClient
+from memory_agent import (
+    EVAL_SECTIONS,
+    Mem0LongTermMemory,
+    Memory,
+    MemoryUpdater,
+    OpenAIClient,
+    get_memory_policy,
+)
 from memory_agent.models.beam import (
     BeamDeepAgentRunConfig,
     DEFAULT_BEAM_JUDGE_MODEL,
     DEFAULT_BEAM_MEMORY_MODEL,
     DEFAULT_BEAM_MODEL,
+    DEFAULT_BEAM_QUESTION_TYPES,
     DEFAULT_MEM0_LLM_MODEL,
 )
 from memory_agent.structured.middleware import StructuredMemoryMiddleware, _content_to_text
@@ -318,12 +326,15 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
     structured_middleware: StructuredMemoryMiddleware | None = None
     active_messages: list[AnyMessage] = []
     if use_structured:
+        memory_policy = get_memory_policy("eval")
         structured_middleware = StructuredMemoryMiddleware(
-            memory=Memory(sections=AGENT_SECTIONS),
+            memory=Memory(sections=EVAL_SECTIONS, policy=memory_policy),
             updater=MemoryUpdater(
                 llm=OpenAIClient(args.structured_model),
-                sections=AGENT_SECTIONS,
+                sections=EVAL_SECTIONS,
+                policy=memory_policy,
             ),
+            policy=memory_policy,
             max_tokens=args.structured_max_tokens,
             evict_fraction=args.structured_evict_fraction,
             keep_messages=args.structured_keep_messages,
@@ -624,7 +635,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--question-types",
         nargs="+",
-        help="Optional BEAM question types to answer, e.g. information_extraction temporal_reasoning.",
+        default=list(DEFAULT_BEAM_QUESTION_TYPES),
+        help=(
+            "BEAM question types to answer. Defaults to contradiction_resolution, "
+            "knowledge_update, preference_following, instruction_following, "
+            "abstention, and summarization."
+        ),
+    )
+    parser.add_argument(
+        "--all-question-types",
+        dest="question_types",
+        action="store_const",
+        const=None,
+        help="Run every question type available in the BEAM probe file.",
     )
     parser.add_argument(
         "--max-questions-per-type",

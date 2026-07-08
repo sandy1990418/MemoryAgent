@@ -1,7 +1,9 @@
+import sys
 from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
+from memory_agent.models.beam import DEFAULT_BEAM_QUESTION_TYPES, BeamRunConfig
 from memory_agent.models.sections import CHAT_SECTIONS
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
@@ -13,6 +15,7 @@ from scripts.run_beam_case import (
     judge_response,
     load_topic,
     normalize_judge_checks,
+    parse_args,
     parse_judge_response,
     rubric_hit,
     select_probes,
@@ -206,6 +209,34 @@ def test_select_probes_filters_types_and_caps_questions():
     )
 
     assert selected == {"information_extraction": [{"question": "a"}]}
+
+
+def test_beam_config_defaults_to_focused_memory_abilities():
+    config = BeamRunConfig()
+
+    assert tuple(config.question_types or ()) == DEFAULT_BEAM_QUESTION_TYPES
+    assert "information_extraction" not in config.question_types
+    assert "temporal_reasoning" not in config.question_types
+
+
+def test_beam_cli_defaults_to_focused_memory_abilities(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_beam_case.py"])
+
+    args = parse_args()
+
+    assert tuple(args.question_types) == DEFAULT_BEAM_QUESTION_TYPES
+
+
+def test_beam_cli_all_question_types_disables_filter(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_beam_case.py", "--all-question-types"],
+    )
+
+    args = parse_args()
+
+    assert args.question_types is None
 
 
 def test_answer_question_prompt_requires_supported_concise_answers():

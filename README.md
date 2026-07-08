@@ -135,13 +135,16 @@ To smoke-test a few downloaded BEAM cases from `BEAM/chats/100K` using only
 structured summary memory (no mem0 ingestion/retrieval), run:
 
 ```bash
-python scripts/run_beam_cases.py --max-cases 3 \
-  --question-types information_extraction temporal_reasoning \
-  --max-questions-per-type 1
+python scripts/run_beam_cases.py --max-cases 3
 ```
 
 Use `--case-ids 1 2 3` for explicit cases. Results are written under
 `data/beam/results/100K/<case_id>/`, plus a `batch_manifest_*.json` summary.
+By default, the runner evaluates `contradiction_resolution`,
+`knowledge_update`, `preference_following`, `instruction_following`,
+`abstention`, and `summarization`, with all questions in those abilities.
+Pass `--all-question-types` for the complete BEAM suite, or
+`--max-questions-per-type 1` for a faster smoke test.
 
 ## Configuration
 
@@ -158,7 +161,12 @@ THREAD_ID="react-summary-demo"
 STRUCTURED_MAX_TOKENS="600"
 STRUCTURED_MAX_MEMORY_TOKENS="600"
 STRUCTURED_KEEP_MESSAGES="4"
+MEMORY_PROFILE="practical"
 ```
+
+`MEMORY_PROFILE` separates sparse product retention from detailed evaluation:
+`practical` defaults ordinary Q&A to NOOP, `agent` retains richer execution
+state, and `eval` (or `beam`) enables detail-heavy BEAM extraction.
 
 `LLMClient` and `OpenAIClient` are intentionally different:
 

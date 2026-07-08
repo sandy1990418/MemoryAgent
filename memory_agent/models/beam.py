@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_CHAT_PATH = Path("data/beam/100K/1/chat.json")
-DEFAULT_PROBES_PATH = Path("data/beam/100K/1/probing_questions/probing_questions.json")
-DEFAULT_TOPICS_PATH = Path("data/beam/topics/100k/100k_topics.json")
+DEFAULT_CHAT_PATH = Path("BEAM/chats/100K/1/chat.json")
+DEFAULT_PROBES_PATH = Path("BEAM/chats/100K/1/probing_questions/probing_questions.json")
+DEFAULT_TOPICS_PATH = Path("BEAM/chats/100K/1/topic.json")
 DEFAULT_RESULTS_DIR = Path("data/beam/results/100K/1")
 DEFAULT_BEAM_MODEL = os.getenv("BEAM_ANSWER_MODEL", "gpt-5.4-nano")
 DEFAULT_BEAM_MEMORY_MODEL = os.getenv(
@@ -20,6 +20,14 @@ DEFAULT_BEAM_MEMORY_MODEL = os.getenv(
 )
 DEFAULT_BEAM_JUDGE_MODEL = os.getenv("BEAM_JUDGE_MODEL", DEFAULT_BEAM_MODEL)
 DEFAULT_MEM0_LLM_MODEL = os.getenv("MEM0_LLM_MODEL", DEFAULT_BEAM_MODEL)
+DEFAULT_BEAM_QUESTION_TYPES = (
+    "contradiction_resolution",
+    "knowledge_update",
+    "preference_following",
+    "instruction_following",
+    "abstention",
+    "summarization",
+)
 
 
 @dataclass(frozen=True)
@@ -49,7 +57,7 @@ class BeamRunConfig:
     structured_flush_final: bool = True
     mem0_llm_model: str = DEFAULT_MEM0_LLM_MODEL
     judge_model: str | None = DEFAULT_BEAM_JUDGE_MODEL
-    question_types: list[str] | None = None
+    question_types: list[str] | tuple[str, ...] | None = DEFAULT_BEAM_QUESTION_TYPES
     max_questions_per_type: int | None = None
 
     @classmethod

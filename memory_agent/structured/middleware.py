@@ -31,6 +31,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from memory_agent.models.transcript import Turn
+from memory_agent.models.policy import MemoryPolicy
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
 from memory_agent.structured.transcript import Transcript
@@ -123,15 +124,21 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         token_counter: TokenCounter = count_tokens_approximately,
         memory_selector: MemorySelector | None = None,
         update_verifier: MemoryUpdateVerifier | None = None,
+        policy: MemoryPolicy | None = None,
     ) -> None:
         super().__init__()
         self.memory = memory
         self.updater = updater
+        self.policy = policy or memory.policy or updater.policy
         # Semantic invariant check on updater output (defense-in-depth); pass
         # an explicit verifier to customize, or disable via a stub that always
         # passes. Default on: it only fires when the deterministic extraction
         # pipeline itself regressed.
-        self.update_verifier = update_verifier if update_verifier is not None else MemoryUpdateVerifier()
+        self.update_verifier = (
+            update_verifier
+            if update_verifier is not None
+            else MemoryUpdateVerifier(policy=self.policy)
+        )
         self.max_tokens = max_tokens
         self.evict_fraction = evict_fraction
         # A pre-existing clamp in _find_cutoff already guarantees at least one
@@ -144,7 +151,10 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         self.max_tool_turn_chars = max_tool_turn_chars
         self.transcript = transcript if transcript is not None else Transcript()
         self.token_counter = token_counter
-        self.memory_selector = memory_selector or MemorySelector(token_estimator=_char_token_estimator)
+        self.memory_selector = memory_selector or MemorySelector(
+            token_estimator=_char_token_estimator,
+            policy=self.policy,
+        )
         self._turn_id_by_message_id: dict[str, int] = {}
 
     @staticmethod
