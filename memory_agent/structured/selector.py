@@ -9,6 +9,39 @@ from memory_agent.models.memory import MemoryEntry, SelectedMemory
 from memory_agent.structured.memory import Memory
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
+_TEMPORAL_QUERY_TERMS = {
+    "when",
+    "date",
+    "deadline",
+    "days",
+    "weeks",
+    "between",
+    "before",
+    "after",
+    "passed",
+    "start",
+    "end",
+    "timeline",
+}
+_LATEST_VALUE_QUERY_TERMS = {
+    "latest",
+    "current",
+    "updated",
+    "update",
+    "changed",
+    "quota",
+    "coverage",
+    "percentage",
+    "percent",
+    "count",
+    "total",
+    "how",
+    "many",
+    "deadline",
+    "commits",
+    "cards",
+    "columns",
+}
 
 
 def _default_token_estimator(text: str) -> int:
@@ -116,6 +149,30 @@ class MemorySelector:
     def _score(self, entry: MemoryEntry, query_tokens: set[str]) -> SelectedMemory:
         score = self.section_priorities.get(entry.section, 40.0)
         reasons = [f"section:{entry.section}"]
+
+        if query_tokens & _TEMPORAL_QUERY_TERMS:
+            temporal_boosts = {
+                "timeline": 55.0,
+                "progress": 25.0,
+                "status_changes": 20.0,
+                "facts": 10.0,
+            }
+            boost = temporal_boosts.get(entry.section, 0.0)
+            if boost:
+                score += boost
+                reasons.append("temporal_query")
+
+        if query_tokens & _LATEST_VALUE_QUERY_TERMS:
+            latest_boosts = {
+                "status_changes": 45.0,
+                "progress": 30.0,
+                "facts": 25.0,
+                "timeline": 15.0,
+            }
+            boost = latest_boosts.get(entry.section, 0.0)
+            if boost:
+                score += boost
+                reasons.append("latest_value_query")
 
         entry_tokens = _tokens(entry.text)
         overlap = query_tokens & entry_tokens

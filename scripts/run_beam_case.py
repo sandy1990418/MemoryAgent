@@ -161,6 +161,9 @@ QUESTION:
 
 ANSWER REQUIREMENTS:
 - Be direct and concise.
+- For latest/current values, use the latest active memory entry for that subject.
+- For date or duration questions, identify the relevant dated events from context and calculate carefully.
+- Abstain only when no relevant memory entry or recent context contains the answer.
 - Only output the answer to the question without any explanation.
 
 RESPONSE:

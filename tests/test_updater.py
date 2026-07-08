@@ -510,6 +510,11 @@ def test_prompt_includes_memory_quality_rules():
     assert "Do not infer missing details" in system
     assert "Do not turn every user request into an open question" in system
     assert "do not split them into a separate value inventory" in system
+    assert "assistant directly creates a plan, schedule, milestone breakdown" in system
+    assert "For information extraction, keep granular subject-bound facts" in system
+    assert "For temporal reasoning, every explicit dated event" in system
+    assert "For knowledge updates, keep the latest value active" in system
+    assert "For cross-session counting, keep compact aggregate lists" in system
     assert "Use status_changes for explicit contradictions" in system
     assert "I never" in system
     assert "Use timeline only for explicitly stated dated or staged milestones" in system
@@ -646,7 +651,7 @@ def test_build_prompt_renders_full_memory_when_small():
     assert "The weather tool returns JSON payloads." in system
 
 
-def test_date_extraction_is_disabled_by_default_sections():
+def test_subject_bound_dates_are_extracted_to_timeline_with_agent_sections():
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
         sections=AGENT_SECTIONS,
@@ -663,6 +668,58 @@ def test_date_extraction_is_disabled_by_default_sections():
                     "Great progress so far. The final deployment deadline is "
                     "March 15, 2024."
                 ),
+            )
+        ],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    entry = mem.entries["M1"]
+    assert entry.section == "timeline"
+    assert "final deployment deadline" in entry.text
+    assert "March 15, 2024" in entry.text
+
+
+def test_subject_bound_values_are_extracted_to_progress_with_agent_sections():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=AGENT_SECTIONS,
+    )
+    mem = Memory(sections=AGENT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [
+            Turn(
+                id=1,
+                role="user",
+                content="API integration test coverage improved to 78% after adding 401 tests.",
+            )
+        ],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    entry = mem.entries["P1"]
+    assert entry.section == "progress"
+    assert "78%" in entry.text
+    assert "API integration test coverage" in entry.text
+
+
+def test_subject_bound_value_extraction_stays_disabled_for_simple_chat_sections():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=CHAT_SECTIONS,
+    )
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        mem,
+        [
+            Turn(
+                id=1,
+                role="user",
+                content="API integration test coverage improved to 78% after adding 401 tests.",
             )
         ],
     )

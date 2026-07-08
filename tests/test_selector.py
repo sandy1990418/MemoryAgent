@@ -1,4 +1,4 @@
-from memory_agent.models.sections import CHAT_SECTIONS
+from memory_agent.models.sections import AGENT_SECTIONS, CHAT_SECTIONS
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
 
@@ -120,3 +120,65 @@ def test_pinned_entry_is_included_even_when_over_budget_alone():
     selected = selector.select(memory=memory, query="anything", max_tokens=0)
 
     assert [entry.id for entry in selected] == ["U1"]
+
+
+def test_temporal_query_boosts_timeline_entries():
+    memory = Memory(sections=AGENT_SECTIONS)
+    applied, rejected = memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "OpenWeather API key is configured for the weather app.",
+                "provenance": [1],
+            },
+            {
+                "op": "ADD",
+                "section": "timeline",
+                "text": "OpenWeather API key obtained on March 10, 2024.",
+                "provenance": [2],
+            },
+        ]
+    )
+    assert rejected == []
+    assert len(applied) == 2
+    selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())
+
+    selected = selector.select(
+        memory=memory,
+        query="How many days passed after the API key date?",
+        max_tokens=1,
+    )
+
+    assert [entry.id for entry in selected] == ["M1"]
+
+
+def test_latest_value_query_boosts_status_changes():
+    memory = Memory(sections=AGENT_SECTIONS)
+    applied, rejected = memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "OpenWeather API key has a daily call quota.",
+                "provenance": [1],
+            },
+            {
+                "op": "ADD",
+                "section": "status_changes",
+                "text": "API daily quota updated to 1,200 calls/day.",
+                "provenance": [2],
+            },
+        ]
+    )
+    assert rejected == []
+    assert len(applied) == 2
+    selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())
+
+    selected = selector.select(
+        memory=memory,
+        query="What is the updated daily quota?",
+        max_tokens=1,
+    )
+
+    assert [entry.id for entry in selected] == ["C1"]

@@ -227,6 +227,9 @@ def test_answer_question_prompt_requires_supported_concise_answers():
     assert "MUST answer questions using ONLY the information provided" in user_prompt
     assert "Do NOT use your internal knowledge" in user_prompt
     assert "ANSWER REQUIREMENTS" in user_prompt
+    assert "use the latest active memory entry" in user_prompt
+    assert "identify the relevant dated events" in user_prompt
+    assert "Abstain only when no relevant memory entry" in user_prompt
     assert "Only output the answer to the question" in user_prompt
     assert "Can you tell me about my previous projects?" in user_prompt
 
