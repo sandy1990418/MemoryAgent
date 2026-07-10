@@ -21,44 +21,63 @@ References:
 
 ```text
 memory_agent/
-  summary/       SummaryMiddleware baseline only.
+  chat.py        Standalone practical-memory facade for chat products.
   structured/    Operation-based memory domain and runtime.
   longterm/      Long-term vector recall integration.
   agents/        Agent assembly for runnable demos.
-  clients/       External service protocols/adapters.
+  clients/       External service protocols/adapters (LLM, mem0).
   models/        Dataclasses, config models, constants.
-  tools/         Demo tools.
+
+demos/           Runnable examples, summary baseline, and demo-only tools/config.
+
+scripts/         BEAM evaluation only. Nothing in memory_agent/ imports it.
+  beam_models.py BEAM run/config models (BeamConfig, BeamRunConfig, ...).
+  run_beam_case*.py, run_beam_cases.py  BEAM runners.
+  beam_tests/    Tests for the BEAM runners and BEAM config.
 ```
 
 The key distinction:
 
 ```text
-summary/
-  Uses LangChain SummarizationMiddleware.
-  It is a baseline compression strategy.
-  It does not produce structured memory entries.
+chat.py
+  The handoff surface for chat memory. Depends only on structured/ core,
+  models/, and clients/llm.py. Never imports agents/, mem0, or scripts/
+  (enforced by tests/test_chat_facade.py).
+
+demos/summary.py
+  Uses LangChain SummarizationMiddleware as a comparison baseline.
+  It is demo-only and does not produce structured memory entries.
 
 structured/
   Owns Memory, Transcript, WorkingWindow, MemorySelector, MemoryUpdater,
-  MemorySession, and StructuredMemoryMiddleware.
+  MemoryCompactor, MemoryUpdateVerifier, and StructuredMemoryMiddleware.
+  Deterministic cue/value regexes live in structured/heuristics.py so the
+  policy-sensitive vocabulary is reviewable in one place.
+  LLM instruction construction lives in structured/prompts.py, while the
+  shared operation response parser lives in structured/ops.py.
   It is not summary code. It stores auditable entries through operations.
 
 longterm/
   Owns LongTermMemoryMiddleware.
   It integrates long-term recall with the agent loop.
   The concrete mem0 adapter lives in clients/mem0.py.
+
+scripts/ (BEAM)
+  Evaluation harness. The "beam" CLI profile is a runner-level alias that
+  scripts normalize onto the core "eval" profile via normalize_beam_profile;
+  the memory_agent package only knows practical/agent/eval.
 ```
 
 ## High-Level Component Graph
 
 ```mermaid
 flowchart TD
-    Entry[Runnable scripts] --> SummaryScript[react_summary_agent.py]
-    Entry --> StructuredScript[demo_react.py]
-    Entry --> HybridScript[react_hybrid_agent.py]
-    Entry --> PlainScript[demo.py]
+    Entry[demos package] --> SummaryScript[demos.summary_agent]
+    Entry --> StructuredScript[demos.structured_agent]
+    Entry --> HybridScript[demos.hybrid_agent]
+    Entry --> PlainScript[demos.manual_session]
 
-    SummaryScript --> SummaryPkg[memory_agent.summary]
+    SummaryScript --> SummaryPkg[demos.summary]
     StructuredScript --> StructuredAgent[memory_agent.agents.structured]
     HybridScript --> HybridAgent[memory_agent.agents.hybrid]
     PlainScript --> StructuredPkg[memory_agent.structured]
@@ -100,8 +119,7 @@ flowchart LR
     Clients --> LongTerm
     Structured --> Agents
     LongTerm --> Agents
-    Tools[tools] --> Agents
-    Summary[summary] --> Agents
+    Demos[demos] --> Agents
 ```
 
 Rules:
@@ -112,17 +130,18 @@ Rules:
   `LLMClient`, but not on a concrete OpenAI import except through injection.
 - `longterm/` owns LangChain long-term recall middleware; concrete mem0 details
   stay in `clients/mem0.py`.
-- `summary/` owns only the LangChain built-in summary baseline.
 - `agents/` wires these pieces together for runnable apps.
+- `demos/` owns example config, tools, entry points, and the summary baseline;
+  product package modules never import it.
 
 ## Runtime Path 1: Summary Baseline
 
-Entry point: `react_summary_agent.py`
+Entry point: `python -m demos.summary_agent`
 
 Code location:
 
 ```text
-memory_agent/summary/agent.py
+demos/summary.py
 ```
 
 ```mermaid
@@ -141,12 +160,12 @@ sequenceDiagram
     A-->>U: response
 ```
 
-This is the only summary-specific package. If you are looking for summary
-behavior, start at `memory_agent.summary`.
+This comparison baseline is intentionally outside `memory_agent/`. If you are
+looking for summary behavior, start at `demos.summary`.
 
 ## Runtime Path 2: Structured Memory With LangChain
 
-Entry point: `demo_react.py`
+Entry point: `python -m demos.structured_agent`
 
 Code locations:
 
@@ -197,7 +216,7 @@ memory entries and preserves superseded state.
 
 ## Runtime Path 3: Structured Memory + Long-Term mem0
 
-Entry point: `react_hybrid_agent.py`
+Entry point: `python -m demos.hybrid_agent`
 
 Code locations:
 
@@ -229,7 +248,10 @@ supporting recall from older stored content.
 
 ## Runtime Path 4: Framework-Free Structured Session
 
-Entry point: `demo.py`
+Entry point: `python -m demos.manual_session`
+
+This is the retained legacy/manual loop used for framework-free comparison;
+the product `StructuredMemoryMiddleware` path does not depend on it.
 
 Code locations:
 

@@ -107,6 +107,18 @@ def test_practical_profile_filters_disallowed_sections_and_caps_batch():
                         "text": "Project uses PostgreSQL.",
                         "provenance": [1],
                     },
+                    {
+                        "op": "ADD",
+                        "section": "decisions",
+                        "text": "Project will use server-side rendering.",
+                        "provenance": [1],
+                    },
+                    {
+                        "op": "ADD",
+                        "section": "facts",
+                        "text": "Project uses Redis.",
+                        "provenance": [1],
+                    },
                 ]
             )
         ),
@@ -121,12 +133,17 @@ def test_practical_profile_filters_disallowed_sections_and_caps_batch():
     )
 
     assert rejected == []
-    assert len(applied) == 1
+    assert len(applied) == 3
     assert memory.entries["U1"].section == "preferences"
+    assert {entry.section for entry in memory.entries.values()} == {
+        "preferences",
+        "decisions",
+        "facts",
+    }
 
 
 def test_eval_profile_keeps_beam_style_details():
-    policy = get_memory_policy("beam")
+    policy = get_memory_policy("eval")
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
         sections=EVAL_SECTIONS,
@@ -154,6 +171,94 @@ def test_eval_profile_keeps_beam_style_details():
     assert any(entry.section == "exact_values" for entry in memory.entries.values())
 
 
+def test_practical_profile_keeps_subject_bound_latest_metric_without_exact_inventory():
+    policy = get_memory_policy("practical")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+
+    applied, rejected = updater.update(
+        memory,
+        [
+            Turn(
+                id=1,
+                role="user",
+                content="My application has dashboard API response time improved to 250ms.",
+            )
+        ],
+    )
+
+    assert rejected == []
+    assert applied
+    assert any(
+        entry.section == "facts" and "250ms" in entry.text
+        for entry in memory.entries.values()
+    )
+    assert all(entry.section != "exact_values" for entry in memory.entries.values())
+
+
+def test_practical_profile_keeps_subject_bound_commit_total():
+    policy = get_memory_policy("practical")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+
+    applied, rejected = updater.update(
+        memory,
+        [
+            Turn(
+                id=1,
+                role="user",
+                content=(
+                    "My repository has seen commits merged into the main branch, "
+                    "which has now reached 165, and I want to review security."
+                ),
+            )
+        ],
+    )
+
+    assert rejected == []
+    assert applied
+    assert any("165" in entry.text for entry in memory.entries.values())
+
+
+def test_practical_profile_keeps_explicit_project_denial_in_question():
+    policy = get_memory_policy("practical")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+
+    applied, rejected = updater.update(
+        memory,
+        [
+            Turn(
+                id=1,
+                role="user",
+                content=(
+                    "I've never integrated Flask-Login in this project. "
+                    "Can you show me how?"
+                ),
+            )
+        ],
+    )
+
+    assert rejected == []
+    assert applied
+    assert any(
+        entry.section == "status_changes" and "never integrated Flask-Login" in entry.text
+        for entry in memory.entries.values()
+    )
+
+
 def test_practical_prompt_does_not_include_eval_extraction_rules():
     policy = get_memory_policy("practical")
     updater = MemoryUpdater(
@@ -173,11 +278,11 @@ def test_practical_prompt_does_not_include_eval_extraction_rules():
 
 
 def test_memory_profile_loads_from_env(monkeypatch):
-    monkeypatch.setenv("MEMORY_PROFILE", "beam")
+    monkeypatch.setenv("MEMORY_PROFILE", "eval")
 
     config = StructuredAgentConfig.from_env()
 
-    assert config.memory_profile == "beam"
+    assert config.memory_profile == "eval"
     assert get_memory_policy(config.memory_profile).name == "eval"
 
 

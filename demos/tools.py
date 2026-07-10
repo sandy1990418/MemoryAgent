@@ -1,4 +1,4 @@
-"""Shared tools used by the runnable LangChain demos."""
+"""Mock tools shared by the runnable agent demos."""
 
 from __future__ import annotations
 
@@ -35,15 +35,16 @@ def calculator(expression: str) -> str:
         if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
             return float(node.value)
         if isinstance(node, ast.BinOp) and type(node.op) in allowed_binary_ops:
-            left = eval_node(node.left)
-            right = eval_node(node.right)
-            return allowed_binary_ops[type(node.op)](left, right)
+            return allowed_binary_ops[type(node.op)](
+                eval_node(node.left),
+                eval_node(node.right),
+            )
         if isinstance(node, ast.UnaryOp) and type(node.op) in allowed_unary_ops:
             return allowed_unary_ops[type(node.op)](eval_node(node.operand))
         raise ValueError("Only basic arithmetic is supported.")
 
-    parsed = ast.parse(expression, mode="eval")
-    return str(eval_node(parsed))
+    return str(eval_node(ast.parse(expression, mode="eval")))
 
 
 DEMO_TOOLS = [weather, calculator]
+

@@ -1,4 +1,4 @@
-"""Summary-middleware baseline agent assembly."""
+"""Summary-middleware baseline used only for comparison demos."""
 
 from __future__ import annotations
 
@@ -8,16 +8,15 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
 
+from demos.config import SummaryAgentConfig
+from demos.tools import DEMO_TOOLS
 from memory_agent.agents.common import DEFAULT_SYSTEM_PROMPT
-from memory_agent.models.config import SummaryAgentConfig
-from memory_agent.tools.demo import DEMO_TOOLS
 
 
 def build_summary_agent(
     config: SummaryAgentConfig,
     checkpointer: InMemorySaver | None = None,
 ) -> Any:
-    """Build the baseline LangChain agent that uses built-in summarization."""
     return create_agent(
         model=config.main_model,
         tools=DEMO_TOOLS,
@@ -31,3 +30,4 @@ def build_summary_agent(
             ),
         ],
     )
+

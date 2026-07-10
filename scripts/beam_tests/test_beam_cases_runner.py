@@ -1,7 +1,7 @@
 import json
 import sys
 
-from memory_agent.models.beam import DEFAULT_BEAM_QUESTION_TYPES
+from scripts.beam_models import DEFAULT_BEAM_QUESTION_TYPES
 from scripts.run_beam_cases import discover_case_dirs, parse_args
 
 
@@ -55,3 +55,37 @@ def test_batch_cli_can_select_all_question_types(monkeypatch):
     args = parse_args()
 
     assert args.question_types is None
+
+
+def test_batch_cli_reads_yaml_defaults(tmp_path, monkeypatch):
+    case_path = tmp_path / "100K" / "7"
+    config_path = tmp_path / "beam.yaml"
+    config_path.write_text(
+        f"data_path: {case_path}\nabilities:\n  - abstention\n"
+        "judge: false\nmax_questions_per_type: 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_beam_cases.py", "--beam-config", str(config_path)],
+    )
+
+    args = parse_args()
+
+    assert args.case_root == case_path.parent
+    assert args.question_types == ["abstention"]
+    assert args.max_questions_per_type == 1
+    assert args.judge_model is None
+
+
+def test_batch_cli_accepts_memory_profile(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_beam_cases.py", "--memory-profile", "eval"],
+    )
+
+    args = parse_args()
+
+    assert args.memory_profile == "eval"

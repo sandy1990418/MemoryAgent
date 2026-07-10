@@ -1,11 +1,9 @@
-"""Minimal LangChain agent with SummarizationMiddleware."""
+"""Minimal comparison demo using LangChain SummarizationMiddleware."""
 
-from __future__ import annotations
-
+from demos.config import SummaryAgentConfig
+from demos.summary import build_summary_agent
 from memory_agent.agents import invoke_agent, print_last_message
-from memory_agent.models.config import SummaryAgentConfig, load_project_env
-from memory_agent.summary import build_summary_agent
-
+from memory_agent.models.config import load_project_env
 
 PROMPTS = [
     "Hi, my name is Hannah. Please remember I am testing summary middleware.",
@@ -20,7 +18,6 @@ def main() -> None:
     load_project_env()
     config = SummaryAgentConfig.from_env()
     agent = build_summary_agent(config)
-
     for prompt in PROMPTS:
         print(f"\nUser: {prompt}")
         result = invoke_agent(agent, prompt, thread_id=config.thread_id)
@@ -30,3 +27,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

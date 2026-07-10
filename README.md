@@ -4,10 +4,10 @@ MemoryAgent is a small memory architecture playground for LangChain agents.
 The package is organized by responsibility, not by "whatever file was created
 first":
 
-1. `summary/`: baseline LangChain `SummarizationMiddleware` path.
-2. `structured/`: this repo's operation-based structured memory system.
-3. `longterm/`: long-term recall integration for mem0-style vector memory.
-4. `agents/`: runnable LangChain agent assembly for each path.
+1. `structured/`: this repo's operation-based structured memory system.
+2. `longterm/`: long-term recall integration for mem0-style vector memory.
+3. `agents/`: reusable LangChain agent assembly.
+4. `demos/`: runnable examples, baseline summary code, and demo tools.
 
 For the detailed component graph and data flow, see
 [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -18,15 +18,15 @@ For the detailed component graph and data flow, see
 memory_agent/
   __init__.py              public package exports
 
-  summary/                 summary-related code only
-    agent.py               build_summary_agent using SummarizationMiddleware
-
   structured/              operation-based memory domain/runtime
     memory.py              Memory store and ADD/UPDATE/SUPERSEDE/NOOP ops
     transcript.py          append-only transcript
     window.py              framework-free sliding context window
     selector.py            prompt memory selection
     updater.py             LLM-driven memory operation generator
+    prompts.py             updater/compactor prompt construction
+    ops.py                 shared JSON operation parser and errors
+    heuristics.py          deterministic cue/value vocabulary
     session.py             framework-free structured chat session
     middleware.py          LangChain StructuredMemoryMiddleware
 
@@ -49,20 +49,23 @@ memory_agent/
     transcript.py          Turn
     longterm.py            LongTermHit
     runtime.py             agent runtime containers
-    beam.py                BEAM runner models
-
-  tools/
-    demo.py                demo weather/calculator tools
 ```
 
-Root runnable files stay thin:
+Demo-only code stays outside the importable product package:
 
 ```text
-react_summary_agent.py     uses memory_agent.summary
-demo_react.py              uses memory_agent.agents.structured
-react_hybrid_agent.py      uses memory_agent.agents.hybrid
-demo.py                    uses memory_agent.structured directly
+demos/
+  summary.py               SummarizationMiddleware baseline builder
+  config.py                demo-only environment configs
+  tools.py                 weather/calculator demo tools
+  summary_agent.py         summary baseline entry point
+  structured_agent.py      structured-memory agent entry point
+  hybrid_agent.py          structured + mem0 entry point
+  manual_session.py        framework-free legacy session example
 ```
+
+`memory_agent/agents` accepts tools through dependency injection and has no
+dependency on `demos/`.
 
 ## Setup
 
@@ -84,19 +87,19 @@ OPENAI_API_KEY="your-api-key"
 Run the baseline summary path:
 
 ```bash
-python react_summary_agent.py
+python -m demos.summary_agent
 ```
 
 Run structured memory:
 
 ```bash
-python demo_react.py
+python -m demos.structured_agent
 ```
 
 Run structured memory plus mem0:
 
 ```bash
-python react_hybrid_agent.py
+python -m demos.hybrid_agent
 ```
 
 The DeepAgents BEAM runner is optional and requires Python >= 3.11. Do not
@@ -129,7 +132,9 @@ The detailed output JSON then includes `heuristic_rubric_rate`,
 `judge_rubric_rate`, and BEAM-style `judge_score`, plus per-question
 `judge_checks` with `score` and `reason`. With judge enabled, the runner also
 writes an `evaluation-*.json` file shaped like BEAM's evaluator output, with
-`llm_judge_score` and `llm_judge_responses`.
+`llm_judge_score` and `llm_judge_responses`. The detailed trace also records
+the source commit, resolved run config, and token usage for `updater`,
+`compactor`, `agent`, and `judge` roles.
 
 To smoke-test a few downloaded BEAM cases from `BEAM/chats/100K` using only
 structured summary memory (no mem0 ingestion/retrieval), run:
@@ -148,8 +153,11 @@ Pass `--all-question-types` for the complete BEAM suite, or
 
 ## Configuration
 
-All runnable demos call `load_project_env()`, which loads `.env` from the repo
-root. `.env.example` documents the supported variables.
+Product memory defaults live in `configs/product.yaml`; BEAM dataset,
+abilities, judge, and question-cap defaults live in `configs/beam.yaml`.
+Environment variables override individual YAML values, and CLI arguments
+override the resolved BEAM defaults. Use `--beam-config` to select another
+BEAM YAML file. Runnable demos also load `.env` from the repo root.
 
 Common variables:
 
@@ -162,6 +170,8 @@ STRUCTURED_MAX_TOKENS="600"
 STRUCTURED_MAX_MEMORY_TOKENS="600"
 STRUCTURED_KEEP_MESSAGES="4"
 MEMORY_PROFILE="practical"
+MEMORY_SECTIONS="practical"
+MEMORY_COMPACTION_THRESHOLD="30"
 ```
 
 `MEMORY_PROFILE` separates sparse product retention from detailed evaluation:
@@ -177,7 +187,7 @@ state, and `eval` (or `beam`) enables detail-heavy BEAM extraction.
 
 ## mem0 Modes
 
-`react_hybrid_agent.py` uses `HybridAgentConfig` and supports three backends:
+`demos.hybrid_agent` uses `HybridAgentConfig` and supports three backends:
 
 ```bash
 # Local development/test mode. Uses embedded Qdrant under .mem0/.

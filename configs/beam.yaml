@@ -1,0 +1,27 @@
+data_path: BEAM/chats/100K/1
+abilities:
+  - contradiction_resolution
+  - knowledge_update
+  - preference_following
+  - instruction_following
+  - abstention
+  - summarization
+judge: true
+max_questions_per_type: null
+# Models. Env overrides: BEAM_ANSWER_MODEL, BEAM_MEMORY_MODEL (falls back to
+# MEMORY_MODEL, then answer_model), BEAM_JUDGE_MODEL, MEM0_LLM_MODEL.
+# answer_model: gpt-5.4-nano
+# memory_model: gpt-5.4-nano
+# judge_model: gpt-5.4-nano
+# mem0_llm_model: gpt-5.4-nano
+# Retrieval and structured-memory knobs. Env overrides use the BEAM_ prefix
+# with the upper-cased key, e.g. BEAM_TOP_K, BEAM_STRUCTURED_MAX_TOKENS.
+top_k: 8
+max_hit_chars: 6000
+max_active_context_chars: 12000
+structured_max_tokens: 12000
+structured_max_memory_tokens: 3000
+structured_answer_tokens: 4000
+structured_evict_fraction: 0.5
+structured_keep_messages: 2
+recursion_limit: 50

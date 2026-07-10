@@ -37,33 +37,30 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage
 
 from memory_agent import (
-    EVAL_SECTIONS,
     Mem0LongTermMemory,
-    Memory,
-    MemoryUpdater,
     OpenAIClient,
-    get_memory_policy,
+    TokenLedger,
 )
-from memory_agent.models.beam import (
+from memory_agent.clients.llm import LangChainTokenCallback
+from scripts.beam_models import (
     BeamDeepAgentRunConfig,
-    DEFAULT_BEAM_JUDGE_MODEL,
-    DEFAULT_BEAM_MEMORY_MODEL,
-    DEFAULT_BEAM_MODEL,
-    DEFAULT_BEAM_QUESTION_TYPES,
-    DEFAULT_MEM0_LLM_MODEL,
+    beam_config_from_argv,
 )
+from memory_agent.models.config import product_config_from_argv
 from memory_agent.structured.middleware import StructuredMemoryMiddleware, _content_to_text
 from scripts.run_beam_case import (
-    DEFAULT_CHAT_PATH,
-    DEFAULT_PROBES_PATH,
+    BEAM_TOKEN_ROLES,
     DEFAULT_RESULTS_DIR,
-    DEFAULT_TOPICS_PATH,
     apply_message_update,
     beam_answers_from_results,
     beam_evaluation_from_results,
+    build_structured_beam_middleware,
     build_context,
     default_answers_output_path,
     default_evaluation_output_path,
+    beam_config_snapshot,
+    current_source_commit,
+    current_source_state,
     flatten_chunks,
     flatten_message_batches,
     judge_response,
@@ -197,6 +194,7 @@ def ask_agent(
     structured_middleware: StructuredMemoryMiddleware | None = None,
     structured_answer_tokens: int = 4000,
     retrieval_enabled: bool = True,
+    token_ledger: TokenLedger | None = None,
 ) -> tuple[str, list[dict[str, Any]], int]:
     topic_text = json.dumps(topic, ensure_ascii=False)
     if structured_middleware is None:
@@ -254,12 +252,23 @@ def ask_agent(
             else "Answer using only the memory sections above."
         )
     )
+    callback = (
+        LangChainTokenCallback(token_ledger, "agent")
+        if token_ledger is not None
+        else None
+    )
+    config: dict[str, Any] = {"recursion_limit": recursion_limit}
+    if callback is not None:
+        config["callbacks"] = [callback]
     result = agent.invoke(
         {"messages": [{"role": "user", "content": user}]},
-        config={"recursion_limit": recursion_limit},
+        config=config,
     )
     messages = result["messages"]
-    return final_ai_text(messages), collect_tool_trace(messages), len(messages)
+    answer = final_ai_text(messages)
+    if token_ledger is not None and callback is not None and callback.recorded_calls == 0:
+        token_ledger.record_text("agent", user, answer)
+    return answer, collect_tool_trace(messages), len(messages)
 
 
 def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
@@ -325,21 +334,11 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
 
     structured_middleware: StructuredMemoryMiddleware | None = None
     active_messages: list[AnyMessage] = []
+    token_ledger = TokenLedger()
+    token_ledger.ensure_roles(*BEAM_TOKEN_ROLES)
+
     if use_structured:
-        memory_policy = get_memory_policy("eval")
-        structured_middleware = StructuredMemoryMiddleware(
-            memory=Memory(sections=EVAL_SECTIONS, policy=memory_policy),
-            updater=MemoryUpdater(
-                llm=OpenAIClient(args.structured_model),
-                sections=EVAL_SECTIONS,
-                policy=memory_policy,
-            ),
-            policy=memory_policy,
-            max_tokens=args.structured_max_tokens,
-            evict_fraction=args.structured_evict_fraction,
-            keep_messages=args.structured_keep_messages,
-            max_memory_tokens=args.structured_max_memory_tokens,
-        )
+        structured_middleware = build_structured_beam_middleware(args, token_ledger)
 
         print(
             "Processing BEAM transcript with StructuredMemoryMiddleware "
@@ -392,11 +391,19 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
             retrieval_enabled=use_mem0,
         ),
     )
-    judge_llm = OpenAIClient(args.judge_model) if args.judge_model else None
+    judge_llm = (
+        OpenAIClient(args.judge_model, role="judge", token_ledger=token_ledger)
+        if args.judge_model
+        else None
+    )
 
     output: dict[str, Any] = {
         "run_id": run_id,
+        "source_commit": current_source_commit(),
+        "source_state": current_source_state(),
+        "config": beam_config_snapshot(args),
         "memory_mode": memory_mode,
+        "memory_profile": args.memory_profile,
         "chat": str(args.chat),
         "probes": str(args.probes),
         "topics": str(args.topics),
@@ -421,6 +428,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
         "structured_active_messages": len(active_messages) if structured_middleware is not None else None,
         "results": {},
         "summary": {},
+        "token_usage": {},
     }
 
     total_hits = 0
@@ -451,6 +459,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
                 structured_middleware=structured_middleware,
                 structured_answer_tokens=args.structured_answer_tokens,
                 retrieval_enabled=use_mem0,
+                token_ledger=token_ledger,
             )
             total_tool_calls += len(tool_trace)
             rubric_checks = [rubric_hit(response, line) for line in item.get("rubric", [])]
@@ -538,6 +547,8 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
             "judge_questions": category_judge_questions if judge_llm is not None else None,
         }
 
+    output["token_usage"] = token_ledger.to_dict()
+
     output["summary"]["overall"] = {
         "chunks_available": len(chunks),
         "chunks_ingested": len(chunks) if use_mem0 and not args.skip_ingest else 0,
@@ -565,6 +576,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
         if judge_llm is not None and total_judge_questions
         else None,
         "judge_questions": total_judge_questions if judge_llm is not None else None,
+        "token_usage": token_ledger.to_dict(),
         "note": (
             "Heuristic plus BEAM-style local LLM-as-judge over rubrics."
             if judge_llm is not None
@@ -599,10 +611,15 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
+    config_path, beam_config = beam_config_from_argv()
+    product_path, product_config = product_config_from_argv()
+    defaults = beam_config.to_run_defaults()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chat", type=Path, default=DEFAULT_CHAT_PATH)
-    parser.add_argument("--probes", type=Path, default=DEFAULT_PROBES_PATH)
-    parser.add_argument("--topics", type=Path, default=DEFAULT_TOPICS_PATH)
+    parser.add_argument("--beam-config", type=Path, default=config_path)
+    parser.add_argument("--product-config", type=Path, default=product_path)
+    parser.add_argument("--chat", type=Path, default=defaults["chat"])
+    parser.add_argument("--probes", type=Path, default=defaults["probes"])
+    parser.add_argument("--topics", type=Path, default=defaults["topics"])
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
     parser.add_argument("--store-dir", type=Path)
     parser.add_argument("--output", type=Path)
@@ -629,13 +646,26 @@ def parse_args() -> argparse.Namespace:
             "relies on the agent's tool searches only."
         ),
     )
-    parser.add_argument("--top-k", type=int, default=8)
-    parser.add_argument("--max-hit-chars", type=int, default=6000)
-    parser.add_argument("--max-active-context-chars", type=int, default=12000)
+    parser.add_argument(
+        "--memory-profile",
+        choices=("practical", "agent", "eval", "beam"),
+        default=product_config.memory_profile,
+        help=(
+            "Structured memory profile for BEAM ingestion. Defaults to MEMORY_PROFILE "
+            "or practical; eval/beam reproduces the legacy broad-section behavior."
+        ),
+    )
+    parser.add_argument("--top-k", type=int, default=defaults["top_k"])
+    parser.add_argument("--max-hit-chars", type=int, default=defaults["max_hit_chars"])
+    parser.add_argument(
+        "--max-active-context-chars",
+        type=int,
+        default=defaults["max_active_context_chars"],
+    )
     parser.add_argument(
         "--question-types",
         nargs="+",
-        default=list(DEFAULT_BEAM_QUESTION_TYPES),
+        default=defaults["question_types"],
         help=(
             "BEAM question types to answer. Defaults to contradiction_resolution, "
             "knowledge_update, preference_following, instruction_following, "
@@ -652,23 +682,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-questions-per-type",
         type=int,
+        default=defaults["max_questions_per_type"],
         help="Optional cap per selected question type for quick smoke tests.",
     )
     parser.add_argument("--skip-ingest", action="store_true")
-    parser.add_argument("--answer-model", default=DEFAULT_BEAM_MODEL)
-    parser.add_argument("--structured-model", default=DEFAULT_BEAM_MEMORY_MODEL)
-    parser.add_argument("--structured-max-tokens", type=int, default=12000)
-    parser.add_argument("--structured-max-memory-tokens", type=int, default=3000)
-    parser.add_argument("--structured-answer-tokens", type=int, default=4000)
-    parser.add_argument("--structured-evict-fraction", type=float, default=0.5)
-    parser.add_argument("--structured-keep-messages", type=int, default=2)
+    parser.add_argument("--answer-model", default=defaults["answer_model"])
+    parser.add_argument("--structured-model", default=defaults["structured_model"])
+    parser.add_argument(
+        "--structured-max-tokens", type=int, default=defaults["structured_max_tokens"]
+    )
+    parser.add_argument(
+        "--structured-max-memory-tokens",
+        type=int,
+        default=defaults["structured_max_memory_tokens"],
+    )
+    parser.add_argument(
+        "--structured-answer-tokens",
+        type=int,
+        default=defaults["structured_answer_tokens"],
+    )
+    parser.add_argument(
+        "--structured-evict-fraction",
+        type=float,
+        default=defaults["structured_evict_fraction"],
+    )
+    parser.add_argument(
+        "--structured-keep-messages",
+        type=int,
+        default=defaults["structured_keep_messages"],
+    )
     parser.add_argument("--no-structured-flush-final", dest="structured_flush_final", action="store_false")
     parser.set_defaults(structured_flush_final=True)
-    parser.add_argument("--mem0-llm-model", default=DEFAULT_MEM0_LLM_MODEL)
-    parser.add_argument("--recursion-limit", type=int, default=50)
+    parser.add_argument("--mem0-llm-model", default=defaults["mem0_llm_model"])
+    parser.add_argument("--recursion-limit", type=int, default=defaults["recursion_limit"])
     parser.add_argument(
         "--judge-model",
-        default=DEFAULT_BEAM_JUDGE_MODEL,
+        default=defaults["judge_model"],
         help="LLM-as-judge model. Defaults to BEAM_JUDGE_MODEL or the answer model default.",
     )
     parser.add_argument(

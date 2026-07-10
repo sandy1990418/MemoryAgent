@@ -26,7 +26,8 @@ from dataclasses import dataclass, field
 from memory_agent.models.policy import MemoryPolicy
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
-from memory_agent.structured.updater import MemoryUpdater, status_change_cue_re
+from memory_agent.structured.heuristics import status_change_cue_re
+from memory_agent.structured.updater import MemoryUpdater
 
 
 @dataclass(frozen=True)

@@ -10,6 +10,7 @@ from typing import Any
 class StructuredAgentRuntime:
     agent: Any
     structured_middleware: Any
+    token_ledger: Any
 
 
 @dataclass(frozen=True)

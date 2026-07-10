@@ -1,0 +1,4 @@
+memory_profile: practical
+sections: practical
+compaction_threshold: 30
+memory_model: openai:gpt-5.4-nano

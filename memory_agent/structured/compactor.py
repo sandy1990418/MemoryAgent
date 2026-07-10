@@ -8,7 +8,8 @@ from memory_agent.clients.llm import LLMClient
 from memory_agent.models.policy import MemoryPolicy, get_memory_policy, validate_policy_sections
 from memory_agent.models.sections import SectionConfig
 from memory_agent.structured.memory import Memory
-from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
+from memory_agent.structured.ops import UpdateFailed, parse_memory_ops
+from memory_agent.structured.prompts import build_compactor_prompt
 
 
 def _default_token_estimator(text: str) -> int:
@@ -40,44 +41,15 @@ class MemoryCompactor:
         }
 
     def _build_prompt(self, memory: Memory) -> tuple[str, list[dict]]:
-        sections = "\n".join(
-            f'- key="{section.key}": {section.description}' for section in self.sections
-        )
         rendered = memory.render(
             include_superseded=True,
             max_tokens=self.max_memory_tokens,
             token_estimator=self.token_estimator,
         ) or "(No memory entries yet.)"
-        system = (
-            "Compact structured memory by semantic subject, not as a transcript "
-            "summary. Return a JSON array containing only SUPERSEDE, ADD, or NOOP.\n\n"
-            "Available sections:\n"
-            f"{sections}\n\n"
-            "Rules:\n"
-            "1. Merge only active entries about the same semantic subject.\n"
-            "2. For each merge, SUPERSEDE every replaced active entry by exact id, "
-            "then ADD one concise canonical entry in the best matching section.\n"
-            "3. Preserve the latest truth, active preferences, confirmed decisions, "
-            "current project state, unresolved blockers, and failed attempts.\n"
-            "4. Canonical ADD provenance must be the union of the source entries' "
-            "provenance turn ids.\n"
-            "5. Never SUPERSEDE an entry unless a canonical ADD preserves its durable "
-            "information. Never delete entries.\n"
-            "6. Never operate on or re-activate a superseded entry. Superseded entries "
-            "are history and must remain superseded.\n"
-            "7. Do not merge entries merely because they occurred near each other or "
-            "share broad words such as project, memory, or API.\n"
-            "8. Use NOOP when no same-subject entries can be safely consolidated.\n"
-            "9. Respond with the JSON array only.\n\n"
-            "Current memory:\n"
-            f"{rendered}"
+        return build_compactor_prompt(
+            sections=self.sections,
+            current_memory=rendered,
         )
-        return system, [
-            {
-                "role": "user",
-                "content": "Return subject-based compaction operations for the active entries.",
-            }
-        ]
 
     def compact(self, memory: Memory) -> tuple[list[dict], list[dict]]:
         """Generate, validate, and atomically apply compaction operations."""
@@ -87,7 +59,7 @@ class MemoryCompactor:
         except Exception as exc:
             raise UpdateFailed(f"Compactor LLM transport error: {exc}") from exc
 
-        ops = MemoryUpdater._parse_ops(response)
+        ops = parse_memory_ops(response)
         if ops is None:
             raise UpdateFailed(
                 f"Could not parse a JSON compaction ops array from LLM response: {response!r}"
@@ -126,6 +98,9 @@ class MemoryCompactor:
     def _normalize_ops(self, ops: list[dict]) -> list[dict]:
         normalized: list[dict] = []
         for op in ops:
+            if isinstance(op, str) and op.strip().upper() == "NOOP":
+                normalized.append({"op": "NOOP"})
+                continue
             if not isinstance(op, dict):
                 normalized.append(op)
                 continue

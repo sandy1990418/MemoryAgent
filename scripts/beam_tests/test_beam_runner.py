@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
-from memory_agent.models.beam import DEFAULT_BEAM_QUESTION_TYPES, BeamRunConfig
+from memory_agent.clients.llm import TokenLedger
+from scripts.beam_models import DEFAULT_BEAM_QUESTION_TYPES, BeamRunConfig
 from memory_agent.models.sections import CHAT_SECTIONS
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
@@ -12,6 +13,8 @@ from scripts.run_beam_case import (
     beam_answers_from_results,
     beam_evaluation_from_results,
     build_answer_context,
+    build_structured_beam_middleware,
+    beam_config_snapshot,
     judge_response,
     load_topic,
     normalize_judge_checks,
@@ -306,3 +309,101 @@ def test_build_answer_context_includes_chronological_order_block():
     assert chronological_block.index("[F1] first topic was Flask routing") < chronological_block.index(
         "[D1] second topic was deployment"
     )
+
+
+def test_beam_cli_reads_yaml_defaults(tmp_path, monkeypatch):
+    config_path = tmp_path / "beam.yaml"
+    config_path.write_text(
+        f"data_path: {tmp_path / 'case'}\n"
+        "abilities:\n  - summarization\njudge: false\n"
+        "max_questions_per_type: 2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_beam_case.py", "--beam-config", str(config_path)],
+    )
+
+    args = parse_args()
+
+    assert args.chat == tmp_path / "case" / "chat.json"
+    assert args.question_types == ["summarization"]
+    assert args.max_questions_per_type == 2
+    assert args.judge_model is None
+
+
+def test_beam_cli_loads_env_file_before_resolving_defaults(tmp_path, monkeypatch):
+    config_path = tmp_path / "beam.yaml"
+    config_path.write_text("abilities:\n  - summarization\njudge: true\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text("BEAM_ABILITIES=abstention\nBEAM_JUDGE=false\n", encoding="utf-8")
+    monkeypatch.delenv("BEAM_ABILITIES", raising=False)
+    monkeypatch.delenv("BEAM_JUDGE", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_beam_case.py",
+            "--beam-config",
+            str(config_path),
+            "--env-file",
+            str(env_path),
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.question_types == ["abstention"]
+    assert args.judge_model is None
+
+
+def test_beam_middleware_uses_one_profile_section_set_and_compactor():
+    ledger = TokenLedger()
+    args = SimpleNamespace(
+        memory_profile="practical",
+        structured_model="fake-model",
+        structured_max_tokens=100,
+        structured_evict_fraction=0.5,
+        structured_keep_messages=2,
+        structured_max_memory_tokens=80,
+    )
+
+    middleware = build_structured_beam_middleware(args, ledger)
+
+    memory_sections = {section.key for section in middleware.memory.sections}
+    updater_sections = {section.key for section in middleware.updater.sections}
+    compactor_sections = {section.key for section in middleware.compactor.sections}
+    assert middleware.memory.policy is middleware.policy
+    assert middleware.updater.policy is middleware.policy
+    assert middleware.compactor.policy is middleware.policy
+    assert memory_sections == updater_sections == compactor_sections
+
+
+def test_beam_middleware_uses_product_compaction_threshold(tmp_path):
+    product_path = tmp_path / "product.yaml"
+    product_path.write_text(
+        "memory_profile: practical\nsections: practical\ncompaction_threshold: 7\n",
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        product_config=product_path,
+        memory_profile="practical",
+        structured_model="fake-model",
+        structured_max_tokens=100,
+        structured_evict_fraction=0.5,
+        structured_keep_messages=2,
+        structured_max_memory_tokens=80,
+    )
+
+    middleware = build_structured_beam_middleware(args)
+
+    assert middleware.compact_min_active_entries == 7
+
+
+def test_beam_config_snapshot_is_json_serializable():
+    snapshot = beam_config_snapshot(BeamRunConfig())
+
+    assert isinstance(snapshot["chat"], str)
+    assert isinstance(snapshot["question_types"], list)
+    assert snapshot["memory_profile"] == "practical"

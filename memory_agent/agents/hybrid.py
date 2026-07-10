@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Sequence
 
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
@@ -14,7 +14,6 @@ from memory_agent.clients.mem0 import LongTermMemory, Mem0LongTermMemory
 from memory_agent.longterm.middleware import LongTermMemoryMiddleware
 from memory_agent.models.config import HybridAgentConfig, StructuredAgentConfig
 from memory_agent.models.runtime import HybridAgentRuntime
-from memory_agent.tools.demo import DEMO_TOOLS
 
 
 def _structured_config_from_hybrid(config: HybridAgentConfig) -> StructuredAgentConfig:
@@ -52,6 +51,7 @@ def build_hybrid_agent(
     config: HybridAgentConfig,
     checkpointer: InMemorySaver | None = None,
     long_term_memory: LongTermMemory | None = None,
+    tools: Sequence[Any] = (),
 ) -> HybridAgentRuntime:
     structured_middleware = build_structured_middleware(_structured_config_from_hybrid(config))
     middleware: list[Any] = [structured_middleware]
@@ -74,7 +74,7 @@ def build_hybrid_agent(
 
     agent = create_agent(
         model=config.main_model,
-        tools=DEMO_TOOLS,
+        tools=list(tools),
         system_prompt=(
             DEFAULT_SYSTEM_PROMPT
             + " If injected # Conversation Memory and # Long-Term Memory conflict, "

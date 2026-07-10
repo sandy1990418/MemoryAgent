@@ -12,15 +12,12 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from memory_agent.models.beam import (
-    DEFAULT_BEAM_JUDGE_MODEL,
-    DEFAULT_BEAM_MEMORY_MODEL,
-    DEFAULT_BEAM_MODEL,
-    DEFAULT_BEAM_QUESTION_TYPES,
-    DEFAULT_MEM0_LLM_MODEL,
+from scripts.beam_models import (
     BeamDeepAgentRunConfig,
     BeamRunConfig,
+    beam_config_from_argv,
 )
+from memory_agent.models.config import product_config_from_argv
 from scripts.run_beam_case import run as run_standard_case
 from scripts.run_beam_case_deepagent import run as run_deepagent_case
 
@@ -77,6 +74,8 @@ def case_config(args: argparse.Namespace, case_dir: Path) -> BeamRunConfig:
     results_dir = args.results_root / case_id
     store_dir = args.store_root / case_id if args.store_root else results_dir / "mem0_store"
     common: dict[str, Any] = {
+        "beam_config": getattr(args, "beam_config", None),
+        "product_config": getattr(args, "product_config", None),
         "chat": case_dir / "chat.json",
         "probes": case_dir / "probing_questions" / "probing_questions.json",
         "topics": case_dir / "topic.json",
@@ -85,6 +84,7 @@ def case_config(args: argparse.Namespace, case_dir: Path) -> BeamRunConfig:
         "env_file": args.env_file,
         "user_id": f"beam-100k-case-{case_id}",
         "memory_mode": args.memory_mode or "structured_only",
+        "memory_profile": args.memory_profile,
         "top_k": args.top_k,
         "max_hit_chars": args.max_hit_chars,
         "max_active_context_chars": args.max_active_context_chars,
@@ -177,8 +177,13 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
+    config_path, beam_config = beam_config_from_argv()
+    product_path, product_config = product_config_from_argv()
+    defaults = beam_config.to_run_defaults()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case-root", type=Path, default=DEFAULT_CASE_ROOT)
+    parser.add_argument("--beam-config", type=Path, default=config_path)
+    parser.add_argument("--product-config", type=Path, default=product_path)
+    parser.add_argument("--case-root", type=Path, default=beam_config.data_path.parent)
     parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT)
     parser.add_argument("--store-root", type=Path)
     parser.add_argument("--case-ids", nargs="+")
@@ -193,14 +198,23 @@ def parse_args() -> argparse.Namespace:
             "Defaults to structured_only, which uses only summary memory and no mem0."
         ),
     )
+    parser.add_argument(
+        "--memory-profile",
+        choices=("practical", "agent", "eval", "beam"),
+        default=product_config.memory_profile,
+    )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
-    parser.add_argument("--top-k", type=int, default=8)
-    parser.add_argument("--max-hit-chars", type=int, default=6000)
-    parser.add_argument("--max-active-context-chars", type=int, default=12000)
+    parser.add_argument("--top-k", type=int, default=defaults["top_k"])
+    parser.add_argument("--max-hit-chars", type=int, default=defaults["max_hit_chars"])
+    parser.add_argument(
+        "--max-active-context-chars",
+        type=int,
+        default=defaults["max_active_context_chars"],
+    )
     parser.add_argument(
         "--question-types",
         nargs="+",
-        default=list(DEFAULT_BEAM_QUESTION_TYPES),
+        default=defaults["question_types"],
         help=(
             "BEAM question types to answer. Defaults to contradiction_resolution, "
             "knowledge_update, preference_following, instruction_following, "
@@ -217,23 +231,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-questions-per-type",
         type=int,
+        default=defaults["max_questions_per_type"],
         help="Optional cap per selected question type for quick smoke tests.",
     )
     parser.add_argument("--skip-ingest", action="store_true")
-    parser.add_argument("--answer-model", default=DEFAULT_BEAM_MODEL)
-    parser.add_argument("--structured-model", default=DEFAULT_BEAM_MEMORY_MODEL)
-    parser.add_argument("--structured-max-tokens", type=int, default=12000)
-    parser.add_argument("--structured-max-memory-tokens", type=int, default=3000)
-    parser.add_argument("--structured-answer-tokens", type=int, default=4000)
-    parser.add_argument("--structured-evict-fraction", type=float, default=0.5)
-    parser.add_argument("--structured-keep-messages", type=int, default=2)
+    parser.add_argument("--answer-model", default=defaults["answer_model"])
+    parser.add_argument("--structured-model", default=defaults["structured_model"])
+    parser.add_argument(
+        "--structured-max-tokens", type=int, default=defaults["structured_max_tokens"]
+    )
+    parser.add_argument(
+        "--structured-max-memory-tokens",
+        type=int,
+        default=defaults["structured_max_memory_tokens"],
+    )
+    parser.add_argument(
+        "--structured-answer-tokens",
+        type=int,
+        default=defaults["structured_answer_tokens"],
+    )
+    parser.add_argument(
+        "--structured-evict-fraction",
+        type=float,
+        default=defaults["structured_evict_fraction"],
+    )
+    parser.add_argument(
+        "--structured-keep-messages",
+        type=int,
+        default=defaults["structured_keep_messages"],
+    )
     parser.add_argument("--no-structured-flush-final", dest="structured_flush_final", action="store_false")
     parser.set_defaults(structured_flush_final=True)
-    parser.add_argument("--mem0-llm-model", default=DEFAULT_MEM0_LLM_MODEL)
-    parser.add_argument("--recursion-limit", type=int, default=50)
+    parser.add_argument("--mem0-llm-model", default=defaults["mem0_llm_model"])
+    parser.add_argument("--recursion-limit", type=int, default=defaults["recursion_limit"])
     parser.add_argument(
         "--judge-model",
-        default=DEFAULT_BEAM_JUDGE_MODEL,
+        default=defaults["judge_model"],
         help="LLM-as-judge model. Defaults to BEAM_JUDGE_MODEL or the answer model default.",
     )
     parser.add_argument(

@@ -97,3 +97,28 @@ def test_compactor_rejects_reactivating_superseded_entry():
     assert rejected
     assert memory.entries["D2"].status == "active"
     assert memory.entries["D3"].status == "active"
+
+
+def test_compactor_accepts_string_noop_from_small_models():
+    policy = get_memory_policy("practical")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "Project uses Flask.",
+                "provenance": [1],
+            }
+        ]
+    )
+    compactor = MemoryCompactor(
+        llm=ScriptedLLM(lambda system, messages: '["NOOP"]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+
+    applied, rejected = compactor.compact(memory)
+
+    assert applied == []
+    assert rejected == []

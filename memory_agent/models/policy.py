@@ -21,8 +21,8 @@ PRACTICAL_POLICY = MemoryPolicy(
     name="practical",
     section_preset="practical",
     allow_exact_values=False,
-    allow_deterministic_subject_values=False,
-    max_ops_per_batch=1,
+    allow_deterministic_subject_values=True,
+    max_ops_per_batch=3,
     default_noop=True,
 )
 
@@ -48,7 +48,6 @@ MEMORY_POLICIES: dict[str, MemoryPolicy] = {
     "practical": PRACTICAL_POLICY,
     "agent": AGENT_POLICY,
     "eval": EVAL_POLICY,
-    "beam": EVAL_POLICY,
 }
 
 

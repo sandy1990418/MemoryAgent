@@ -1,5 +1,9 @@
+import sys
+from types import SimpleNamespace
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from memory_agent.clients.llm import LangChainTokenCallback, TokenLedger
 from memory_agent.models.sections import AGENT_SECTIONS
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.middleware import StructuredMemoryMiddleware
@@ -9,6 +13,7 @@ from scripts.run_beam_case_deepagent import (
     build_agent_system_prompt,
     collect_tool_trace,
     final_ai_text,
+    parse_args,
 )
 from tests.fakes import ScriptedLLM
 
@@ -240,3 +245,71 @@ def test_ask_agent_without_retrieval_instructs_memory_only_answering():
     assert "Answer using only the memory sections above" in user_message
     assert "# Question-Relevant Structured Memory" in user_message
     assert "# Recorded Denials and Corrections" in user_message
+
+
+def test_ask_agent_records_agent_token_role():
+    agent = FakeAgent()
+    ledger = TokenLedger()
+
+    response, _trace, _message_count = ask_agent(
+        agent=agent,
+        topic={"title": "Budget tracker"},
+        question_type="abstention",
+        question="What do you know?",
+        recursion_limit=10,
+        retrieval_enabled=False,
+        token_ledger=ledger,
+    )
+
+    assert response == "ok"
+    assert ledger.to_dict()["agent"]["calls"] == 1
+
+
+def test_agent_token_callback_records_each_provider_call():
+    ledger = TokenLedger()
+    callback = LangChainTokenCallback(ledger, "agent")
+
+    callback.on_llm_end(
+        SimpleNamespace(
+            llm_output={
+                "token_usage": {"prompt_tokens": 10, "completion_tokens": 4}
+            },
+            generations=[],
+        )
+    )
+    callback.on_llm_end(
+        SimpleNamespace(
+            llm_output={
+                "token_usage": {"input_tokens": 6, "output_tokens": 3}
+            },
+            generations=[],
+        )
+    )
+
+    assert ledger.to_dict()["agent"] == {
+        "input_tokens": 16,
+        "output_tokens": 7,
+        "total_tokens": 23,
+        "calls": 2,
+    }
+
+
+def test_deepagent_cli_reads_yaml_defaults(tmp_path, monkeypatch):
+    config_path = tmp_path / "beam.yaml"
+    config_path.write_text(
+        f"data_path: {tmp_path / 'case'}\nabilities:\n  - knowledge_update\n"
+        "judge: false\nmax_questions_per_type: 3\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_beam_case_deepagent.py", "--beam-config", str(config_path)],
+    )
+
+    args = parse_args()
+
+    assert args.probes == tmp_path / "case" / "probing_questions" / "probing_questions.json"
+    assert args.question_types == ["knowledge_update"]
+    assert args.max_questions_per_type == 3
+    assert args.judge_model is None
