@@ -64,7 +64,7 @@ class MemoryCompactor:
             raise UpdateFailed(
                 f"Could not parse a JSON compaction ops array from LLM response: {response!r}"
             )
-        ops = self._normalize_ops(ops)
+        ops = self._normalize_ops(ops, memory)
         ops = [
             op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
         ]
@@ -95,7 +95,7 @@ class MemoryCompactor:
         memory._counters = candidate._counters
         return applied, []
 
-    def _normalize_ops(self, ops: list[dict]) -> list[dict]:
+    def _normalize_ops(self, ops: list[dict], memory: Memory) -> list[dict]:
         normalized: list[dict] = []
         for op in ops:
             if isinstance(op, str) and op.strip().upper() == "NOOP":
@@ -105,13 +105,66 @@ class MemoryCompactor:
                 normalized.append(op)
                 continue
             item = dict(op)
+            kind = str(item.get("op", "")).upper()
+            item["op"] = kind
+            source_ids = next(
+                (
+                    item.pop(key)
+                    for key in (
+                        "source_provenance_ids",
+                        "sourceProvenanceIds",
+                        "source_provenance",
+                        "provenance_ids",
+                        "canonicalAddProvenanceIds",
+                    )
+                    if key in item
+                ),
+                None,
+            )
+            if source_ids is None and isinstance(item.get("provenance"), list) and all(
+                isinstance(value, str) for value in item["provenance"]
+            ):
+                source_ids = item.pop("provenance")
+            if kind == "SUPERSEDE" and isinstance(source_ids, list):
+                for entry_id in source_ids:
+                    normalized.append({
+                        "op": "SUPERSEDE",
+                        "id": entry_id,
+                        "reason": item.get("reason", "Consolidated by subject."),
+                    })
+                continue
             if item.get("op") == "ADD":
-                section = item.get("section")
+                item.pop("id", None)
+                section = item.get("section", item.pop("key", None))
                 if isinstance(section, str):
                     item["section"] = self._section_key_by_prefix.get(
                         section.lower(),
                         section,
                     )
+                value = item.pop("value", None)
+                if "text" not in item and isinstance(value, str):
+                    item["text"] = value
+                elif "text" not in item and isinstance(value, dict):
+                    item["text"] = next(
+                        (
+                            value[key]
+                            for key in ("details", "description", "currentTruth", "content")
+                            if isinstance(value.get(key), str)
+                        ),
+                        "",
+                    )
+                if "text" not in item and isinstance(item.get("currentTruth"), str):
+                    item["text"] = item.pop("currentTruth")
+                if "provenance" not in item and isinstance(source_ids, list):
+                    item["provenance"] = sorted({
+                        turn_id
+                        for entry_id in source_ids
+                        for turn_id in (
+                            memory.entries[entry_id].provenance
+                            if entry_id in memory.entries
+                            else []
+                        )
+                    })
             normalized.append(item)
         return normalized
 

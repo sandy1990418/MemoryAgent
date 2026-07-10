@@ -3,14 +3,33 @@
 from __future__ import annotations
 
 import json
+import re
 
-from memory_agent.models.policy import MemoryPolicy
+from memory_agent.models.policy import MemoryPolicy, is_chat_policy
 from memory_agent.models.sections import SectionConfig
 from memory_agent.models.transcript import Turn
 
 
+_CODE_BLOCK_RE = re.compile(r"```[^\n]*\n.*?```", re.DOTALL)
+_MAX_UPDATER_TURN_CHARS = 12000
+
+
+def _compact_turn_content(content: str) -> str:
+    """Remove re-derivable code payloads and bound pathological chat turns."""
+    compact = _CODE_BLOCK_RE.sub("[code block omitted from memory extraction]", content)
+    if len(compact) <= _MAX_UPDATER_TURN_CHARS:
+        return compact
+    head = _MAX_UPDATER_TURN_CHARS * 2 // 3
+    tail = _MAX_UPDATER_TURN_CHARS - head
+    return (
+        compact[:head]
+        + "\n[long turn middle omitted from LLM extraction]\n"
+        + compact[-tail:]
+    )
+
+
 def _profile_rules(policy: MemoryPolicy) -> str:
-    if policy.name == "practical":
+    if is_chat_policy(policy):
         return (
             "   - PRACTICAL PROFILE: default to NOOP for ordinary Q&A, "
             "explanations, tutorials, examples, translations, and one-off questions.\n"
@@ -38,7 +57,7 @@ def _profile_rules(policy: MemoryPolicy) -> str:
 
 
 def _value_rules(policy: MemoryPolicy) -> str:
-    if policy.name == "practical":
+    if is_chat_policy(policy):
         return ""
     return (
         "   - Preserve important dates, versions, counts, durations, percentages, "
@@ -49,7 +68,7 @@ def _value_rules(policy: MemoryPolicy) -> str:
 
 
 def _batch_rules(policy: MemoryPolicy) -> str:
-    if policy.name == "practical":
+    if is_chat_policy(policy):
         return (
             "   - Be selective. Most ordinary batches should be NOOP. When one "
             "eviction batch contains several distinct durable user states, return "
@@ -66,7 +85,7 @@ def _batch_rules(policy: MemoryPolicy) -> str:
 
 
 def _assistant_rules(policy: MemoryPolicy) -> str:
-    if policy.name == "practical":
+    if is_chat_policy(policy):
         return (
             "   - Do not save generic assistant advice, tutorials, examples, "
             "translations, recommendations, or proposed plans. Save an implementation "
@@ -85,7 +104,7 @@ def _assistant_rules(policy: MemoryPolicy) -> str:
 def _phrasing_rules(policy: MemoryPolicy) -> str:
     suffix = (
         '"User implemented", "User observed", "User chose", or "User is using".'
-        if policy.name == "practical"
+        if is_chat_policy(policy)
         else (
             '"User implemented", "User observed", "User chose", "User is using", '
             'or "User asked about".'
@@ -98,7 +117,7 @@ def _phrasing_rules(policy: MemoryPolicy) -> str:
 
 
 def _detail_rules(policy: MemoryPolicy) -> str:
-    if policy.name == "practical":
+    if is_chat_policy(policy):
         return (
             "   - Use status_changes only for explicit durable corrections or "
             "reversals. Keep one latest active truth per semantic subject.\n"
@@ -137,7 +156,14 @@ def build_updater_prompt(
         for section in sections
     )
     turns_block = json.dumps(
-        [{"turn_id": turn.id, "role": turn.role, "content": turn.content} for turn in turns],
+        [
+            {
+                "turn_id": turn.id,
+                "role": turn.role,
+                "content": _compact_turn_content(turn.content),
+            }
+            for turn in turns
+        ],
         ensure_ascii=False,
         indent=2,
     )

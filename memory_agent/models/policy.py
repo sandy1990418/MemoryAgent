@@ -26,6 +26,15 @@ PRACTICAL_POLICY = MemoryPolicy(
     default_noop=True,
 )
 
+CHAT_POLICY = MemoryPolicy(
+    name="chat",
+    section_preset="chat",
+    allow_exact_values=False,
+    allow_deterministic_subject_values=True,
+    max_ops_per_batch=3,
+    default_noop=True,
+)
+
 AGENT_POLICY = MemoryPolicy(
     name="agent",
     section_preset="agent",
@@ -45,15 +54,21 @@ EVAL_POLICY = MemoryPolicy(
 )
 
 MEMORY_POLICIES: dict[str, MemoryPolicy] = {
+    "chat": CHAT_POLICY,
     "practical": PRACTICAL_POLICY,
     "agent": AGENT_POLICY,
     "eval": EVAL_POLICY,
 }
 
 
+def is_chat_policy(policy: MemoryPolicy) -> bool:
+    """Whether a structured policy uses chat retention semantics."""
+    return policy.name in {"chat", "practical"}
+
+
 def get_memory_policy(name: str | None) -> MemoryPolicy:
     """Return a named memory policy; ``None`` selects the product default."""
-    normalized = (name or "practical").strip().lower()
+    normalized = (name or "chat").strip().lower()
     try:
         return MEMORY_POLICIES[normalized]
     except KeyError as exc:
@@ -65,6 +80,7 @@ def get_memory_policy(name: str | None) -> MemoryPolicy:
 # section list is how "policy is on but the output looks unfiltered" bugs
 # happen, so components validate at construction instead of silently running.
 _DISALLOWED_SECTION_KEYS: dict[str, frozenset[str]] = {
+    "chat": frozenset({"exact_values", "timeline", "tool_facts", "progress"}),
     "practical": frozenset({"exact_values", "timeline", "tool_facts", "progress"}),
     "agent": frozenset({"exact_values"}),
     "eval": frozenset(),

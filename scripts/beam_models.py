@@ -71,6 +71,7 @@ class BeamConfig:
     structured_evict_fraction: float = 0.5
     structured_keep_messages: int = 2
     recursion_limit: int = 50
+    fixed_token_budgets: tuple[int, ...] = (256, 512, 1024)
 
     @classmethod
     def from_yaml_env(cls, path: str | Path = "configs/beam.yaml") -> "BeamConfig":
@@ -106,6 +107,12 @@ class BeamConfig:
         )
         if not 0 < evict_fraction <= 1:
             raise ValueError("structured_evict_fraction must be in (0, 1]")
+        budgets = config_value(data, "fixed_token_budgets", "BEAM_FIXED_TOKEN_BUDGETS", list(cls.fixed_token_budgets))
+        if isinstance(budgets, str):
+            budgets = [item.strip() for item in budgets.split(",") if item.strip()]
+        resolved_budgets = tuple(int(item) for item in budgets)
+        if not resolved_budgets or any(item <= 0 for item in resolved_budgets) or len(set(resolved_budgets)) != len(resolved_budgets):
+            raise ValueError("fixed_token_budgets must contain unique positive integers")
 
         def _int_value(key: str, env: str, default: int, minimum: int) -> int:
             value = int(config_value(data, key, env, default))
@@ -164,6 +171,7 @@ class BeamConfig:
             recursion_limit=_int_value(
                 "recursion_limit", "BEAM_RECURSION_LIMIT", cls.recursion_limit, 1
             ),
+            fixed_token_budgets=resolved_budgets,
         )
 
     def to_run_defaults(self) -> dict[str, Any]:
@@ -186,6 +194,7 @@ class BeamConfig:
             "structured_evict_fraction": self.structured_evict_fraction,
             "structured_keep_messages": self.structured_keep_messages,
             "recursion_limit": self.recursion_limit,
+            "fixed_token_budgets": list(self.fixed_token_budgets),
         }
 
 
@@ -229,7 +238,7 @@ class BeamRunConfig:
     env_file: Path = Path(".env")
     user_id: str = "beam-100k-case-1"
     memory_mode: str = "structured_only"
-    memory_profile: str = os.getenv("MEMORY_PROFILE", "practical")
+    memory_profile: str = os.getenv("MEMORY_PROFILE", "chat")
     top_k: int = 8
     max_hit_chars: int = 6000
     max_active_context_chars: int = 12000

@@ -200,7 +200,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--memory-profile",
-        choices=("practical", "agent", "eval", "beam"),
+        choices=("chat", "practical", "agent", "eval", "beam"),
         default=product_config.memory_profile,
     )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))

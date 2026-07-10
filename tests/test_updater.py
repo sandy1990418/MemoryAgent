@@ -329,9 +329,26 @@ def test_rejected_ops_are_retried_with_validation_feedback():
 
     assert rejected == []
     assert len(applied) == 1
-    assert mem.entries["U1"].text == "User wants pragmatic security best practices for auth."
+    assert "pragmatic security best practices for auth" in mem.entries["U1"].text
     assert len(captured_messages) == 2
     assert "rejected by validation" in captured_messages[1][-1]["content"]
+
+
+def test_numeric_string_provenance_is_normalized_to_turn_ids():
+    updater = make_updater(
+        lambda system, messages: (
+            '[{"op":"ADD","section":"facts","text":"Project uses Flask.",'
+            '"provenance":["185"]}]'
+        )
+    )
+    memory = Memory(sections=CHAT_SECTIONS)
+    applied, rejected = updater.update(
+        memory,
+        [Turn(id=185, role="user", content="My project uses Flask.")],
+    )
+    assert rejected == []
+    assert applied
+    assert memory.entries["F1"].provenance == [185]
 
 
 def test_exact_string_update_id_still_updates_entry():

@@ -9,7 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from memory_agent.clients.llm import OpenAIClient, TokenLedger
 from memory_agent.models.config import StructuredAgentConfig
-from memory_agent.models.policy import get_memory_policy
+from memory_agent.models.policy import get_memory_policy, is_chat_policy
 from memory_agent.models.runtime import StructuredAgentRuntime
 from memory_agent.models.sections import sections_for_preset
 from memory_agent.structured.compactor import MemoryCompactor
@@ -48,7 +48,7 @@ def build_structured_middleware(
             sections=sections,
             policy=policy,
         )
-        if policy.name == "practical"
+        if is_chat_policy(policy)
         else None
     )
     middleware = StructuredMemoryMiddleware(

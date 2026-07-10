@@ -42,6 +42,21 @@ def test_eval_prompt_preserves_detailed_evaluation_rules():
     assert "For information extraction, keep granular subject-bound facts" in system
 
 
+def test_updater_prompt_omits_code_payload_and_bounds_pathological_turns():
+    policy = get_memory_policy("chat")
+    updater = MemoryUpdater(llm=_llm(), sections=PRACTICAL_SECTIONS, policy=policy)
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    content = "User completed login.\n```python\n" + ("print('noise')\n" * 3000) + "```\nFinal constraint."
+    system, _messages = updater._build_prompt(
+        memory,
+        [Turn(id=1, role="user", content=content)],
+    )
+    assert "[code block omitted from memory extraction]" in system
+    assert "print('noise')" not in system
+    assert "User completed login" in system
+    assert "Final constraint" in system
+
+
 def test_compactor_prompt_preserves_history_and_canonical_entry_rules():
     policy = get_memory_policy("practical")
     memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)

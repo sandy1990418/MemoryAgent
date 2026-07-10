@@ -21,6 +21,10 @@ References:
 
 ```text
 memory_agent/
+  domain/      Generic MemoryEvent, MemoryEntry, MemoryScope, and token budget.
+  application/ Public event-ingest, retrieval, and context-construction boundary.
+  profiles/    Workload-specific adapters and policies (chat now, agent extension).
+  evaluation/  Generic evaluator protocols; never dataset schemas.
   chat.py        Standalone practical-memory facade for chat products.
   structured/    Operation-based memory domain and runtime.
   longterm/      Long-term vector recall integration.
@@ -35,6 +39,11 @@ scripts/         BEAM evaluation only. Nothing in memory_agent/ imports it.
   run_beam_case*.py, run_beam_cases.py  BEAM runners.
   beam_tests/    Tests for the BEAM runners and BEAM config.
 ```
+
+Dataset-specific adapters live in `evaluation/beam/`. The supported direction
+is `BEAM JSON -> BeamChatCaseAdapter -> MemoryEvent -> common application/core`.
+Neither the common domain nor profile contracts depend on BEAM, LangGraph,
+DeepAgent, Claude Code, Codex, mem0, or fixed user/assistant JSON.
 
 The key distinction:
 

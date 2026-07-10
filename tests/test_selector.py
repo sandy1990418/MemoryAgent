@@ -66,6 +66,19 @@ def test_selector_excludes_superseded_entries():
     assert "D1" not in [entry.id for entry in selected]
 
 
+def test_selector_can_include_superseded_entries_for_conflict_history():
+    memory = make_memory()
+    memory.apply_ops([{"op": "SUPERSEDE", "id": "D1", "reason": "conflict"}])
+    selector = MemorySelector(token_estimator=count_entries)
+    selected = selector.select(
+        memory=memory,
+        query="storage cache",
+        max_tokens=10,
+        include_superseded=True,
+    )
+    assert "D1" in [entry.id for entry in selected]
+
+
 def test_render_can_render_only_selected_entries():
     memory = make_memory()
     selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())

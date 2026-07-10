@@ -1,29 +1,22 @@
 import json
-from pathlib import Path
 
 import pytest
 
 from memory_agent.agents.structured import build_structured_middleware
 from memory_agent.models.config import StructuredAgentConfig
-from memory_agent.models.policy import get_memory_policy
+from memory_agent.models.policy import get_memory_policy, is_chat_policy
 from memory_agent.models.sections import EVAL_SECTIONS, PRACTICAL_SECTIONS
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.updater import MemoryUpdater
 from memory_agent.structured.verifier import MemoryUpdateVerifier
 from tests.fakes import ScriptedLLM
-
-
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "practical_memory_cases.json"
-
-
-def _cases() -> list[dict]:
-    return json.loads(FIXTURE_PATH.read_text())
+from tests.practical_cases import PRACTICAL_RETENTION_CASES
 
 
 @pytest.mark.parametrize(
     "case",
-    [case for case in _cases() if "turns" in case],
+    PRACTICAL_RETENTION_CASES,
     ids=lambda case: case["id"],
 )
 def test_practical_synthetic_retention(case):
@@ -140,6 +133,68 @@ def test_practical_profile_filters_disallowed_sections_and_caps_batch():
         "decisions",
         "facts",
     }
+
+
+def test_chat_profile_deterministically_keeps_stable_instruction_under_batch_cap():
+    policy = get_memory_policy("chat")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: json.dumps([
+            {"op": "ADD", "section": "facts", "text": f"Fact {index}", "provenance": [1]}
+            for index in range(5)
+        ])),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    updater.update(memory, [Turn(id=1, role="user", content="Always include version numbers when I ask about libraries.")])
+    assert any(
+        entry.section == "preferences" and "version numbers" in entry.text
+        for entry in memory.entries.values()
+    )
+
+
+def test_chat_profile_does_not_treat_descriptive_always_as_instruction():
+    policy = get_memory_policy("chat")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op":"NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    updater.update(memory, [Turn(id=1, role="user", content="How do I ensure this query always returns a list?")])
+    assert not any(entry.section == "preferences" for entry in memory.entries.values())
+
+
+def test_chat_profile_keeps_updated_metric_as_fact_not_status_fragment():
+    policy = get_memory_policy("chat")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op":"NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    updater.update(memory, [Turn(id=1, role="user", content="The main branch has now reached 165 commits.")])
+    assert any(entry.section == "facts" and "165 commits" in entry.text for entry in memory.entries.values())
+    assert not any(entry.section == "status_changes" for entry in memory.entries.values())
+
+
+def test_chat_profile_deterministically_keeps_implementation_state():
+    policy = get_memory_policy("chat")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: '[{"op":"NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    updater.update(memory, [Turn(
+        id=1,
+        role="user",
+        content="I'm trying to implement the homepage route, and I've managed to return static HTML.",
+    )])
+    assert any(
+        entry.section == "facts" and "homepage route" in entry.text and "static HTML" in entry.text
+        for entry in memory.entries.values()
+    )
 
 
 def test_eval_profile_keeps_beam_style_details():
@@ -293,10 +348,12 @@ def test_unknown_memory_profile_is_rejected(monkeypatch):
         StructuredAgentConfig.from_env()
 
 
-def test_structured_builder_wires_practical_policy_to_components():
+def test_structured_builder_wires_chat_policy_to_components():
     middleware = build_structured_middleware(StructuredAgentConfig())
 
-    assert middleware.policy.name == "practical"
+    assert middleware.policy.name == "chat"
+    assert is_chat_policy(middleware.policy)
+    assert middleware.compactor is not None
     assert middleware.memory.policy is middleware.policy
     assert middleware.updater.policy is middleware.policy
     assert middleware.memory_selector.policy is middleware.policy

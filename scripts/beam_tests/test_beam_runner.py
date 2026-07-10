@@ -259,7 +259,9 @@ def test_answer_question_prompt_requires_supported_concise_answers():
     assert llm.calls[0]["system"] == "You are an assistant."
     user_prompt = llm.calls[0]["messages"][0]["content"]
     assert "MUST answer questions using ONLY the information provided" in user_prompt
-    assert "Do NOT use your internal knowledge" in user_prompt
+    assert "Do NOT invent user history or project facts" in user_prompt
+    assert "Follow durable user instructions" in user_prompt
+    assert "do not output unversioned dependencies" in user_prompt
     assert "ANSWER REQUIREMENTS" in user_prompt
     assert "use the latest active memory entry" in user_prompt
     assert "identify the relevant dated events" in user_prompt
@@ -309,6 +311,52 @@ def test_build_answer_context_includes_chronological_order_block():
     assert chronological_block.index("[F1] first topic was Flask routing") < chronological_block.index(
         "[D1] second topic was deployment"
     )
+
+
+def test_contradiction_context_includes_superseded_history():
+    memory = Memory(sections=CHAT_SECTIONS)
+    memory.apply_ops([
+        {"op": "ADD", "section": "facts", "text": "User implemented a Flask homepage route.", "provenance": [1]},
+        {"op": "SUPERSEDE", "id": "F1", "reason": "Later denial conflicts."},
+        {"op": "ADD", "section": "facts", "text": "User later said they never wrote Flask routes.", "provenance": [2]},
+    ])
+    middleware = SimpleNamespace(memory=memory, memory_selector=MemorySelector())
+    context = build_answer_context(
+        structured_middleware=middleware,
+        active_messages=[],
+        hits=[],
+        max_hit_chars=500,
+        max_active_context_chars=500,
+        structured_answer_tokens=500,
+        query="Have I worked with Flask routes?",
+        question_type="contradiction_resolution",
+    )
+    assert "implemented a Flask homepage route" in context
+    assert "never wrote Flask routes" in context
+
+
+def test_summarization_context_uses_broader_chronology_than_topical_selection():
+    memory = Memory(sections=CHAT_SECTIONS)
+    memory.apply_ops([
+        {"op": "ADD", "section": "facts", "text": "Database work used SQLite indexes.", "provenance": [1]},
+        {"op": "ADD", "section": "facts", "text": "Documentation was organized in Confluence tables.", "provenance": [2]},
+    ])
+    middleware = SimpleNamespace(
+        memory=memory,
+        memory_selector=MemorySelector(pinned_sections=frozenset()),
+    )
+    context = build_answer_context(
+        structured_middleware=middleware,
+        active_messages=[],
+        hits=[],
+        max_hit_chars=500,
+        max_active_context_chars=500,
+        structured_answer_tokens=100,
+        query="Summarize database work",
+        question_type="summarization",
+    )
+    assert "SQLite indexes" in context
+    assert "Confluence tables" in context
 
 
 def test_beam_cli_reads_yaml_defaults(tmp_path, monkeypatch):
@@ -406,4 +454,4 @@ def test_beam_config_snapshot_is_json_serializable():
 
     assert isinstance(snapshot["chat"], str)
     assert isinstance(snapshot["question_types"], list)
-    assert snapshot["memory_profile"] == "practical"
+    assert snapshot["memory_profile"] == "chat"

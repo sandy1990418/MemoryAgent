@@ -73,3 +73,21 @@ def test_normalize_beam_profile_maps_cli_alias_onto_eval():
     assert normalize_beam_profile("practical") == "practical"
     assert normalize_beam_profile("agent") == "agent"
     assert normalize_beam_profile("eval") == "eval"
+
+
+def test_fixed_token_budgets_support_yaml_and_env(tmp_path, monkeypatch):
+    path = tmp_path / "beam.yaml"
+    path.write_text("fixed_token_budgets: [128, 256]\n")
+    monkeypatch.setenv("BEAM_FIXED_TOKEN_BUDGETS", "64,128")
+    config = BeamConfig.from_yaml_env(path)
+    assert config.fixed_token_budgets == (64, 128)
+    assert config.to_run_defaults()["fixed_token_budgets"] == [64, 128]
+
+
+@pytest.mark.parametrize("value", ("0,128", "128,128", ""))
+def test_fixed_token_budgets_reject_invalid_values(tmp_path, monkeypatch, value):
+    path = tmp_path / "beam.yaml"
+    path.write_text(f"fixed_token_budgets: [{value}]\n")
+    monkeypatch.delenv("BEAM_FIXED_TOKEN_BUDGETS", raising=False)
+    with pytest.raises(ValueError, match="unique positive"):
+        BeamConfig.from_yaml_env(path)

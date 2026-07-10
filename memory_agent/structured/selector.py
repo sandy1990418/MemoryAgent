@@ -101,8 +101,14 @@ class MemorySelector:
         memory: Memory,
         query: str = "",
         max_tokens: int | None = None,
+        include_superseded: bool = False,
     ) -> list[MemoryEntry]:
-        selected = self.select_with_scores(memory=memory, query=query, max_tokens=max_tokens)
+        selected = self.select_with_scores(
+            memory=memory,
+            query=query,
+            max_tokens=max_tokens,
+            include_superseded=include_superseded,
+        )
         return [item.entry for item in selected]
 
     def select_with_scores(
@@ -110,12 +116,13 @@ class MemorySelector:
         memory: Memory,
         query: str = "",
         max_tokens: int | None = None,
+        include_superseded: bool = False,
     ) -> list[SelectedMemory]:
         query_tokens = _tokens(query)
         candidates = [
             self._score(entry, query_tokens)
             for entry in memory.entries.values()
-            if entry.status == "active"
+            if entry.status == "active" or include_superseded
         ]
         candidates.sort(
             key=lambda item: (

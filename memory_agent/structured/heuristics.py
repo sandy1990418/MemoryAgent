@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from memory_agent.models.policy import MemoryPolicy
+from memory_agent.models.policy import MemoryPolicy, is_chat_policy
 
 MONTH_NAMES = (
     "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
@@ -126,7 +126,7 @@ def status_change_cue_re(policy: MemoryPolicy | None) -> re.Pattern[str]:
     """Policy-aware cue regex. The extractor and MemoryUpdateVerifier MUST both
     resolve cues through this helper: if the verifier recognized cues the
     extractor does not, those turns would fail verification on every retry."""
-    if policy is not None and policy.name == "practical":
+    if policy is not None and is_chat_policy(policy):
         return PRACTICAL_STATUS_CHANGE_CUE_RE
     return STATUS_CHANGE_CUE_RE
 
@@ -156,20 +156,32 @@ ASSISTANT_ATTRIBUTED_RE = re.compile(
 )
 DURABLE_USER_STATE_RE = re.compile(
     r"\b(?:"
-    r"i (?:prefer|need|want|chose|decided|implemented|fixed|observed|got|hit|saw|am using|"
+    r"i(?:'m| am) (?:working on|having trouble with|trying to (?:implement|integrate))|"
+    r"i (?:prefer|need|want|chose|decided|implemented|fixed|observed|got|hit|saw|am using|am working on|am having trouble with|am trying to (?:implement|integrate)|"
     r"switched|changed my mind|will use|do not want|don't want|cannot|can't)|"
     r"we (?:chose|decided|implemented|fixed|are using|will use|switched)|"
     r"always |from now on|going forward|for (?:this|the|our|my) project|"
     r"please (?:keep|use|avoid)|(?:do not|don't|never) (?:use|include|add)|"
     r"(?:answers?|responses?) should |"
     r"(?:the |our |my )?(?:project|app|application|build|deployment|tests?|"
-    r"implementation|integration|pipeline|service|api) "
+    r"implementation|integration|pipeline|service|api|repository|branch) "
     r"(?:is|are|uses|has|failed|fails|passed|passes|returns|blocks?|needs?)|"
     r"(?:error|exception|failure|blocker) (?:is|was|occurs?|says?)|"
     r"(?:failed|tried|attempted) (?:to|using)|blocked (?:by|on)|"
     r"use .{1,80} (?:instead of|rather than)|"
     r"(?:correction|not anymore|no longer|changed my mind)"
     r")\b",
+    re.IGNORECASE,
+)
+STABLE_INSTRUCTION_RE = re.compile(
+    r"(?:^|[.!?]\s+)(?:always\s+(?:format|include|provide|use|avoid|keep)|"
+    r"from now on|going forward|please (?:keep|use|avoid)|"
+    r"(?:answers?|responses?|code snippets?) should)\b",
+    re.IGNORECASE,
+)
+PROJECT_IMPLEMENTATION_STATE_RE = re.compile(
+    r"\b(?:i(?:'ve| have) (?:already )?(?:implemented|integrated|completed|managed to)|"
+    r"we(?:'ve| have) (?:implemented|integrated|completed))\b",
     re.IGNORECASE,
 )
 ORDINARY_QUESTION_RE = re.compile(

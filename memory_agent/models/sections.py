@@ -158,6 +158,7 @@ EVAL_SECTIONS: list[SectionConfig] = [
 def sections_for_preset(name: str) -> list[SectionConfig]:
     """Return a fresh section list for a policy section preset."""
     presets = {
+        "chat": PRACTICAL_SECTIONS,
         "practical": PRACTICAL_SECTIONS,
         "agent": AGENT_SECTIONS,
         "eval": EVAL_SECTIONS,

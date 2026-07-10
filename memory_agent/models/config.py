@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MEM0_BACKENDS = frozenset({"local", "platform", "disabled"})
-MEMORY_PROFILES = frozenset({"practical", "agent", "eval"})
-MEMORY_SECTION_PRESETS = frozenset({"practical", "agent", "eval"})
+MEMORY_PROFILES = frozenset({"chat", "practical", "agent", "eval"})
+MEMORY_SECTION_PRESETS = frozenset({"chat", "practical", "agent", "eval"})
 DEFAULT_PRODUCT_CONFIG_PATH = Path(
     os.getenv("PRODUCT_MEMORY_CONFIG", "configs/product.yaml")
 )
@@ -109,8 +109,8 @@ def config_value(data: dict[str, object], key: str, env: str, default):
 
 @dataclass(frozen=True)
 class ProductMemoryConfig:
-    memory_profile: str = "practical"
-    sections: str = "practical"
+    memory_profile: str = "chat"
+    sections: str = "chat"
     compaction_threshold: int = 30
     memory_model: str = "openai:gpt-5.4-nano"
 
@@ -163,7 +163,7 @@ class StructuredAgentConfig:
     max_tokens: int = 600
     max_memory_tokens: int = 600
     keep_messages: int = 4
-    memory_profile: str = "practical"
+    memory_profile: str = "chat"
     memory_sections: str | None = None
     compact_min_active_entries: int = 30
 
@@ -217,7 +217,7 @@ class HybridAgentConfig:
     mem0_data_dir: str | None = ".mem0"
     mem0_llm_model: str | None = "gpt-5.4-nano"
     mem0_api_key: str | None = None
-    memory_profile: str = "practical"
+    memory_profile: str = "chat"
 
     @classmethod
     def from_env(cls) -> "HybridAgentConfig":

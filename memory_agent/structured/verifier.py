@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from memory_agent.models.policy import MemoryPolicy
+from memory_agent.models.policy import MemoryPolicy, is_chat_policy
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.heuristics import status_change_cue_re
@@ -65,7 +65,7 @@ class MemoryUpdateVerifier:
                 continue
             if (
                 policy is not None
-                and policy.name == "practical"
+                and is_chat_policy(policy)
                 and MemoryUpdater._is_ordinary_non_durable_batch([turn], cue_re=cue_re)
             ):
                 continue

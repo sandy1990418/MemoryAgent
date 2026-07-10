@@ -9,7 +9,12 @@ from collections import Counter
 from typing import Callable
 
 from memory_agent.clients.llm import LLMClient
-from memory_agent.models.policy import AGENT_POLICY, MemoryPolicy, validate_policy_sections
+from memory_agent.models.policy import (
+    AGENT_POLICY,
+    MemoryPolicy,
+    is_chat_policy,
+    validate_policy_sections,
+)
 from memory_agent.models.sections import SectionConfig
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
@@ -22,8 +27,10 @@ from memory_agent.structured.heuristics import (
     GENERIC_NON_DURABLE_MEMORY_RE,
     ORDINARY_QUESTION_RE,
     PROGRESS_VALUE_RE,
+    PROJECT_IMPLEMENTATION_STATE_RE,
     STATUS_CHANGE_CUE_RE,
     STATUS_VALUE_RE,
+    STABLE_INSTRUCTION_RE,
     SUBJECT_VALUE_PATTERNS,
     SUBJECT_VALUE_SECTION_RE,
     WHITESPACE_RE,
@@ -259,12 +266,75 @@ class MemoryUpdater:
 
     def _deterministic_ops(self, memory: Memory, evicted_turns: list[Turn]) -> list[dict]:
         ops: list[dict] = []
+        ops.extend(self._deterministic_preference_ops(memory, evicted_turns))
+        ops.extend(self._deterministic_project_state_ops(memory, evicted_turns))
         if self.policy.allow_exact_values:
             ops.extend(self._deterministic_exact_value_ops(memory, evicted_turns))
         if self.policy.allow_deterministic_subject_values:
             ops.extend(self._deterministic_subject_value_ops(memory, evicted_turns))
         ops.extend(self._deterministic_status_change_ops(memory, evicted_turns))
         return ops
+
+    def _deterministic_project_state_ops(
+        self,
+        memory: Memory,
+        evicted_turns: list[Turn],
+    ) -> list[dict]:
+        """Retain explicit ongoing/completed implementation state as facts."""
+        if not self._has_section("facts"):
+            return []
+        seen = self._active_text_keys(memory, "facts")
+        generated: list[dict] = []
+        for turn in evicted_turns:
+            if turn.role != "user":
+                continue
+            prose = self._strip_code_fences(turn.content).split("->->", 1)[0]
+            for sentence in re.split(r"(?<=[.!?])\s+|\n", prose):
+                sentence = WHITESPACE_RE.sub(" ", sentence).strip()
+                if not sentence or not PROJECT_IMPLEMENTATION_STATE_RE.search(sentence):
+                    continue
+                text = f"User project state: {sentence[:320].rstrip()}"
+                if self._has_seen_text(text, seen):
+                    continue
+                seen.add(self._text_key(text))
+                generated.append({
+                    "op": "ADD",
+                    "section": "facts",
+                    "text": text,
+                    "provenance": [turn.id],
+                })
+                if len(generated) >= 2:
+                    return generated
+        return generated
+
+    def _deterministic_preference_ops(
+        self,
+        memory: Memory,
+        evicted_turns: list[Turn],
+    ) -> list[dict]:
+        """Guarantee stable user instructions survive noisy multi-fact batches."""
+        if not self._has_section("preferences"):
+            return []
+        seen = self._active_text_keys(memory, "preferences")
+        generated: list[dict] = []
+        for turn in evicted_turns:
+            if turn.role != "user" or not STABLE_INSTRUCTION_RE.search(turn.content):
+                continue
+            prose = self._strip_code_fences(turn.content).split("->->", 1)[0].strip()
+            sentence = re.split(r"(?<=[.!?])\s+|\n", prose, maxsplit=1)[0].strip()
+            if not sentence:
+                continue
+            text = f"User instruction: {sentence[:240].rstrip()}"
+            if self._has_seen_text(text, seen):
+                continue
+            seen.add(self._text_key(text))
+            generated.append({
+                "op": "ADD",
+                "section": "preferences",
+                "text": text,
+                "provenance": [turn.id],
+            })
+        return generated
 
     def _apply_policy_filter(
         self,
@@ -275,7 +345,7 @@ class MemoryUpdater:
         apply_cap: bool = True,
     ) -> list[dict]:
         """Apply deterministic retention constraints after LLM extraction."""
-        if self.policy.name != "practical":
+        if not is_chat_policy(self.policy):
             return ops
 
         allowed_sections = {section.key for section in self.sections}
@@ -485,7 +555,7 @@ class MemoryUpdater:
             if turn.role != "user":
                 continue
             snippet = self._extract_status_change_snippet(turn.content, cue_re=cue_re)
-            if snippet is None and self.policy.name == "practical":
+            if snippet is None and is_chat_policy(self.policy):
                 snippet = self._extract_status_change_snippet(
                     turn.content,
                     cue_re=EXPLICIT_PROJECT_DENIAL_RE,
@@ -509,7 +579,9 @@ class MemoryUpdater:
         return generated
 
     def _drop_duplicate_deterministic_adds(self, ops: list[dict], memory: Memory) -> list[dict]:
-        relevant_sections = {"exact_values", "facts", "progress", "status_changes", "timeline"}
+        relevant_sections = {
+            "exact_values", "facts", "preferences", "progress", "status_changes", "timeline"
+        }
         active_keys_by_section: dict[str, set[str]] = {}
         filtered: list[dict] = []
 
@@ -531,6 +603,15 @@ class MemoryUpdater:
                 active_keys_by_section[section] = self._active_text_keys(memory, section)
             if self._has_seen_text(text, active_keys_by_section[section]):
                 continue
+            if section == "preferences":
+                provenance = set(op.get("provenance") or [])
+                if provenance and any(
+                    entry.section == "preferences"
+                    and entry.status == "active"
+                    and provenance.intersection(entry.provenance)
+                    for entry in memory.entries.values()
+                ):
+                    continue
             filtered.append(op)
 
         return filtered
@@ -635,7 +716,11 @@ class MemoryUpdater:
     def _subject_value_section(self, snippet: str, kind: str) -> str | None:
         if kind == "date" and self._has_section("timeline"):
             return "timeline"
-        if STATUS_VALUE_RE.search(snippet) and self._has_section("status_changes"):
+        if (
+            not is_chat_policy(self.policy)
+            and STATUS_VALUE_RE.search(snippet)
+            and self._has_section("status_changes")
+        ):
             return "status_changes"
         if PROGRESS_VALUE_RE.search(snippet) and self._has_section("progress"):
             return "progress"
@@ -728,6 +813,12 @@ class MemoryUpdater:
 
     @staticmethod
     def _normalize_text_provenance(op: dict) -> None:
+        provenance = op.get("provenance")
+        if isinstance(provenance, list):
+            op["provenance"] = [
+                int(value) if isinstance(value, str) and value.isdigit() else value
+                for value in provenance
+            ]
         text = op.get("text")
         if not isinstance(text, str):
             return

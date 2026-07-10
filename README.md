@@ -1,8 +1,14 @@
 # MemoryAgent
 
-MemoryAgent is a small memory architecture playground for LangChain agents.
-The package is organized by responsibility, not by "whatever file was created
-first":
+MemoryAgent is a general-purpose, token-efficient memory system for both
+conversational and agentic workloads. The current development phase focuses on
+chat memory, using selected BEAM capabilities to evaluate memory correctness,
+update behavior, retrieval quality, and performance under constrained token
+budgets. The common domain remains extensible to task state, execution history,
+tool observations, decisions, failures, artifacts, and reusable experience.
+
+BEAM results validate the current **chat profile only**; they do not establish
+complete agent-memory capability.
 
 1. `structured/`: this repo's operation-based structured memory system.
 2. `longterm/`: long-term recall integration for mem0-style vector memory.
@@ -17,6 +23,12 @@ For the detailed component graph and data flow, see
 ```text
 memory_agent/
   __init__.py              public package exports
+
+  domain/                  framework-neutral events, entries, scopes, budgets
+  application/             generic ingest/retrieve/context service boundary
+  profiles/chat/           chat adapter and retention policy
+  profiles/agent/          agent trace adapter and policy extension point
+  evaluation/              framework-neutral evaluator interfaces
 
   structured/              operation-based memory domain/runtime
     memory.py              Memory store and ADD/UPDATE/SUPERSEDE/NOOP ops
@@ -169,14 +181,21 @@ THREAD_ID="react-summary-demo"
 STRUCTURED_MAX_TOKENS="600"
 STRUCTURED_MAX_MEMORY_TOKENS="600"
 STRUCTURED_KEEP_MESSAGES="4"
-MEMORY_PROFILE="practical"
-MEMORY_SECTIONS="practical"
+MEMORY_PROFILE="chat"
+MEMORY_SECTIONS="chat"
 MEMORY_COMPACTION_THRESHOLD="30"
 ```
 
-`MEMORY_PROFILE` separates sparse product retention from detailed evaluation:
-`practical` defaults ordinary Q&A to NOOP, `agent` retains richer execution
-state, and `eval` (or `beam`) enables detail-heavy BEAM extraction.
+`MEMORY_PROFILE` separates workloads: `chat` is the product default and keeps
+durable conversational context while dropping ordinary Q&A; `practical` is a
+compatibility alias for the earlier chat behavior; `agent` is an extension
+profile for execution state; and `eval` (or runner-only `beam`) is a broad
+legacy evaluation profile.
+
+Fixed-budget comparisons are implemented in
+`evaluation.beam.compare_fixed_budget_runs`. They require identical cases,
+questions, variants, and context budgets, separate production tokens from judge
+tokens, flag context-budget violations, and label results as chat-only evidence.
 
 `LLMClient` and `OpenAIClient` are intentionally different:
 

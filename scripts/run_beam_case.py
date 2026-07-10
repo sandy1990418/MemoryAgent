@@ -38,6 +38,7 @@ from memory_agent import (
     TokenLedger,
     get_memory_policy,
 )
+from memory_agent.models.policy import is_chat_policy
 from scripts.beam_models import (
     DEFAULT_RESULTS_DIR,
     BeamChunk,
@@ -45,6 +46,7 @@ from scripts.beam_models import (
     beam_config_from_argv,
     normalize_beam_profile,
 )
+from evaluation.beam.chat_case_adapter import BeamChatCaseAdapter
 from memory_agent.models.config import ProductMemoryConfig, product_config_from_argv
 from memory_agent.structured.middleware import StructuredMemoryMiddleware
 from memory_agent.models.sections import sections_for_preset
@@ -192,7 +194,7 @@ def build_structured_beam_middleware(
             sections=sections,
             policy=memory_policy,
         )
-        if memory_policy.name == "practical"
+        if is_chat_policy(memory_policy)
         else None
     )
     return StructuredMemoryMiddleware(
@@ -267,7 +269,10 @@ BEAM_RAG_ANSWER_TEMPLATE = """You are an assistant that MUST answer questions us
 
 STRICT INSTRUCTIONS:
 1. Answer ONLY based on the provided context.
-2. Do NOT use your internal knowledge.
+2. Do NOT invent user history or project facts.
+3. Follow durable user instructions found in Conversation Memory.
+4. For implementation/how-to requests, you may synthesize code using technologies
+   explicitly named in context; distinguish generated guidance from remembered facts.
 
 CONTEXT:
 {context}
@@ -278,6 +283,8 @@ QUESTION:
 ANSWER REQUIREMENTS:
 - Be direct and concise.
 - For latest/current values, use the latest active memory entry for that subject.
+- If a durable instruction requires dependency versions, list only dependencies
+  whose versions are present in context; do not output unversioned dependencies.
 - For date or duration questions, identify the relevant dated events from context and calculate carefully.
 - Abstain only when no relevant memory entry or recent context contains the answer.
 - Only output the answer to the question without any explanation.
@@ -507,7 +514,8 @@ def flatten_chunks(chat: list[dict[str, Any]]) -> list[BeamChunk]:
     return chunks
 
 
-def flatten_message_batches(chat: list[dict[str, Any]]) -> list[list[AnyMessage]]:
+def flatten_message_batches(chat: list[dict[str, Any]], case_id: str = "1") -> list[list[AnyMessage]]:
+    adapter = BeamChatCaseAdapter()
     batches: list[list[AnyMessage]] = []
     for batch_index, batch in enumerate(chat, start=1):
         batch_number = batch.get("batch_number", batch_index)
@@ -515,23 +523,19 @@ def flatten_message_batches(chat: list[dict[str, Any]]) -> list[list[AnyMessage]
             for pair_index in range(0, len(turn), 2):
                 pair = turn[pair_index : pair_index + 2]
                 messages: list[AnyMessage] = []
-                for message in pair:
-                    role = message.get("role")
-                    content = str(message.get("content", "")).strip()
+                for event in adapter.adapt_messages(pair, case_id=case_id):
+                    role = event.actor
+                    content = event.content.strip()
                     if not content:
                         continue
-                    message_id = message.get("id")
-                    stable_id = (
-                        f"beam-{message_id}"
-                        if message_id is not None
-                        else f"beam-{batch_number}-{turn_index}-{pair_index}-{len(messages)}"
-                    )
+                    message_id = event.metadata.get("beam_chat_id")
+                    stable_id = event.event_id
                     metadata = {
                         "beam_batch_number": batch_number,
                         "beam_turn_group": turn_index,
                         "beam_pair_number": pair_index // 2 + 1,
                         "beam_chat_id": message_id,
-                        "beam_index": message.get("index"),
+                        "beam_index": event.metadata.get("beam_index"),
                     }
                     if role == "user":
                         messages.append(
@@ -639,6 +643,7 @@ def build_answer_context(
     max_active_context_chars: int,
     structured_answer_tokens: int,
     query: str = "",
+    question_type: str = "",
 ) -> str:
     if structured_middleware is None:
         conversation_memory = "(StructuredMemoryMiddleware was not used.)"
@@ -649,14 +654,24 @@ def build_answer_context(
             memory=structured_middleware.memory,
             query=query,
             max_tokens=structured_answer_tokens,
+            include_superseded=question_type == "contradiction_resolution",
         )
         conversation_memory = (
-            structured_middleware.memory.render(entries=selected_entries)
+            structured_middleware.memory.render(
+                entries=selected_entries,
+                include_superseded=question_type == "contradiction_resolution",
+                max_tokens=structured_answer_tokens,
+            )
             or "(No relevant structured memory entries.)"
         )
         chronological = (
             structured_middleware.memory.render_chronological(
-                max_tokens=structured_answer_tokens // 2,
+                entries=None if question_type == "summarization" else selected_entries,
+                max_tokens=(
+                    structured_answer_tokens // 2
+                    if question_type == "summarization"
+                    else structured_answer_tokens // 3
+                ),
                 # Identifier entries (versions, dates, paths) drown out the
                 # topical mention-order signal ordering questions need.
                 exclude_sections={"exact_values"},
@@ -1029,6 +1044,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                     max_active_context_chars=args.max_active_context_chars,
                     structured_answer_tokens=args.structured_answer_tokens,
                     query=question,
+                    question_type=question_type,
                 ),
             )
             rubric_checks = [rubric_hit(response, line) for line in item.get("rubric", [])]
@@ -1220,7 +1236,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--memory-profile",
-        choices=("practical", "agent", "eval", "beam"),
+        choices=("chat", "practical", "agent", "eval", "beam"),
         default=product_config.memory_profile,
         help=(
             "Structured memory profile for BEAM ingestion. Defaults to MEMORY_PROFILE "
