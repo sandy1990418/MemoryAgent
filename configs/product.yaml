@@ -2,3 +2,11 @@ memory_profile: chat
 sections: chat
 compaction_threshold: 30
 memory_model: openai:gpt-5.4-nano
+updater:
+  # The reproduced legacy p95 was 9,611 estimated tokens/call. The 1,200-turn
+  # cap retains complete recent turns while leaving headroom for schema/memory.
+  max_visible_memory_tokens: 600
+  max_evicted_turn_tokens: 1200
+  max_candidate_entries: 8
+  max_legacy_candidate_entries: 4
+  enable_llm_gate: true

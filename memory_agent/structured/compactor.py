@@ -145,15 +145,6 @@ class MemoryCompactor:
                     groups.setdefault(key, []).extend((left, right))
                     reasons[key] = "semantic-overlap"
 
-        by_section: dict[str, list[MemoryEntry]] = {}
-        for entry in untyped:
-            by_section.setdefault(entry.section, []).append(entry)
-        for section, entries in by_section.items():
-            if len(entries) == 2:
-                key = f"unresolved:{section}"
-                groups[key] = entries
-                reasons[key] = "unresolved-pair"
-
         return self._candidates_from_groups(memory, groups, reasons)
 
     @staticmethod

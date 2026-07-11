@@ -195,6 +195,11 @@ def build_structured_beam_middleware(
         ),
         sections=sections,
         policy=memory_policy,
+        update_memory_token_budget=product.update_memory_token_budget,
+        evicted_turn_token_budget=product.evicted_turn_token_budget,
+        max_candidate_entries=product.updater_max_candidate_entries,
+        max_legacy_candidate_entries=product.updater_max_legacy_candidate_entries,
+        enable_llm_gate=product.updater_enable_llm_gate,
     )
     compactor = (
         MemoryCompactor(
@@ -296,6 +301,10 @@ QUESTION:
 ANSWER REQUIREMENTS:
 - Be direct and concise.
 - For latest/current values, use the latest active memory entry for that subject.
+- If the context contains directly conflicting user statements about the same
+  fact and no later statement clearly corrects or supersedes the earlier one,
+  do not silently pick a side: say the stored information is contradictory,
+  briefly restate both statements, and ask which one is correct.
 - If a durable instruction requires dependency versions, list only dependencies
   whose versions are present in context; do not output unversioned dependencies.
 - When recommendations are constrained by a stored preference (for example,
@@ -1115,6 +1124,14 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             asdict(structured_middleware.compactor.metrics)
             if structured_middleware is not None and structured_middleware.compactor is not None
             else None
+        ),
+        "compactor_diagnostics": (
+            structured_middleware.compaction_diagnostics()
+            if structured_middleware is not None else None
+        ),
+        "updater_attribution": (
+            structured_middleware.updater.update_token_usage()
+            if structured_middleware is not None else None
         ),
         "structured_transcript_length": (
             len(structured_middleware.transcript) if structured_middleware is not None else None

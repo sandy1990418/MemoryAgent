@@ -30,6 +30,7 @@ class UpdateMemorySelection:
     visible_tokens: int
     fallback_used: bool = False
     fallback_reason: str | None = None
+    required_overflow_tokens: int = 0
 
     @property
     def entries(self) -> tuple[MemoryEntry, ...]:
@@ -46,12 +47,14 @@ class UpdateMemorySelector:
         subject_normalizer: SubjectNormalizer | None = None,
         identity_confidence_threshold: float = 0.85,
         max_legacy_fallback_entries: int = 4,
+        max_candidate_entries: int = 8,
     ) -> None:
         self.memory = memory
         self.token_estimator = token_estimator or _default_token_estimator
         self.subject_normalizer = subject_normalizer
         self.identity_confidence_threshold = identity_confidence_threshold
         self.max_legacy_fallback_entries = max_legacy_fallback_entries
+        self.max_candidate_entries = max(1, max_candidate_entries)
 
     @staticmethod
     def _typed_key(normalized: tuple | None) -> tuple[str, str, str, str | None, str | None] | None:
@@ -129,21 +132,30 @@ class UpdateMemorySelector:
         # Lexical matching is a bounded compatibility lane. It is used only when
         # exact typed identity could not fully identify the related legacy state.
         fallback_used = bool(legacy_candidates)
-        candidates = typed_candidates + legacy_candidates[: self.max_legacy_fallback_entries]
+        legacy_limit = min(
+            self.max_legacy_fallback_entries,
+            max(0, self.max_candidate_entries - len(typed_candidates)),
+        )
+        candidates = typed_candidates + legacy_candidates[:legacy_limit]
 
         selected: list[UpdateMemoryMatch] = []
         visible_tokens = 0
+        required_overflow_tokens = 0
         for candidate in candidates:
             rendered = self.memory.render(
                 include_superseded=True,
                 entries=[candidate.entry],
             )
             tokens = self.token_estimator(rendered)
-            if budget is not None and visible_tokens + tokens > budget:
+            required_exact = "typed_exact_subject_unit_qualifier" in candidate.reasons
+            if budget is not None and visible_tokens + tokens > budget and not required_exact:
                 continue
+            if budget is not None and visible_tokens + tokens > budget:
+                required_overflow_tokens += visible_tokens + tokens - max(budget, visible_tokens)
             selected.append(candidate)
             visible_tokens += tokens
         return UpdateMemorySelection(
             tuple(selected), visible_tokens, fallback_used,
             "bounded_ambiguous_legacy_lexical_match" if fallback_used else None,
+            required_overflow_tokens,
         )

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from statistics import mean, median
 from typing import Callable
 
 from memory_agent.clients.llm import LLMClient
@@ -68,18 +70,34 @@ def _default_token_estimator(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-@dataclass(frozen=True)
+@dataclass
 class UpdateTokenReport:
+    call_index: int
+    evicted_turn_count: int
+    visible_memory_entry_count: int
+    visible_entries_by_section: dict[str, int]
     estimator_policy: str
     calls: int
     system_tokens: int
     visible_memory_tokens: int
     evicted_turn_tokens: int
     output_tokens: int
+    retry_tokens: int = 0
+    provider_input_tokens: int | None = None
+    provider_output_tokens: int | None = None
+    deterministic_ops_count: int = 0
+    llm_ops_count: int = 0
+    rejected_ops_count: int = 0
+    llm_call_required_reason: str = "call:possible_durable_assertion"
+    required_exact_subject_overflow_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
-        return self.system_tokens + self.visible_memory_tokens + self.evicted_turn_tokens + self.output_tokens
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def input_tokens(self) -> int:
+        return self.system_tokens + self.visible_memory_tokens + self.evicted_turn_tokens + self.retry_tokens
 
 
 class MemoryUpdater:
@@ -99,6 +117,9 @@ class MemoryUpdater:
         policy: MemoryPolicy | None = None,
         subject_normalizer: SubjectNormalizer | None = None,
         identity_confidence_threshold: float = 0.85,
+        max_candidate_entries: int = 8,
+        max_legacy_candidate_entries: int = 4,
+        enable_llm_gate: bool = False,
     ) -> None:
         self.llm = llm
         self.sections = sections
@@ -117,13 +138,18 @@ class MemoryUpdater:
         self.policy = policy or AGENT_POLICY
         self.subject_normalizer = subject_normalizer or ChatSubjectNormalizer()
         self.identity_confidence_threshold = identity_confidence_threshold
+        self.max_candidate_entries = max_candidate_entries
+        self.max_legacy_candidate_entries = max_legacy_candidate_entries
+        self.enable_llm_gate = enable_llm_gate
+        self.decision_reasons: Counter[str] = Counter()
+        self.evicted_user_assistant_pairs = 0
         # Fail fast on profile/section mismatches instead of silently running
         # with retention behavior the caller did not intend.
         validate_policy_sections(self.policy, sections)
         self._section_key_by_prefix = {section.prefix.lower(): section.key for section in sections}
 
-    def update_token_usage(self) -> dict[str, int | float | str]:
-        """Return estimator-only cumulative and average updater attribution."""
+    def update_token_usage(self) -> dict:
+        """Return per-call and aggregate estimated/provider attribution."""
         calls = sum(report.calls for report in self.token_reports)
         totals = {
             name: sum(getattr(report, name) for report in self.token_reports)
@@ -132,6 +158,16 @@ class MemoryUpdater:
             )
         }
         total_tokens = sum(totals.values())
+        inputs = [r.system_tokens + r.visible_memory_tokens + r.evicted_turn_tokens + r.retry_tokens for r in self.token_reports]
+        provider_inputs = [r.provider_input_tokens for r in self.token_reports if r.provider_input_tokens is not None]
+        provider_outputs = [r.provider_output_tokens for r in self.token_reports if r.provider_output_tokens is not None]
+        visible_by_section: Counter[str] = Counter()
+        for report in self.token_reports:
+            visible_by_section.update(report.visible_entries_by_section)
+        p95 = 0
+        if inputs:
+            inputs = sorted(inputs)
+            p95 = inputs[math.ceil(len(inputs) * .95) - 1]
         return {
             "source": "estimator",
             "estimator_policy": "characters_divided_by_four",
@@ -139,6 +175,25 @@ class MemoryUpdater:
             **totals,
             "total_tokens": total_tokens,
             "average_tokens_per_call": total_tokens / calls if calls else 0.0,
+            "mean_input_tokens_per_call": mean(inputs) if inputs else 0.0,
+            "median_input_tokens_per_call": median(inputs) if inputs else 0.0,
+            "p95_input_tokens_per_call": p95,
+            "updater_calls_per_evicted_pair": calls / self.evicted_user_assistant_pairs if self.evicted_user_assistant_pairs else 0.0,
+            "evicted_user_assistant_pairs": self.evicted_user_assistant_pairs,
+            "calls_skipped_by_deterministic_gating": sum(v for k, v in self.decision_reasons.items() if k.startswith("skip:")),
+            "decision_reasons": dict(self.decision_reasons),
+            "retries": sum(1 for r in self.token_reports if r.retry_tokens),
+            "retry_tokens": sum(r.retry_tokens for r in self.token_reports),
+            "rejected_ops_count": sum(r.rejected_ops_count for r in self.token_reports),
+            "visible_entries_by_section": dict(visible_by_section),
+            "provider_reported_input_tokens": sum(provider_inputs),
+            "provider_reported_output_tokens": sum(provider_outputs),
+            "provider_reported_calls": len(provider_inputs),
+            "calls_detail": [
+                {**asdict(report), "system_schema_tokens": report.system_tokens,
+                 "input_tokens": report.input_tokens}
+                for report in self.token_reports
+            ],
         }
 
     # Sections whose entries are always shown to the updater regardless of
@@ -220,7 +275,54 @@ class MemoryUpdater:
             turns=evicted_turns,
         )
 
+    def _llm_decision(
+        self,
+        memory: Memory,
+        evicted_turns: list[Turn],
+        deterministic_ops: list[dict],
+    ) -> str:
+        """Conservatively decide whether deterministic extraction is complete."""
+        user_turns = [turn for turn in evicted_turns if turn.role == "user" and turn.content.strip()]
+        if not user_turns:
+            return "skip:no_durable_assertion"
+        combined = " ".join(turn.content for turn in user_turns)
+        if re.search(r"\b(?:yes|agreed|sounds good|let'?s do (?:it|that)|go with that|accepted?)\b", combined, re.I):
+            return "call:user_acceptance_ambiguous"
+        if re.search(r"\b(?:correction|changed my mind|no longer|not anymore|instead|actually|contradict(?:s|ion|ory)?)\b", combined, re.I):
+            return "call:unresolved_subject_conflict"
+        if self._is_ordinary_non_durable_batch(
+            evicted_turns, cue_re=status_change_cue_re(self.policy)
+        ):
+            return "skip:no_durable_assertion"
+        covered_turn_ids = {
+            turn_id
+            for op in deterministic_ops
+            if isinstance(op, dict)
+            for turn_id in op.get("provenance", [])
+            if isinstance(turn_id, int)
+        }
+        durable_turn_ids = {
+            turn.id
+            for turn in user_turns
+            if DURABLE_USER_STATE_RE.search(turn.content)
+            or status_change_cue_re(self.policy).search(turn.content)
+        }
+        if durable_turn_ids and durable_turn_ids <= covered_turn_ids:
+            return "skip:deterministic_ops_fully_cover_batch"
+        return "call:possible_durable_assertion"
+
+    def _provider_usage(self) -> tuple[int, int, int] | None:
+        ledger = getattr(self.llm, "token_ledger", None)
+        role = getattr(self.llm, "role", None)
+        usage = getattr(ledger, "usage_by_role", {}).get(role) if ledger is not None and role else None
+        if usage is None:
+            return None
+        return usage.calls, usage.input_tokens, usage.output_tokens
+
     def update(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[list[dict], list[dict]]:
+        users = sum(turn.role == "user" for turn in evicted_turns)
+        assistants = sum(turn.role == "assistant" for turn in evicted_turns)
+        self.evicted_user_assistant_pairs += min(users, assistants)
         deterministic_ops = self._deterministic_ops(memory, evicted_turns)
         _debug_ops("deterministic before filter", deterministic_ops)
         deterministic_ops = self._apply_policy_filter(
@@ -229,15 +331,17 @@ class MemoryUpdater:
             evicted_turns,
             apply_cap=False,
         )
+        decision_reason = self._llm_decision(memory, evicted_turns, deterministic_ops)
+        self.decision_reasons[decision_reason] += 1
         _debug_ops("deterministic after filter", deterministic_ops)
         det_applied: list[dict] = []
         if deterministic_ops:
             det_applied, _det_rejected = memory.apply_ops_atomically(deterministic_ops)
 
-        if is_chat_policy(self.policy) and self._is_ordinary_non_durable_batch(
-            evicted_turns,
-            cue_re=status_change_cue_re(self.policy),
-        ):
+        should_skip = (
+            decision_reason == "skip:no_durable_assertion" and is_chat_policy(self.policy)
+        ) or (self.enable_llm_gate and decision_reason.startswith("skip:"))
+        if should_skip:
             consolidated = [
                 *self._consolidate_near_duplicates(memory),
                 *self._consolidate_latest_subject_values(
@@ -250,6 +354,8 @@ class MemoryUpdater:
         selection = UpdateMemorySelector(
             memory, self.token_estimator, self.subject_normalizer,
             self.identity_confidence_threshold,
+            max_legacy_fallback_entries=self.max_legacy_candidate_entries,
+            max_candidate_entries=self.max_candidate_entries,
         ).select_for_update(
             prompt_turns, self.update_memory_token_budget
         )
@@ -275,9 +381,26 @@ class MemoryUpdater:
         visible_entries = [memory.entries[entry.id] for entry in selection.entries]
         visible_ids = {entry.id for entry in visible_entries}
         system, messages = self._build_prompt(memory, prompt_turns, visible_entries)
+        base_prompt_text = system + "\n" + "\n".join(str(m.get("content", "")) for m in messages)
+        schema_system, schema_messages = self._build_prompt(memory, [], [])
+        schema_prompt_text = schema_system + "\n" + "\n".join(
+            str(m.get("content", "")) for m in schema_messages
+        )
+        memory_system, memory_messages = self._build_prompt(memory, [], visible_entries)
+        memory_prompt_text = memory_system + "\n" + "\n".join(
+            str(m.get("content", "")) for m in memory_messages
+        )
+        schema_tokens = self.token_estimator(schema_prompt_text)
+        visible_component_tokens = max(
+            0, self.token_estimator(memory_prompt_text) - schema_tokens
+        )
+        turn_component_tokens = max(
+            0, self.token_estimator(base_prompt_text) - self.token_estimator(memory_prompt_text)
+        )
 
         last_rejected: list[dict] = []
         for attempt in range(self.max_retries + 1):
+            provider_before = self._provider_usage()
             try:
                 response = self.llm.complete(system, messages, model=self.model)
             except Exception as exc:
@@ -299,16 +422,33 @@ class MemoryUpdater:
             prompt_text = system + "\n" + "\n".join(
                 str(message.get("content", "")) for message in messages
             )
-            visible_text = memory.render(include_superseded=True, entries=visible_entries)
-            turns_text = "\n".join(turn.content for turn in prompt_turns)
-            self.token_reports.append(UpdateTokenReport(
+            provider_after = self._provider_usage()
+            provider_input = provider_output = None
+            if provider_before is not None and provider_after is not None and provider_after[0] > provider_before[0]:
+                provider_input = provider_after[1] - provider_before[1]
+                provider_output = provider_after[2] - provider_before[2]
+            retry_tokens = max(0, self.token_estimator(prompt_text) - self.token_estimator(base_prompt_text))
+            call_report = UpdateTokenReport(
+                call_index=len(self.token_reports) + 1,
+                evicted_turn_count=len(prompt_turns),
+                visible_memory_entry_count=len(visible_entries),
+                visible_entries_by_section=dict(Counter(entry.section for entry in visible_entries)),
                 estimator_policy="characters_divided_by_four",
                 calls=1,
-                system_tokens=max(0, self.token_estimator(prompt_text) - self.token_estimator(visible_text) - self.token_estimator(turns_text)),
-                visible_memory_tokens=self.token_estimator(visible_text) if visible_text else 0,
-                evicted_turn_tokens=self.token_estimator(turns_text) if turns_text else 0,
+                system_tokens=schema_tokens,
+                visible_memory_tokens=visible_component_tokens,
+                evicted_turn_tokens=turn_component_tokens,
                 output_tokens=self.token_estimator(response) if response else 0,
-            ))
+                retry_tokens=retry_tokens,
+                provider_input_tokens=provider_input,
+                provider_output_tokens=provider_output,
+                deterministic_ops_count=len(deterministic_ops),
+                llm_ops_count=len(ops),
+                rejected_ops_count=len(hidden_id_rejections),
+                llm_call_required_reason=decision_reason,
+                required_exact_subject_overflow_tokens=selection.required_overflow_tokens,
+            )
+            self.token_reports.append(call_report)
             if hidden_id_rejections:
                 applied, rejected = [], hidden_id_rejections
                 last_rejected = rejected
@@ -337,6 +477,7 @@ class MemoryUpdater:
                 applied, rejected = [], provenance_rejections
             else:
                 applied, rejected = memory.apply_ops_atomically(ops)
+            call_report.rejected_ops_count = len(rejected)
 
             if not rejected:
                 consolidated = [

@@ -129,3 +129,51 @@ def test_product_config_loads_separate_memory_budgets(tmp_path, monkeypatch):
     assert config.answer_memory_token_budget == 101
     assert config.update_memory_token_budget == 222
     assert config.evicted_turn_token_budget == 303
+
+
+def test_product_config_loads_nested_updater_budget(tmp_path):
+    path = tmp_path / "product.yaml"
+    path.write_text(
+        "updater:\n"
+        "  max_visible_memory_tokens: 111\n"
+        "  max_evicted_turn_tokens: 222\n"
+        "  max_candidate_entries: 7\n"
+        "  max_legacy_candidate_entries: 3\n"
+    )
+    config = ProductMemoryConfig.from_yaml_env(path)
+    assert config.update_memory_token_budget == 111
+    assert config.evicted_turn_token_budget == 222
+    assert config.updater_max_candidate_entries == 7
+    assert config.updater_max_legacy_candidate_entries == 3
+
+
+def test_required_typed_exact_subject_reports_budget_overflow():
+    memory = Memory(sections=CHAT_SECTIONS)
+    identity = SubjectIdentity("chat", "api latency", "value", "when online", .9)
+    memory.apply_ops([{
+        "op": "ADD", "section": "facts", "text": "When online, API latency is 250 ms.",
+        "provenance": [1], "subject_identity": identity, "value": MemoryValue("250", "ms"),
+    }])
+    selection = UpdateMemorySelector(
+        memory, token_estimator=lambda _text: 10, subject_normalizer=ChatSubjectNormalizer()
+    ).select_for_update([Turn(2, "user", "When online, API latency is 200 ms.")], 1)
+    assert [entry.id for entry in selection.entries] == ["F1"]
+    assert selection.visible_tokens == 10
+    assert selection.required_overflow_tokens == 9
+
+
+def test_evicted_budget_preserves_complete_multiformat_turns():
+    turns = [
+        Turn(1, "user", "English durable statement"),
+        Turn(2, "user", "中文完整句子"),
+        Turn(3, "user", "mixed 中文 JSON: {\"ok\": true}"),
+        Turn(4, "assistant", "```python\nprint('完整')\n```"),
+        Turn(5, "tool", "{\"rows\": [1, 2, 3]}")
+    ]
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'), sections=CHAT_SECTIONS,
+        evicted_turn_token_budget=3, token_estimator=lambda _text: 1,
+    )
+    selected = updater._turns_within_budget(turns)
+    assert selected == turns[-3:]
+    assert selected[0].content == "mixed 中文 JSON: {\"ok\": true}"

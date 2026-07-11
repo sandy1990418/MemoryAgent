@@ -103,6 +103,9 @@ def build_chat_memory(
         policy=policy,
         update_memory_token_budget=product.update_memory_token_budget,
         evicted_turn_token_budget=product.evicted_turn_token_budget,
+        max_candidate_entries=product.updater_max_candidate_entries,
+        max_legacy_candidate_entries=product.updater_max_legacy_candidate_entries,
+        enable_llm_gate=product.updater_enable_llm_gate,
     )
     compactor = (
         MemoryCompactor(

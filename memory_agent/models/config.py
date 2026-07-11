@@ -77,7 +77,11 @@ def _parse_scalar(value: str):
 
 
 def load_simple_yaml(path: str | Path) -> dict[str, object]:
-    """Load the flat YAML subset used by repo config files without a dependency."""
+    """Load the small YAML subset used by repo config files.
+
+    Supports top-level scalars/lists and one level of scalar mappings (used by
+    ``updater:``).  It intentionally remains dependency-free.
+    """
     data: dict[str, object] = {}
     current_key: str | None = None
     for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -88,6 +92,13 @@ def load_simple_yaml(path: str | Path) -> dict[str, object]:
             data.setdefault(current_key, [])
             assert isinstance(data[current_key], list)
             data[current_key].append(_parse_scalar(line[4:]))
+            continue
+        if line.startswith("  ") and current_key and ":" in line:
+            child_key, child_value = line.strip().split(":", 1)
+            if not isinstance(data.get(current_key), dict):
+                data[current_key] = {}
+            assert isinstance(data[current_key], dict)
+            data[current_key][child_key.strip()] = _parse_scalar(child_value)
             continue
         if ":" not in line:
             continue
@@ -115,7 +126,10 @@ class ProductMemoryConfig:
     memory_model: str = "openai:gpt-5.4-nano"
     answer_memory_token_budget: int = 600
     update_memory_token_budget: int = 600
-    evicted_turn_token_budget: int = 600
+    evicted_turn_token_budget: int = 1200
+    updater_max_candidate_entries: int = 8
+    updater_max_legacy_candidate_entries: int = 4
+    updater_enable_llm_gate: bool = True
 
     @classmethod
     def from_yaml_env(cls, path: str | Path = "configs/product.yaml") -> "ProductMemoryConfig":
@@ -138,14 +152,31 @@ class ProductMemoryConfig:
         )
         if compaction_threshold < 1:
             raise ValueError("compaction_threshold must be at least 1")
+        updater_data = data.get("updater", {})
+        if not isinstance(updater_data, dict):
+            updater_data = {}
+        def updater_int(key: str, env: str, legacy_key: str, default: int) -> int:
+            raw = os.getenv(env)
+            if raw not in (None, ""):
+                return int(raw)
+            return int(updater_data.get(key, data.get(legacy_key, default)))
+        gate_raw = os.getenv("UPDATER_ENABLE_LLM_GATE")
+        updater_enable_llm_gate = (
+            bool(_parse_scalar(gate_raw)) if gate_raw not in (None, "")
+            else bool(updater_data.get("enable_llm_gate", cls.updater_enable_llm_gate))
+        )
+
         return cls(
             memory_profile=profile,
             sections=sections,
             compaction_threshold=compaction_threshold,
             memory_model=str(config_value(data, "memory_model", "MEMORY_MODEL", cls.memory_model)),
             answer_memory_token_budget=int(config_value(data, "answer_memory_token_budget", "ANSWER_MEMORY_TOKEN_BUDGET", cls.answer_memory_token_budget)),
-            update_memory_token_budget=int(config_value(data, "update_memory_token_budget", "UPDATE_MEMORY_TOKEN_BUDGET", cls.update_memory_token_budget)),
-            evicted_turn_token_budget=int(config_value(data, "evicted_turn_token_budget", "EVICTED_TURN_TOKEN_BUDGET", cls.evicted_turn_token_budget)),
+            update_memory_token_budget=updater_int("max_visible_memory_tokens", "UPDATE_MEMORY_TOKEN_BUDGET", "update_memory_token_budget", cls.update_memory_token_budget),
+            evicted_turn_token_budget=updater_int("max_evicted_turn_tokens", "EVICTED_TURN_TOKEN_BUDGET", "evicted_turn_token_budget", cls.evicted_turn_token_budget),
+            updater_max_candidate_entries=updater_int("max_candidate_entries", "UPDATER_MAX_CANDIDATE_ENTRIES", "updater_max_candidate_entries", cls.updater_max_candidate_entries),
+            updater_max_legacy_candidate_entries=updater_int("max_legacy_candidate_entries", "UPDATER_MAX_LEGACY_CANDIDATE_ENTRIES", "updater_max_legacy_candidate_entries", cls.updater_max_legacy_candidate_entries),
+            updater_enable_llm_gate=updater_enable_llm_gate,
         )
 
 def product_config_from_argv(

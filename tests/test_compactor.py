@@ -57,13 +57,13 @@ def test_compactor_rejects_reactivating_superseded_entry():
             {
                 "op": "ADD",
                 "section": "decisions",
-                "text": "Use summary memory.",
+                "text": "Use summary-based product memory.",
                 "provenance": [2],
             },
             {
                 "op": "ADD",
                 "section": "decisions",
-                "text": "Do not use mem0.",
+                "text": "Product memory must not use mem0.",
                 "provenance": [3],
             },
         ]
@@ -90,6 +90,20 @@ def test_compactor_rejects_reactivating_superseded_entry():
     assert rejected
     assert memory.entries["D2"].status == "active"
     assert memory.entries["D3"].status == "active"
+
+
+def test_exactly_two_unrelated_entries_do_not_create_candidate():
+    policy = get_memory_policy("chat")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    memory.apply_ops([
+        {"op": "ADD", "section": "facts", "text": "The sky is blue.", "provenance": [1]},
+        {"op": "ADD", "section": "facts", "text": "Redis runs locally.", "provenance": [2]},
+    ])
+    compactor = MemoryCompactor(
+        llm=ScriptedLLM(lambda *_: "[]"), sections=PRACTICAL_SECTIONS,
+        policy=policy, enable_semantic_candidates=True,
+    )
+    assert compactor.detect_candidates(memory) == []
 
 
 def test_compactor_accepts_string_noop_from_small_models():

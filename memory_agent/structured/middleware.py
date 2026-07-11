@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections import Counter
 from typing import Any, Callable
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest
@@ -144,6 +145,7 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         self.compact_min_active_entries = compact_min_active_entries
         self._last_compaction_failure_active: int | None = None
         self._compaction_retry_growth = 10
+        self._compaction_checks: list[dict[str, Any]] = []
         # Semantic invariant check on updater output (defense-in-depth); pass
         # an explicit verifier to customize, or disable via a stub that always
         # passes. Default on: it only fires when the deterministic extraction
@@ -347,25 +349,55 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         evicted turns are already safely in memory, so a compaction failure
         just means memory stays more granular until the next attempt.
         """
+        active = sum(entry.status == "active" for entry in self.memory.entries.values())
+        total = len(self.memory.entries)
+        diagnostic = {
+            "compactor_enabled": self.compactor is not None,
+            "memory_profile": self.policy.name,
+            "active_entries_at_check": active,
+            "total_entries_at_check": total,
+            "threshold": self.compact_min_active_entries,
+            "candidate_count": 0,
+            "skip_reason": None,
+            "attempted_calls": 0,
+        }
         if self.compactor is None:
+            diagnostic["skip_reason"] = "disabled_profile"
+            self._compaction_checks.append(diagnostic)
             return
-        active = sum(
-            entry.status == "active" for entry in self.memory.entries.values()
-        )
         if active <= self.compact_min_active_entries:
-            self.compactor.record_skip("below_threshold")
+            diagnostic["skip_reason"] = "below_scan_threshold"
+            self.compactor.record_skip("below_scan_threshold")
+            self._compaction_checks.append(diagnostic)
+            return
+        candidates = self.compactor.detect_candidates(self.memory)
+        diagnostic["candidate_count"] = len(candidates)
+        if not candidates:
+            diagnostic["skip_reason"] = "no_candidates"
+            self.compactor.record_skip("no_candidates")
+            self._compaction_checks.append(diagnostic)
             return
         if (
             self._last_compaction_failure_active is not None
             and active < self._last_compaction_failure_active + self._compaction_retry_growth
         ):
-            self.compactor.record_skip("circuit_breaker")
+            diagnostic["skip_reason"] = "candidate_circuit_breaker"
+            self.compactor.record_skip("candidate_circuit_breaker")
+            self._compaction_checks.append(diagnostic)
             return
+        diagnostic["skip_reason"] = (
+            "llm_candidate"
+            if any(candidate.reason == "semantic-overlap" for candidate in candidates)
+            else "deterministic_candidate"
+        )
+        attempted_before = self.compactor.metrics.attempted_calls
         try:
-            applied, rejected = self.compactor.compact(self.memory)
+            applied, rejected = self.compactor.compact_candidates(self.memory, candidates)
         except UpdateFailed as exc:
             self._last_compaction_failure_active = active
             logger.warning("Memory compaction failed; continuing uncompacted: %s", exc)
+            diagnostic["attempted_calls"] = self.compactor.metrics.attempted_calls - attempted_before
+            self._compaction_checks.append(diagnostic)
             return
         if rejected:
             self._last_compaction_failure_active = active
@@ -373,6 +405,23 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         elif applied:
             self._last_compaction_failure_active = None
             logger.info("Memory compaction applied %d ops", len(applied))
+        diagnostic["attempted_calls"] = self.compactor.metrics.attempted_calls - attempted_before
+        self._compaction_checks.append(diagnostic)
+
+    def compaction_diagnostics(self) -> dict[str, Any]:
+        """Structured per-check diagnostics, including disabled profiles."""
+        reasons = Counter(
+            check["skip_reason"] for check in self._compaction_checks if check["skip_reason"]
+        )
+        return {
+            "compactor_enabled": self.compactor is not None,
+            "memory_profile": self.policy.name,
+            "threshold": self.compact_min_active_entries,
+            "checks": list(self._compaction_checks),
+            "skip_reasons": dict(reasons),
+            "candidate_count": sum(int(check["candidate_count"]) for check in self._compaction_checks),
+            "attempted_calls": sum(int(check["attempted_calls"]) for check in self._compaction_checks),
+        }
 
     async def abefore_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
         """Async wrapper: the eviction logic above does no I/O of its own."""
