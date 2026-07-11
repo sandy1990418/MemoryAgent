@@ -41,3 +41,22 @@ def test_efficiency_gate_accepts_runner_nested_overall_summary():
         max_agent_tokens=71000,
         max_updater_tokens=180000,
     ) == []
+
+
+def test_efficiency_gate_checks_memory_content_density():
+    result = _result()
+    result["summary"]["structured_memory_stats"].update({
+        "total_active_entry_chars": 5000,
+        "avg_active_entry_chars": 140,
+        "long_active_entries_over_180_chars": 8,
+    })
+    assert evaluate(
+        result,
+        min_judge_score=.58,
+        max_active_entries=40,
+        max_agent_tokens=71000,
+        max_updater_tokens=180000,
+        max_memory_chars=5500,
+        max_avg_entry_chars=150,
+        max_long_entries=10,
+    ) == []

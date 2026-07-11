@@ -165,6 +165,81 @@ def test_chat_profile_does_not_treat_descriptive_always_as_instruction():
     assert not any(entry.section == "preferences" for entry in memory.entries.values())
 
 
+def test_chat_profile_skips_updater_llm_for_non_durable_batch():
+    calls = []
+    policy = get_memory_policy("chat")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: calls.append(messages) or '[{"op":"NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    applied, rejected = updater.update(
+        memory,
+        [Turn(id=1, role="user", content="How does Redis persistence work?")],
+    )
+    assert applied == []
+    assert rejected == []
+    assert calls == []
+
+
+def test_chat_profile_bounds_llm_entry_text():
+    policy = get_memory_policy("chat")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda system, messages: json.dumps([{
+            "op": "ADD",
+            "section": "facts",
+            "text": "Project uses Flask " + "with detailed configuration " * 20,
+            "provenance": [1],
+        }])),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    updater.update(memory, [Turn(id=1, role="user", content="My project uses Flask.")])
+    assert len(memory.entries["F1"].text) <= 200
+
+
+def test_chat_entry_compaction_preserves_late_subject_value():
+    text = (
+        "User stated: trying to improve authentication and authorization with many "
+        "security details and deployment constraints while the repository main branch "
+        "has now reached 165 commits and requires a final review before launch."
+    )
+    compact = MemoryUpdater._compact_chat_entry_text(text, max_chars=120)
+    assert len(compact) <= 120
+    assert "165 commits" in compact
+
+
+def test_chat_profile_locally_consolidates_near_duplicate_facts():
+    policy = get_memory_policy("chat")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    memory.apply_ops([
+        {"op":"ADD","section":"facts","text":"Dashboard API improved to 300ms after SQL optimization and caching.","provenance":[1]},
+        {"op":"ADD","section":"facts","text":"Dashboard API improved to 250ms after SQL optimization and caching tweaks.","provenance":[2]},
+    ])
+    applied = MemoryUpdater._consolidate_near_duplicates(memory)
+    assert applied
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert "250ms" in active[0].text
+    assert sorted(active[0].provenance) == [1, 2]
+
+
+def test_chat_profile_keeps_only_latest_commit_total_active():
+    policy = get_memory_policy("chat")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    memory.apply_ops([
+        {"op":"ADD","section":"facts","text":"Repository had 150 commits.","provenance":[1]},
+        {"op":"ADD","section":"facts","text":"Main branch has now reached 165 commits.","provenance":[2]},
+    ])
+    applied = MemoryUpdater._consolidate_latest_subject_values(memory)
+    assert applied
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert "165 commits" in active[0].text
+
+
 def test_chat_profile_keeps_updated_metric_as_fact_not_status_fragment():
     policy = get_memory_policy("chat")
     updater = MemoryUpdater(

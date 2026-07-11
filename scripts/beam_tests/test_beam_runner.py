@@ -262,6 +262,7 @@ def test_answer_question_prompt_requires_supported_concise_answers():
     assert "Do NOT invent user history or project facts" in user_prompt
     assert "Follow durable user instructions" in user_prompt
     assert "do not output unversioned dependencies" in user_prompt
+    assert "explicitly state how the answer follows" in user_prompt
     assert "ANSWER REQUIREMENTS" in user_prompt
     assert "use the latest active memory entry" in user_prompt
     assert "identify the relevant dated events" in user_prompt
@@ -301,6 +302,7 @@ def test_build_answer_context_includes_chronological_order_block():
         max_active_context_chars=500,
         structured_answer_tokens=500,
         query="What came first?",
+        question_type="summarization",
     )
 
     assert "# Chronological Order" in context

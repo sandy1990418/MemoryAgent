@@ -135,6 +135,18 @@ def test_pinned_entry_is_included_even_when_over_budget_alone():
     assert [entry.id for entry in selected] == ["U1"]
 
 
+def test_call_site_can_disable_default_pinned_sections():
+    memory = make_memory()
+    selector = MemorySelector(token_estimator=count_entries)
+    selected = selector.select(
+        memory=memory,
+        query="favorite color is green",
+        max_tokens=1,
+        pinned_sections=frozenset(),
+    )
+    assert [entry.id for entry in selected] == ["F1"]
+
+
 def test_temporal_query_boosts_timeline_entries():
     memory = Memory(sections=AGENT_SECTIONS)
     applied, rejected = memory.apply_ops(

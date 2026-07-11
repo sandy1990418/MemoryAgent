@@ -102,12 +102,14 @@ class MemorySelector:
         query: str = "",
         max_tokens: int | None = None,
         include_superseded: bool = False,
+        pinned_sections: Iterable[str] | None = None,
     ) -> list[MemoryEntry]:
         selected = self.select_with_scores(
             memory=memory,
             query=query,
             max_tokens=max_tokens,
             include_superseded=include_superseded,
+            pinned_sections=pinned_sections,
         )
         return [item.entry for item in selected]
 
@@ -117,6 +119,7 @@ class MemorySelector:
         query: str = "",
         max_tokens: int | None = None,
         include_superseded: bool = False,
+        pinned_sections: Iterable[str] | None = None,
     ) -> list[SelectedMemory]:
         query_tokens = _tokens(query)
         candidates = [
@@ -138,10 +141,13 @@ class MemorySelector:
 
         # Pinned sections are a hard guarantee: include them even if rendering
         # them alone exceeds max_tokens. Budget only gates non-pinned entries.
+        effective_pinned = (
+            self.pinned_sections if pinned_sections is None else frozenset(pinned_sections)
+        )
         pinned_ids = {
             candidate.entry.id
             for candidate in candidates
-            if candidate.entry.section in self.pinned_sections
+            if candidate.entry.section in effective_pinned
         }
         selected_ids = set(pinned_ids)
         for candidate in candidates:

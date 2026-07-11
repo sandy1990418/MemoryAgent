@@ -166,6 +166,16 @@ class MemoryUpdater:
         if deterministic_ops:
             det_applied, _det_rejected = memory.apply_ops_atomically(deterministic_ops)
 
+        if is_chat_policy(self.policy) and self._is_ordinary_non_durable_batch(
+            evicted_turns,
+            cue_re=status_change_cue_re(self.policy),
+        ):
+            consolidated = [
+                *self._consolidate_near_duplicates(memory),
+                *self._consolidate_latest_subject_values(memory),
+            ]
+            return det_applied + consolidated, []
+
         system, messages = self._build_prompt(memory, evicted_turns)
 
         last_rejected: list[dict] = []
@@ -187,7 +197,11 @@ class MemoryUpdater:
                 op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
             ]
             if not ops:
-                return det_applied, []
+                consolidated = [
+                    *self._consolidate_near_duplicates(memory),
+                    *self._consolidate_latest_subject_values(memory),
+                ]
+                return det_applied + consolidated, []
 
             provenance_rejections = self._validate_provenance(ops, evicted_turns)
             if provenance_rejections:
@@ -196,13 +210,127 @@ class MemoryUpdater:
                 applied, rejected = memory.apply_ops_atomically(ops)
 
             if not rejected:
-                return det_applied + applied, []
+                consolidated = [
+                    *self._consolidate_near_duplicates(memory),
+                    *self._consolidate_latest_subject_values(memory),
+                ]
+                return det_applied + applied + consolidated, []
 
             last_rejected = rejected
             if attempt < self.max_retries:
                 messages = self._retry_messages(messages, ops, rejected)
 
         return det_applied, last_rejected
+
+    @staticmethod
+    def _consolidate_near_duplicates(memory: Memory) -> list[dict]:
+        """Locally supersede high-overlap entries without another LLM call."""
+        eligible = {"facts", "goal", "open_questions", "preferences", "status_changes"}
+        active = [
+            entry
+            for entry in memory.entries.values()
+            if entry.status == "active" and entry.section in eligible
+        ]
+
+        def duplicate_words(text: str) -> set[str]:
+            return {word.strip(".,;:!?()[]{}") for word in content_words(text)}
+
+        ops: list[dict] = []
+        remaining = list(active)
+        while remaining:
+            seed = remaining.pop(0)
+            cluster = [seed]
+            seed_words = duplicate_words(seed.text)
+            unmatched = []
+            for candidate in remaining:
+                if candidate.section != seed.section:
+                    unmatched.append(candidate)
+                    continue
+                candidate_words = duplicate_words(candidate.text)
+                union = seed_words | candidate_words
+                overlap = len(seed_words & candidate_words) / len(union) if union else 0.0
+                seed_key = MemoryUpdater._text_key(seed.text)
+                candidate_key = MemoryUpdater._text_key(candidate.text)
+                duplicate = (
+                    min(len(seed_words), len(candidate_words)) >= 5
+                    and (
+                        overlap >= 0.60
+                        or seed_key in candidate_key
+                        or candidate_key in seed_key
+                    )
+                )
+                (cluster if duplicate else unmatched).append(candidate)
+            remaining = unmatched
+            if len(cluster) < 2:
+                continue
+            keep = max(cluster, key=lambda entry: (max(entry.provenance or [0]), entry.id))
+            provenance = sorted({turn_id for entry in cluster for turn_id in entry.provenance})
+            ops.append({
+                "op": "UPDATE",
+                "id": keep.id,
+                "text": keep.text,
+                "provenance": provenance,
+            })
+            ops.extend(
+                {
+                    "op": "SUPERSEDE",
+                    "id": entry.id,
+                    "reason": f"Near-duplicate consolidated into {keep.id}.",
+                }
+                for entry in cluster
+                if entry.id != keep.id
+            )
+        if not ops:
+            return []
+        applied, rejected = memory.apply_ops_atomically(ops)
+        return applied if not rejected else []
+
+    @staticmethod
+    def _consolidate_latest_subject_values(memory: Memory) -> list[dict]:
+        """Keep one active latest value for common metric subjects."""
+        subject_patterns = (
+            re.compile(r"\bcommits?\b", re.IGNORECASE),
+            re.compile(
+                r"\bdashboard\b.{0,80}\b(?:response time|latency|ms)\b|"
+                r"\b(?:response time|latency)\b.{0,80}\bdashboard\b",
+                re.IGNORECASE,
+            ),
+            re.compile(r"\b(?:auth|test)\b.{0,60}\bcoverage\b", re.IGNORECASE),
+        )
+        ops: list[dict] = []
+        already_dropped: set[str] = set()
+        for pattern in subject_patterns:
+            matches = [
+                entry
+                for entry in memory.entries.values()
+                if entry.status == "active"
+                and entry.id not in already_dropped
+                and entry.section in {"facts", "status_changes"}
+                and pattern.search(entry.text)
+            ]
+            if len(matches) < 2:
+                continue
+            keep = max(matches, key=lambda entry: (max(entry.provenance or [0]), entry.id))
+            provenance = sorted({turn_id for entry in matches for turn_id in entry.provenance})
+            ops.append({
+                "op": "UPDATE",
+                "id": keep.id,
+                "text": keep.text,
+                "provenance": provenance,
+            })
+            for entry in matches:
+                if entry.id == keep.id:
+                    continue
+                already_dropped.add(entry.id)
+                ops.append({
+                    "op": "SUPERSEDE",
+                    "id": entry.id,
+                    "reason": f"Older subject value superseded by {keep.id}.",
+                })
+        if not ops:
+            return []
+        applied, rejected = memory.apply_ops_atomically(ops)
+        return applied if not rejected else []
 
     @staticmethod
     def _retry_messages(messages: list[dict], ops: list[dict], rejected: list[dict]) -> list[dict]:
@@ -293,7 +421,7 @@ class MemoryUpdater:
                 sentence = WHITESPACE_RE.sub(" ", sentence).strip()
                 if not sentence or not PROJECT_IMPLEMENTATION_STATE_RE.search(sentence):
                     continue
-                text = f"User project state: {sentence[:320].rstrip()}"
+                text = f"User project state: {sentence[:155].rstrip()}"
                 if self._has_seen_text(text, seen):
                     continue
                 seen.add(self._text_key(text))
@@ -370,6 +498,7 @@ class MemoryUpdater:
                     continue
                 if ASSISTANT_ATTRIBUTED_RE.search(text):
                     continue
+                op["text"] = self._compact_chat_entry_text(text)
                 explicit_denial = section == "status_changes" and bool(
                     EXPLICIT_PROJECT_DENIAL_RE.search(text)
                 )
@@ -381,6 +510,7 @@ class MemoryUpdater:
                     continue
                 if ASSISTANT_ATTRIBUTED_RE.search(text):
                     continue
+                op["text"] = self._compact_chat_entry_text(text)
                 entry_id = op.get("id")
                 entry = memory.entries.get(entry_id) if isinstance(entry_id, str) else None
                 if entry is not None and entry.section in disallowed_sections:
@@ -391,6 +521,25 @@ class MemoryUpdater:
             filtered.append(op)
 
         return self._cap_ops(filtered) if apply_cap else filtered
+
+    @staticmethod
+    def _compact_chat_entry_text(text: str, max_chars: int = 180) -> str:
+        text = WHITESPACE_RE.sub(" ", text).strip()
+        if len(text) <= max_chars:
+            return text
+        for pattern in SUBJECT_VALUE_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                focused = MemoryUpdater._snippet_around(
+                    text,
+                    match.start(),
+                    match.end(),
+                    max_chars=max_chars - 1,
+                )
+                if focused:
+                    return focused[:max_chars]
+        clipped = text[: max_chars - 1].rsplit(" ", 1)[0].rstrip(" ,;:-")
+        return clipped + "…"
 
     def _cap_ops(self, ops: list[dict]) -> list[dict]:
         limit = self.policy.max_ops_per_batch

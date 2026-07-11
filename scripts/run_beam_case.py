@@ -285,6 +285,9 @@ ANSWER REQUIREMENTS:
 - For latest/current values, use the latest active memory entry for that subject.
 - If a durable instruction requires dependency versions, list only dependencies
   whose versions are present in context; do not output unversioned dependencies.
+- When recommendations are constrained by a stored preference (for example,
+  lightweight/minimal tools), explicitly state how the answer follows that
+  preference and avoids conflicting alternatives.
 - For date or duration questions, identify the relevant dated events from context and calculate carefully.
 - Abstain only when no relevant memory entry or recent context contains the answer.
 - Only output the answer to the question without any explanation.
@@ -650,34 +653,46 @@ def build_answer_context(
         chronological = "(StructuredMemoryMiddleware was not used.)"
         working_tail = "(No structured working-context tail.)"
     else:
+        pinned_by_question_type = {
+            "instruction_following": {"preferences"},
+            "preference_following": {"preferences"},
+            "contradiction_resolution": {"status_changes"},
+            "summarization": {"preferences", "goal", "status_changes"},
+        }
+        budget_by_question_type = {
+            "instruction_following": min(structured_answer_tokens, 3500),
+            "contradiction_resolution": min(structured_answer_tokens, 3000),
+            "summarization": structured_answer_tokens,
+        }
+        effective_budget = budget_by_question_type.get(
+            question_type,
+            min(structured_answer_tokens, 2500),
+        )
         selected_entries = structured_middleware.memory_selector.select(
             memory=structured_middleware.memory,
             query=query,
-            max_tokens=structured_answer_tokens,
+            max_tokens=effective_budget,
             include_superseded=question_type == "contradiction_resolution",
+            pinned_sections=pinned_by_question_type.get(question_type, frozenset()),
         )
         conversation_memory = (
             structured_middleware.memory.render(
                 entries=selected_entries,
                 include_superseded=question_type == "contradiction_resolution",
-                max_tokens=structured_answer_tokens,
+                max_tokens=effective_budget,
             )
             or "(No relevant structured memory entries.)"
         )
-        chronological = (
-            structured_middleware.memory.render_chronological(
+        if question_type in {"summarization", "contradiction_resolution"}:
+            chronological = structured_middleware.memory.render_chronological(
                 entries=None if question_type == "summarization" else selected_entries,
-                max_tokens=(
-                    structured_answer_tokens // 2
-                    if question_type == "summarization"
-                    else structured_answer_tokens // 3
-                ),
+                max_tokens=effective_budget // 2,
                 # Identifier entries (versions, dates, paths) drown out the
                 # topical mention-order signal ordering questions need.
                 exclude_sections={"exact_values"},
-            )
-            or "(No chronological memory entries.)"
-        )
+            ) or "(No chronological memory entries.)"
+        else:
+            chronological = "(Chronology omitted for this question type.)"
         working_tail = render_message_tail(active_messages, max_active_context_chars)
 
     return (
@@ -715,6 +730,7 @@ def structured_memory_stats(memory: Memory | None) -> dict[str, Any]:
         "avg_active_entry_chars": round(total_chars / len(active_entries), 1)
         if active_entries
         else 0,
+        "total_active_entry_chars": total_chars,
         "long_active_entries_over_180_chars": sum(
             1 for entry in active_entries if len(entry.text) > 180
         ),

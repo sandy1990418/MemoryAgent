@@ -137,6 +137,8 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         # evictions once active entries exceed the threshold.
         self.compactor = compactor
         self.compact_min_active_entries = compact_min_active_entries
+        self._last_compaction_failure_active: int | None = None
+        self._compaction_retry_growth = 10
         # Semantic invariant check on updater output (defense-in-depth); pass
         # an explicit verifier to customize, or disable via a stub that always
         # passes. Default on: it only fires when the deterministic extraction
@@ -347,14 +349,22 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         )
         if active <= self.compact_min_active_entries:
             return
+        if (
+            self._last_compaction_failure_active is not None
+            and active < self._last_compaction_failure_active + self._compaction_retry_growth
+        ):
+            return
         try:
             applied, rejected = self.compactor.compact(self.memory)
         except UpdateFailed as exc:
+            self._last_compaction_failure_active = active
             logger.warning("Memory compaction failed; continuing uncompacted: %s", exc)
             return
         if rejected:
+            self._last_compaction_failure_active = active
             logger.warning("Memory compaction ops rejected; continuing uncompacted: %s", rejected)
         elif applied:
+            self._last_compaction_failure_active = None
             logger.info("Memory compaction applied %d ops", len(applied))
 
     async def abefore_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
