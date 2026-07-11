@@ -19,7 +19,7 @@ MONTH_NAMES = (
 # Bare dates ("March 15, 2024") are useless without their subject: at answer
 # time nobody can tell a deployment deadline from a sprint start. Date matches
 # therefore get a same-sentence context prefix; self-describing values
-# (versions, "150 commits", paths) do not need one.
+# (versions, measured values, paths) do not need one.
 EXACT_VALUE_DATE_PATTERNS = [
     re.compile(
         rf"\b(?:{MONTH_NAMES})\.?\s+\d{{1,2}},\s+\d{{4}}\s*-\s*"
@@ -45,7 +45,7 @@ EXACT_VALUE_PATTERNS = [
     re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|MB|GB|fps|%)\b", re.IGNORECASE),
     re.compile(
         r"\b\d+(?:\.\d+)?\s+"
-        r"(?:workers?|commits?|branches?|users?|failed login attempts?|attempts?)\b",
+        r"(?:workers?|branches?|users?|failed login attempts?|attempts?)\b",
         re.IGNORECASE,
     ),
     re.compile(r"\bport\s+\d{2,5}\b", re.IGNORECASE),
@@ -60,18 +60,14 @@ EXACT_VALUE_PATTERNS = [
 ]
 SUBJECT_VALUE_PATTERNS = [
     re.compile(
-        r"\bcommits?\b[^.!?\n]{0,100}\b(?:reached|total(?:ed)?|now at)\s+\d+\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
         r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*"
-        r"(?:calls(?:/day| per day)?|commits?|project cards?|cards?|columns?|"
+        r"(?:calls(?:/day| per day)?|project cards?|cards?|columns?|"
         r"features?|items?|days?|weeks?|attempts?|failed login attempts?)\b",
         re.IGNORECASE,
     ),
     re.compile(
         r"\b\d+(?:\.\d+)?\s*"
-        r"(?:calls/day|calls per day|commits?|project cards?|cards?|columns?|"
+        r"(?:calls/day|calls per day|project cards?|cards?|columns?|"
         r"features?|items?|days?|weeks?|attempts?|failed login attempts?)\b",
         re.IGNORECASE,
     ),
@@ -81,7 +77,7 @@ SUBJECT_VALUE_PATTERNS = [
 SUBJECT_VALUE_SECTION_RE = re.compile(
     r"\b(?:updated|changed|moved|new|now|latest|increased|decreased|reduced|"
     r"improved|completed|achieved|coverage|quota|deadline|count|total|cards?|"
-    r"columns?|commits?|calls?|latency|response time|rate limit|test)\b",
+    r"columns?|calls?|latency|response time|rate limit|test)\b",
     re.IGNORECASE,
 )
 STATUS_VALUE_RE = re.compile(

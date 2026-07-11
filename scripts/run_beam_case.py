@@ -47,6 +47,13 @@ from scripts.beam_models import (
     normalize_beam_profile,
 )
 from evaluation.beam.chat_case_adapter import BeamChatCaseAdapter
+from evaluation.beam.routing import RoutingMode, build_oracle_memory_context
+from memory_agent.structured.answer_context import (
+    AnswerContext,
+    AnswerContextBudget,
+    AnswerContextConfig,
+    build_answer_memory_context,
+)
 from memory_agent.models.config import ProductMemoryConfig, product_config_from_argv
 from memory_agent.structured.middleware import StructuredMemoryMiddleware
 from memory_agent.models.sections import sections_for_preset
@@ -638,7 +645,7 @@ def build_context(hits: list[Any], max_hit_chars: int) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def build_answer_context(
+def build_answer_context_result(
     structured_middleware: StructuredMemoryMiddleware | None,
     active_messages: list[AnyMessage],
     hits: list[Any],
@@ -646,56 +653,24 @@ def build_answer_context(
     max_active_context_chars: int,
     structured_answer_tokens: int,
     query: str = "",
-    question_type: str = "",
-) -> str:
+) -> AnswerContext:
     if structured_middleware is None:
+        selected_ids: tuple[str, ...] = ()
         conversation_memory = "(StructuredMemoryMiddleware was not used.)"
         chronological = "(StructuredMemoryMiddleware was not used.)"
         working_tail = "(No structured working-context tail.)"
     else:
-        pinned_by_question_type = {
-            "instruction_following": {"preferences"},
-            "preference_following": {"preferences"},
-            "contradiction_resolution": {"status_changes"},
-            "summarization": {"preferences", "goal", "status_changes"},
-        }
-        budget_by_question_type = {
-            "instruction_following": min(structured_answer_tokens, 3500),
-            "contradiction_resolution": min(structured_answer_tokens, 3000),
-            "summarization": structured_answer_tokens,
-        }
-        effective_budget = budget_by_question_type.get(
-            question_type,
-            min(structured_answer_tokens, 2500),
+        answer_context = build_answer_memory_context(
+            query=query, memory=structured_middleware.memory,
+            config=AnswerContextConfig(selector=structured_middleware.memory_selector),
+            budget=AnswerContextBudget(max_tokens=structured_answer_tokens),
         )
-        selected_entries = structured_middleware.memory_selector.select(
-            memory=structured_middleware.memory,
-            query=query,
-            max_tokens=effective_budget,
-            include_superseded=question_type == "contradiction_resolution",
-            pinned_sections=pinned_by_question_type.get(question_type, frozenset()),
-        )
-        conversation_memory = (
-            structured_middleware.memory.render(
-                entries=selected_entries,
-                include_superseded=question_type == "contradiction_resolution",
-                max_tokens=effective_budget,
-            )
-            or "(No relevant structured memory entries.)"
-        )
-        if question_type in {"summarization", "contradiction_resolution"}:
-            chronological = structured_middleware.memory.render_chronological(
-                entries=None if question_type == "summarization" else selected_entries,
-                max_tokens=effective_budget // 2,
-                # Identifier entries (versions, dates, paths) drown out the
-                # topical mention-order signal ordering questions need.
-                exclude_sections={"exact_values"},
-            ) or "(No chronological memory entries.)"
-        else:
-            chronological = "(Chronology omitted for this question type.)"
+        selected_ids = answer_context.selected_ids
+        conversation_memory = answer_context.rendered_context or "(No relevant structured memory entries.)"
+        chronological = "(Chronology is not part of production answer routing.)"
         working_tail = render_message_tail(active_messages, max_active_context_chars)
 
-    return (
+    return AnswerContext(selected_ids=selected_ids, rendered_context=(
         "# Conversation Memory\n"
         "Structured memory summary.\n"
         f"{conversation_memory}\n\n"
@@ -707,6 +682,45 @@ def build_answer_context(
         f"{working_tail}\n\n"
         "# Long-Term Memory\n"
         "Retrieved raw transcript snippets.\n"
+        f"{build_context(hits, max_hit_chars=max_hit_chars)}"
+    ))
+
+
+def build_answer_context(
+    structured_middleware: StructuredMemoryMiddleware | None,
+    active_messages: list[AnyMessage], hits: list[Any], max_hit_chars: int,
+    max_active_context_chars: int, structured_answer_tokens: int, query: str = "",
+) -> str:
+    """Compatibility prompt API backed by the typed production result."""
+    return build_answer_context_result(
+        structured_middleware, active_messages, hits, max_hit_chars,
+        max_active_context_chars, structured_answer_tokens, query,
+    ).rendered_context
+
+
+def build_oracle_answer_context(
+    structured_middleware: StructuredMemoryMiddleware | None, active_messages: list[AnyMessage],
+    hits: list[Any], max_hit_chars: int, max_active_context_chars: int,
+    structured_answer_tokens: int, *, query: str, question_type: str,
+) -> str:
+    """BEAM-metadata-aware diagnostic wrapper, deliberately outside production API."""
+    if structured_middleware is None:
+        return build_answer_context(
+            structured_middleware, active_messages, hits, max_hit_chars,
+            max_active_context_chars, structured_answer_tokens, query=query,
+        )
+    _, conversation_memory, chronological = build_oracle_memory_context(
+        query=query, question_type=question_type, memory=structured_middleware.memory,
+        selector=structured_middleware.memory_selector, max_tokens=structured_answer_tokens,
+    )
+    working_tail = render_message_tail(active_messages, max_active_context_chars)
+    return (
+        "# Conversation Memory\nStructured memory summary.\n"
+        f"{conversation_memory or '(No relevant structured memory entries.)'}\n\n"
+        "# Chronological Order\nEntries ordered by first mention, earliest first.\n"
+        f"{chronological or '(Chronology omitted for this question type.)'}\n\n"
+        "# Working Conversation Tail\nRecent messages not yet folded into memory.\n"
+        f"{working_tail}\n\n# Long-Term Memory\nRetrieved raw transcript snippets.\n"
         f"{build_context(hits, max_hit_chars=max_hit_chars)}"
     )
 
@@ -741,6 +755,32 @@ def judge_score(checks: list[dict[str, Any]]) -> float | None:
     if not checks:
         return None
     return sum(normalize_judge_score(check.get("score")) for check in checks) / len(checks)
+
+
+def apply_score_ownership(output: dict[str, Any], routing_mode: RoutingMode | str) -> None:
+    """Expose exactly one route-owned score and reject ambiguous serialization."""
+    mode = RoutingMode(routing_mode)
+    output["routing_mode"] = mode.value
+    overall = output["summary"]["overall"]
+    judge_value = overall.pop("judge_score", None)
+    score = judge_value if judge_value is not None else overall.get("heuristic_rubric_rate")
+    if mode is RoutingMode.PRODUCTION:
+        output["primary_score"] = score
+        output.pop("diagnostic_score", None)
+    else:
+        output["diagnostic_score"] = score
+        output.pop("primary_score", None)
+        for summary in output["summary"].values():
+            if isinstance(summary, dict):
+                summary.pop("judge_score", None)
+        for results in output["results"].values():
+            for result in results:
+                result["diagnostic_score"] = result.pop("llm_judge_score", None)
+
+    if mode is RoutingMode.PRODUCTION and "diagnostic_score" in output:
+        raise ValueError("production output cannot own diagnostic_score")
+    if mode is RoutingMode.ORACLE and ("primary_score" in output or "judge_score" in overall):
+        raise ValueError("oracle output cannot populate the production primary score shape")
 
 
 def target_response_position(response: str, target: str) -> int | None:
@@ -864,19 +904,11 @@ def default_evaluation_output_path(answers_path: Path) -> Path:
 def answer_question(
     llm: OpenAIClient,
     model: str,
-    topic: dict[str, Any],
-    question_type: str,
     question: str,
     context: str,
 ) -> str:
-    topic_text = json.dumps(topic, ensure_ascii=False)
-    prompt_context = (
-        f"Topic metadata:\n{topic_text}\n\n"
-        f"Question type: {question_type}\n\n"
-        f"Memory context:\n{context}"
-    )
     user = BEAM_RAG_ANSWER_TEMPLATE.format(
-        context=prompt_context,
+        context=f"Memory context:\n{context}",
         question=question,
     )
     return llm.complete(
@@ -1049,10 +1081,8 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             response = answer_question(
                 llm=llm,
                 model=args.answer_model,
-                topic=topic,
-                question_type=question_type,
                 question=question,
-                context=build_answer_context(
+                context=(build_oracle_answer_context if RoutingMode(args.routing_mode) is RoutingMode.ORACLE else build_answer_context)(
                     structured_middleware=structured_middleware,
                     active_messages=active_messages,
                     hits=hits,
@@ -1060,7 +1090,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                     max_active_context_chars=args.max_active_context_chars,
                     structured_answer_tokens=args.structured_answer_tokens,
                     query=question,
-                    question_type=question_type,
+                    **({"question_type": question_type} if RoutingMode(args.routing_mode) is RoutingMode.ORACLE else {}),
                 ),
             )
             rubric_checks = [rubric_hit(response, line) for line in item.get("rubric", [])]
@@ -1188,6 +1218,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             else "Heuristic only. BEAM-style LLM-as-judge is disabled by --no-judge."
         ),
     }
+    apply_score_ownership(output, args.routing_mode)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     answers_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1290,6 +1321,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap per selected question type for quick smoke tests.",
     )
     parser.add_argument("--skip-ingest", action="store_true")
+    parser.add_argument(
+        "--routing-mode",
+        choices=tuple(mode.value for mode in RoutingMode),
+        default=RoutingMode.PRODUCTION.value,
+        help="Production routing is primary; oracle preserves BEAM-aware diagnostics.",
+    )
     parser.add_argument("--answer-model", default=defaults["answer_model"])
     parser.add_argument("--structured-model", default=defaults["structured_model"])
     parser.add_argument(

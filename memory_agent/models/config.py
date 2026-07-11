@@ -113,6 +113,9 @@ class ProductMemoryConfig:
     sections: str = "chat"
     compaction_threshold: int = 30
     memory_model: str = "openai:gpt-5.4-nano"
+    answer_memory_token_budget: int = 600
+    update_memory_token_budget: int = 600
+    evicted_turn_token_budget: int = 600
 
     @classmethod
     def from_yaml_env(cls, path: str | Path = "configs/product.yaml") -> "ProductMemoryConfig":
@@ -140,6 +143,9 @@ class ProductMemoryConfig:
             sections=sections,
             compaction_threshold=compaction_threshold,
             memory_model=str(config_value(data, "memory_model", "MEMORY_MODEL", cls.memory_model)),
+            answer_memory_token_budget=int(config_value(data, "answer_memory_token_budget", "ANSWER_MEMORY_TOKEN_BUDGET", cls.answer_memory_token_budget)),
+            update_memory_token_budget=int(config_value(data, "update_memory_token_budget", "UPDATE_MEMORY_TOKEN_BUDGET", cls.update_memory_token_budget)),
+            evicted_turn_token_budget=int(config_value(data, "evicted_turn_token_budget", "EVICTED_TURN_TOKEN_BUDGET", cls.evicted_turn_token_budget)),
         )
 
 def product_config_from_argv(

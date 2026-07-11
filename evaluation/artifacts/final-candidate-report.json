@@ -1,0 +1,271 @@
+{
+  "baseline": {
+    "adversarial": {
+      "reason": "baseline metric was not reconstructable from production routing",
+      "status": "unavailable"
+    },
+    "compactor": {
+      "reason": "baseline metric was not reconstructable from production routing",
+      "status": "unavailable"
+    },
+    "holdout": {
+      "reason": "baseline metric was not reconstructable from production routing",
+      "status": "unavailable"
+    },
+    "injection": {
+      "reason": "baseline metric was not reconstructable from production routing",
+      "status": "unavailable"
+    },
+    "quality": {
+      "reason": "baseline metric was not reconstructable from production routing",
+      "status": "unavailable"
+    },
+    "routing": {
+      "reason": "baseline metric was not reconstructable from production routing",
+      "status": "unavailable"
+    },
+    "updater": {
+      "reason": "baseline metric was not reconstructable from production routing",
+      "status": "unavailable"
+    }
+  },
+  "candidate": {
+    "adversarial": {
+      "cases": [
+        {
+          "expected_ids": [
+            "D1"
+          ],
+          "id": "adv-dark-mode-unrelated-location",
+          "passed": true,
+          "selected_ids": [
+            "D1"
+          ]
+        },
+        {
+          "expected_ids": [
+            "D1"
+          ],
+          "id": "adv-latency-unrelated-preference",
+          "passed": true,
+          "selected_ids": [
+            "D1"
+          ]
+        },
+        {
+          "expected_ids": [
+            "D1"
+          ],
+          "id": "adv-dashboard-unrelated-auth",
+          "passed": true,
+          "selected_ids": [
+            "D1"
+          ]
+        },
+        {
+          "expected_ids": [
+            "D1"
+          ],
+          "id": "adv-tea-unrelated-latency",
+          "passed": true,
+          "selected_ids": [
+            "D1"
+          ]
+        }
+      ],
+      "evidence_kind": "executed-production-selector",
+      "execution_hash": "89621c6400061c324d4439597c1b9007f8c3dad6b87df741ebccb94bd549cf0c",
+      "pass_rate": 1.0,
+      "passes": 4,
+      "total": 4
+    },
+    "compactor": {
+      "reason": "compactor was not invoked by the deterministic online simulation",
+      "status": "unavailable"
+    },
+    "holdout": {
+      "adversarial_pass_rate": 1.0,
+      "fallback_uses": 1,
+      "fixture_content_hash": "3359c78462fb99e88b5ae7108656727cd9c0c66821c8e10a5793e0a65bf203cb",
+      "fixture_name": "frozen-holdout-update-selection-v1",
+      "missed_conflicts": 0,
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "selected_ids": [
+        "D1"
+      ],
+      "token_provenance": {
+        "kind": "estimate",
+        "policy": "characters_divided_by_four",
+        "provider": null
+      },
+      "unrelated_visible_entries": 0,
+      "visible_tokens": 10
+    },
+    "injection": {
+      "answer_calls": 0,
+      "average": 12.0,
+      "cumulative": 24,
+      "estimator_policy": "characters_divided_by_four",
+      "max": 12,
+      "mode": "token-only",
+      "p50": 12,
+      "p95": 12,
+      "source": "deterministic-online-simulation",
+      "zero_injection_turns": 0
+    },
+    "quality": {
+      "active_conflict": {
+        "reason": "not measured by offline artifact generation",
+        "status": "unavailable"
+      },
+      "canonical": {
+        "reason": "not measured by offline artifact generation",
+        "status": "unavailable"
+      },
+      "duplicate": {
+        "reason": "not measured by offline artifact generation",
+        "status": "unavailable"
+      },
+      "future_usefulness": {
+        "reason": "not measured by offline artifact generation",
+        "status": "unavailable"
+      },
+      "incomplete": {
+        "reason": "not measured by offline artifact generation",
+        "status": "unavailable"
+      },
+      "raw_request": {
+        "reason": "not measured by offline artifact generation",
+        "status": "unavailable"
+      },
+      "section_mismatch": {
+        "reason": "not measured by offline artifact generation",
+        "status": "unavailable"
+      },
+      "stale": {
+        "reason": "not measured by offline artifact generation",
+        "status": "unavailable"
+      }
+    },
+    "routing": {
+      "reason": "paired paid-live production/oracle evaluation was not run because OPENAI_API_KEY was unavailable to this deterministic artifact generator",
+      "status": "unavailable"
+    },
+    "updater": {
+      "development": {
+        "adversarial_pass_rate": 1.0,
+        "fallback_uses": 1,
+        "fixture_content_hash": "b4c6a98c50e762381190daba465d62c43adfb3ee1eeca35a1a345ce2e4affe44",
+        "fixture_name": "frozen-development-update-selection-v1",
+        "missed_conflicts": 0,
+        "passed": true,
+        "precision": 1.0,
+        "recall": 1.0,
+        "selected_ids": [
+          "D1"
+        ],
+        "token_provenance": {
+          "kind": "estimate",
+          "policy": "characters_divided_by_four",
+          "provider": null
+        },
+        "unrelated_visible_entries": 0,
+        "visible_tokens": 9
+      },
+      "holdout": {
+        "adversarial_pass_rate": 1.0,
+        "fallback_uses": 1,
+        "fixture_content_hash": "3359c78462fb99e88b5ae7108656727cd9c0c66821c8e10a5793e0a65bf203cb",
+        "fixture_name": "frozen-holdout-update-selection-v1",
+        "missed_conflicts": 0,
+        "passed": true,
+        "precision": 1.0,
+        "recall": 1.0,
+        "selected_ids": [
+          "D1"
+        ],
+        "token_provenance": {
+          "kind": "estimate",
+          "policy": "characters_divided_by_four",
+          "provider": null
+        },
+        "unrelated_visible_entries": 0,
+        "visible_tokens": 10
+      }
+    }
+  },
+  "failures": {
+    "answer_selection": [],
+    "compactor": [],
+    "memory_write": [],
+    "routing": [],
+    "update_selection": []
+  },
+  "improved_cases": [],
+  "manifest_content_hash": "807571ae337b34e06be15163d201b037d0579079a44bc58312e39c325ab57e8d",
+  "offline_ingestion": {
+    "reason": "offline ingestion was not executed for this artifact",
+    "status": "unavailable"
+  },
+  "regressed_cases": [],
+  "report_content_hash": "b9077a372d5a47675e63fb3b99887d3229b15f4b60a462026165fe1be54695ad",
+  "schema_version": "production-memory-report/v1",
+  "tokens": {
+    "estimates": {
+      "provenance": "characters_divided_by_four estimator",
+      "update_selection": {
+        "development": {
+          "adversarial_pass_rate": 1.0,
+          "fallback_uses": 1,
+          "fixture_content_hash": "b4c6a98c50e762381190daba465d62c43adfb3ee1eeca35a1a345ce2e4affe44",
+          "fixture_name": "frozen-development-update-selection-v1",
+          "missed_conflicts": 0,
+          "passed": true,
+          "precision": 1.0,
+          "recall": 1.0,
+          "selected_ids": [
+            "D1"
+          ],
+          "token_provenance": {
+            "kind": "estimate",
+            "policy": "characters_divided_by_four",
+            "provider": null
+          },
+          "unrelated_visible_entries": 0,
+          "visible_tokens": 9
+        },
+        "holdout": {
+          "adversarial_pass_rate": 1.0,
+          "fallback_uses": 1,
+          "fixture_content_hash": "3359c78462fb99e88b5ae7108656727cd9c0c66821c8e10a5793e0a65bf203cb",
+          "fixture_name": "frozen-holdout-update-selection-v1",
+          "missed_conflicts": 0,
+          "passed": true,
+          "precision": 1.0,
+          "recall": 1.0,
+          "selected_ids": [
+            "D1"
+          ],
+          "token_provenance": {
+            "kind": "estimate",
+            "policy": "characters_divided_by_four",
+            "provider": null
+          },
+          "unrelated_visible_entries": 0,
+          "visible_tokens": 10
+        }
+      }
+    },
+    "provider_usage": {
+      "reason": "paired paid-live production/oracle evaluation was not run because OPENAI_API_KEY was unavailable to this deterministic artifact generator",
+      "status": "unavailable"
+    }
+  },
+  "validation": {
+    "paid_live": false,
+    "reason": "paired paid-live production/oracle evaluation was not run because OPENAI_API_KEY was unavailable to this deterministic artifact generator",
+    "status": "validation_gap"
+  }
+}

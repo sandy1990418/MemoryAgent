@@ -58,6 +58,7 @@ class BeamConfig:
     abilities: tuple[str, ...] = DEFAULT_BEAM_QUESTION_TYPES
     judge: bool = True
     max_questions_per_type: int | None = None
+    routing_mode: str = "production"
     answer_model: str = "gpt-5.4-nano"
     memory_model: str = "gpt-5.4-nano"
     judge_model: str = "gpt-5.4-nano"

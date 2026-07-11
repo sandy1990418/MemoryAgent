@@ -97,7 +97,13 @@ def build_chat_memory(
     policy = get_memory_policy(product.memory_profile)
     sections = sections_for_preset(product.sections)
     memory = Memory(sections=sections, policy=policy)
-    updater = MemoryUpdater(llm=updater_llm, sections=sections, policy=policy)
+    updater = MemoryUpdater(
+        llm=updater_llm,
+        sections=sections,
+        policy=policy,
+        update_memory_token_budget=product.update_memory_token_budget,
+        evicted_turn_token_budget=product.evicted_turn_token_budget,
+    )
     compactor = (
         MemoryCompactor(llm=compactor_llm, sections=sections, policy=policy)
         if compact

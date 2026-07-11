@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections import Counter
+from dataclasses import dataclass
 from typing import Callable
 
 from memory_agent.clients.llm import LLMClient
@@ -17,6 +18,8 @@ from memory_agent.models.policy import (
 )
 from memory_agent.models.sections import SectionConfig
 from memory_agent.models.transcript import Turn
+from memory_agent.models.memory import SubjectNormalizer
+from memory_agent.profiles.chat.subject_normalizer import ChatSubjectNormalizer
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.heuristics import (
     ASSISTANT_ATTRIBUTED_RE,
@@ -39,6 +42,7 @@ from memory_agent.structured.heuristics import (
 )
 from memory_agent.structured.ops import UpdateFailed, parse_memory_ops
 from memory_agent.structured.prompts import build_updater_prompt
+from memory_agent.structured.update_selector import UpdateMemorySelector
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,20 @@ def _default_token_estimator(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+@dataclass(frozen=True)
+class UpdateTokenReport:
+    estimator_policy: str
+    calls: int
+    system_tokens: int
+    visible_memory_tokens: int
+    evicted_turn_tokens: int
+    output_tokens: int
+
+    @property
+    def total_tokens(self) -> int:
+        return self.system_tokens + self.visible_memory_tokens + self.evicted_turn_tokens + self.output_tokens
+
+
 class MemoryUpdater:
     """Asks an LLM to translate evicted turns into ADD/UPDATE/SUPERSEDE ops."""
 
@@ -76,7 +94,11 @@ class MemoryUpdater:
         token_estimator: Callable[[str], int] | None = None,
         max_retries: int = 1,
         update_context_max_entries: int = 40,
+        update_memory_token_budget: int | None = None,
+        evicted_turn_token_budget: int | None = None,
         policy: MemoryPolicy | None = None,
+        subject_normalizer: SubjectNormalizer | None = None,
+        identity_confidence_threshold: float = 0.85,
     ) -> None:
         self.llm = llm
         self.sections = sections
@@ -85,18 +107,58 @@ class MemoryUpdater:
         self.token_estimator = token_estimator or _default_token_estimator
         self.max_retries = max(0, max_retries)
         self.update_context_max_entries = update_context_max_entries
+        self.update_memory_token_budget = (
+            max_memory_tokens if update_memory_token_budget is None else update_memory_token_budget
+        )
+        self.evicted_turn_token_budget = evicted_turn_token_budget
+        self.token_reports: list[UpdateTokenReport] = []
         # Direct construction historically behaved like the richer agent
         # updater. Product builders pass the practical policy explicitly.
         self.policy = policy or AGENT_POLICY
+        self.subject_normalizer = subject_normalizer or ChatSubjectNormalizer()
+        self.identity_confidence_threshold = identity_confidence_threshold
         # Fail fast on profile/section mismatches instead of silently running
         # with retention behavior the caller did not intend.
         validate_policy_sections(self.policy, sections)
         self._section_key_by_prefix = {section.prefix.lower(): section.key for section in sections}
 
+    def update_token_usage(self) -> dict[str, int | float | str]:
+        """Return estimator-only cumulative and average updater attribution."""
+        calls = sum(report.calls for report in self.token_reports)
+        totals = {
+            name: sum(getattr(report, name) for report in self.token_reports)
+            for name in (
+                "system_tokens", "visible_memory_tokens", "evicted_turn_tokens", "output_tokens"
+            )
+        }
+        total_tokens = sum(totals.values())
+        return {
+            "source": "estimator",
+            "estimator_policy": "characters_divided_by_four",
+            "calls": calls,
+            **totals,
+            "total_tokens": total_tokens,
+            "average_tokens_per_call": total_tokens / calls if calls else 0.0,
+        }
+
     # Sections whose entries are always shown to the updater regardless of
     # lexical overlap: they are few, and the dedup/supersede rules depend on
     # the LLM seeing them.
     _ALWAYS_CONTEXT_SECTIONS = frozenset({"preferences", "goal", "status_changes"})
+
+    def _turns_within_budget(self, turns: list[Turn]) -> list[Turn]:
+        if self.evicted_turn_token_budget is None:
+            return turns
+        selected: list[Turn] = []
+        used = 0
+        # Keep the newest complete turns; never slice turn text mid-content.
+        for turn in reversed(turns):
+            tokens = self.token_estimator(turn.content)
+            if used + tokens > self.evicted_turn_token_budget:
+                continue
+            selected.append(turn)
+            used += tokens
+        return list(reversed(selected))
 
     def _select_update_context_entries(self, memory: Memory, evicted_turns: list[Turn]) -> list:
         """Pick the memory entries most relevant to the evicted turns.
@@ -132,17 +194,23 @@ class MemoryUpdater:
         budget = max(0, self.update_context_max_entries - len(always))
         return [*always, *[entry for _score, entry in scored[:budget]]]
 
-    def _build_prompt(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[str, list[dict]]:
-        if len(memory.entries) <= self.update_context_max_entries:
-            context_entries = None  # small memory: render everything, as before
-        else:
-            context_entries = self._select_update_context_entries(memory, evicted_turns)
-
+    def _build_prompt(
+        self,
+        memory: Memory,
+        evicted_turns: list[Turn],
+        visible_entries: list | tuple | None = None,
+    ) -> tuple[str, list[dict]]:
+        if visible_entries is None:
+            # Preserve the direct helper's historical diagnostic behavior;
+            # production ``update`` always supplies its explicit visible set.
+            visible_entries = (
+                tuple(memory.entries.values())
+                if len(memory.entries) <= self.update_context_max_entries
+                else tuple(self._select_update_context_entries(memory, evicted_turns))
+            )
         current_memory = memory.render(
             include_superseded=True,
-            max_tokens=self.max_memory_tokens,
-            token_estimator=self.token_estimator,
-            entries=context_entries,
+            entries=visible_entries,
         ) or "(No memory entries yet.)"
 
         return build_updater_prompt(
@@ -172,11 +240,41 @@ class MemoryUpdater:
         ):
             consolidated = [
                 *self._consolidate_near_duplicates(memory),
-                *self._consolidate_latest_subject_values(memory),
+                *self._consolidate_latest_subject_values(
+                    memory, self.subject_normalizer, self.identity_confidence_threshold
+                ),
             ]
             return det_applied + consolidated, []
 
-        system, messages = self._build_prompt(memory, evicted_turns)
+        prompt_turns = self._turns_within_budget(evicted_turns)
+        selection = UpdateMemorySelector(
+            memory, self.token_estimator, self.subject_normalizer,
+            self.identity_confidence_threshold,
+        ).select_for_update(
+            prompt_turns, self.update_memory_token_budget
+        )
+        # Migration-on-touch is an explicit atomic operation over selected legacy
+        # entries only. Normalization never mutates live entries during discovery.
+        migration_ops = []
+        for entry in selection.entries:
+            if entry.subject_identity is not None and entry.value is not None:
+                continue
+            normalized = self.subject_normalizer.normalize(entry.text)
+            if normalized is None or normalized[0].confidence < self.identity_confidence_threshold:
+                continue
+            migration_ops.append({
+                "op": "UPDATE", "id": entry.id, "text": entry.text,
+                "provenance": list(entry.provenance),
+                "subject_identity": normalized[0], "value": normalized[1],
+            })
+        migrated_applied: list[dict] = []
+        if migration_ops:
+            migrated_applied, migration_rejected = memory.apply_ops_atomically(migration_ops)
+            if migration_rejected:
+                migrated_applied = []
+        visible_entries = [memory.entries[entry.id] for entry in selection.entries]
+        visible_ids = {entry.id for entry in visible_entries}
+        system, messages = self._build_prompt(memory, prompt_turns, visible_entries)
 
         last_rejected: list[dict] = []
         for attempt in range(self.max_retries + 1):
@@ -189,6 +287,35 @@ class MemoryUpdater:
             if ops is None:
                 raise UpdateFailed(f"Could not parse a JSON ops array from LLM response: {response!r}")
             ops = self._normalize_ops(ops, memory)
+            hidden_id_rejections = [
+                {"op": op, "reason": "UPDATE/SUPERSEDE id was not visible to updater"}
+                for op in ops
+                if isinstance(op, dict)
+                and op.get("op") in {"UPDATE", "SUPERSEDE"}
+                and isinstance(op.get("id"), str)
+                and op.get("id") in memory.entries
+                and op.get("id") not in visible_ids
+            ]
+            prompt_text = system + "\n" + "\n".join(
+                str(message.get("content", "")) for message in messages
+            )
+            visible_text = memory.render(include_superseded=True, entries=visible_entries)
+            turns_text = "\n".join(turn.content for turn in prompt_turns)
+            self.token_reports.append(UpdateTokenReport(
+                estimator_policy="characters_divided_by_four",
+                calls=1,
+                system_tokens=max(0, self.token_estimator(prompt_text) - self.token_estimator(visible_text) - self.token_estimator(turns_text)),
+                visible_memory_tokens=self.token_estimator(visible_text) if visible_text else 0,
+                evicted_turn_tokens=self.token_estimator(turns_text) if turns_text else 0,
+                output_tokens=self.token_estimator(response) if response else 0,
+            ))
+            if hidden_id_rejections:
+                applied, rejected = [], hidden_id_rejections
+                last_rejected = rejected
+                if attempt < self.max_retries:
+                    messages = self._retry_messages(messages, ops, rejected)
+                    continue
+                return det_applied, rejected
             ops = self._drop_duplicate_deterministic_adds(ops, memory)
             _debug_ops("llm before filter", ops)
             ops = self._apply_policy_filter(ops, memory, evicted_turns)
@@ -199,9 +326,11 @@ class MemoryUpdater:
             if not ops:
                 consolidated = [
                     *self._consolidate_near_duplicates(memory),
-                    *self._consolidate_latest_subject_values(memory),
+                    *self._consolidate_latest_subject_values(
+                        memory, self.subject_normalizer, self.identity_confidence_threshold
+                    ),
                 ]
-                return det_applied + consolidated, []
+                return det_applied + migrated_applied + consolidated, []
 
             provenance_rejections = self._validate_provenance(ops, evicted_turns)
             if provenance_rejections:
@@ -212,9 +341,11 @@ class MemoryUpdater:
             if not rejected:
                 consolidated = [
                     *self._consolidate_near_duplicates(memory),
-                    *self._consolidate_latest_subject_values(memory),
+                    *self._consolidate_latest_subject_values(
+                        memory, self.subject_normalizer, self.identity_confidence_threshold
+                    ),
                 ]
-                return det_applied + applied + consolidated, []
+                return det_applied + migrated_applied + applied + consolidated, []
 
             last_rejected = rejected
             if attempt < self.max_retries:
@@ -286,28 +417,33 @@ class MemoryUpdater:
         return applied if not rejected else []
 
     @staticmethod
-    def _consolidate_latest_subject_values(memory: Memory) -> list[dict]:
-        """Keep one active latest value for common metric subjects."""
-        subject_patterns = (
-            re.compile(r"\bcommits?\b", re.IGNORECASE),
-            re.compile(
-                r"\bdashboard\b.{0,80}\b(?:response time|latency|ms)\b|"
-                r"\b(?:response time|latency)\b.{0,80}\bdashboard\b",
-                re.IGNORECASE,
-            ),
-            re.compile(r"\b(?:auth|test)\b.{0,60}\bcoverage\b", re.IGNORECASE),
-        )
+    def _consolidate_latest_subject_values(
+        memory: Memory,
+        normalizer: SubjectNormalizer | None = None,
+        confidence_threshold: float = 0.85,
+    ) -> list[dict]:
+        """Keep the latest value only for confidently identical typed subjects."""
+        normalizer = normalizer or ChatSubjectNormalizer()
         ops: list[dict] = []
-        already_dropped: set[str] = set()
-        for pattern in subject_patterns:
-            matches = [
-                entry
-                for entry in memory.entries.values()
-                if entry.status == "active"
-                and entry.id not in already_dropped
-                and entry.section in {"facts", "status_changes"}
-                and pattern.search(entry.text)
-            ]
+        groups: dict[tuple[str, str, str, str | None, str | None], list] = {}
+        for entry in memory.entries.values():
+            if entry.status != "active" or entry.section not in {
+                "facts", "goal", "status_changes", "preferences"
+            }:
+                continue
+            if entry.subject_identity is None or entry.value is None:
+                normalized = normalizer.normalize(entry.text)
+                if normalized is None or normalized[0].confidence < confidence_threshold:
+                    continue
+                # Legacy entries are migrated only by the update selector's
+                # explicit migration-on-touch operation.
+                continue
+            identity, value = entry.subject_identity, entry.value
+            if identity.confidence < confidence_threshold:
+                continue
+            key = (identity.namespace, identity.entity, identity.attribute, identity.qualifier, value.unit)
+            groups.setdefault(key, []).append(entry)
+        for matches in groups.values():
             if len(matches) < 2:
                 continue
             keep = max(matches, key=lambda entry: (max(entry.provenance or [0]), entry.id))
@@ -317,11 +453,12 @@ class MemoryUpdater:
                 "id": keep.id,
                 "text": keep.text,
                 "provenance": provenance,
+                "subject_identity": keep.subject_identity,
+                "value": keep.value,
             })
             for entry in matches:
                 if entry.id == keep.id:
                     continue
-                already_dropped.add(entry.id)
                 ops.append({
                     "op": "SUPERSEDE",
                     "id": entry.id,
@@ -421,7 +558,8 @@ class MemoryUpdater:
                 sentence = WHITESPACE_RE.sub(" ", sentence).strip()
                 if not sentence or not PROJECT_IMPLEMENTATION_STATE_RE.search(sentence):
                     continue
-                text = f"User project state: {sentence[:155].rstrip()}"
+                state = "Completed state" if re.search(r"\b(?:completed|implemented|fixed|finished|done)\b", sentence, re.I) else "Ongoing state"
+                text = f"{state}: {sentence}"
                 if self._has_seen_text(text, seen):
                     continue
                 seen.add(self._text_key(text))
@@ -452,7 +590,7 @@ class MemoryUpdater:
             sentence = re.split(r"(?<=[.!?])\s+|\n", prose, maxsplit=1)[0].strip()
             if not sentence:
                 continue
-            text = f"User instruction: {sentence[:240].rstrip()}"
+            text = f"Stable preference: {sentence}"
             if self._has_seen_text(text, seen):
                 continue
             seen.add(self._text_key(text))
@@ -498,7 +636,10 @@ class MemoryUpdater:
                     continue
                 if ASSISTANT_ATTRIBUTED_RE.search(text):
                     continue
-                op["text"] = self._compact_chat_entry_text(text)
+                canonical = self._canonical_chat_entry_text(text, section)
+                if canonical is None:
+                    continue
+                op["text"] = canonical
                 explicit_denial = section == "status_changes" and bool(
                     EXPLICIT_PROJECT_DENIAL_RE.search(text)
                 )
@@ -510,9 +651,12 @@ class MemoryUpdater:
                     continue
                 if ASSISTANT_ATTRIBUTED_RE.search(text):
                     continue
-                op["text"] = self._compact_chat_entry_text(text)
                 entry_id = op.get("id")
                 entry = memory.entries.get(entry_id) if isinstance(entry_id, str) else None
+                canonical = self._canonical_chat_entry_text(text, entry.section if entry else None)
+                if canonical is None:
+                    continue
+                op["text"] = canonical
                 if entry is not None and entry.section in disallowed_sections:
                     continue
                 if ordinary_question:
@@ -523,23 +667,24 @@ class MemoryUpdater:
         return self._cap_ops(filtered) if apply_cap else filtered
 
     @staticmethod
-    def _compact_chat_entry_text(text: str, max_chars: int = 180) -> str:
+    def _canonical_chat_entry_text(text: str, section: str | None) -> str | None:
         text = WHITESPACE_RE.sub(" ", text).strip()
-        if len(text) <= max_chars:
+        if not text or text.endswith(("…", "...", ":", ",", ";", "-")):
+            return None
+        # Quarantine oversized model prose instead of creating a sliced fragment.
+        if len(text) > 500:
+            return None
+        raw = re.sub(r"^(?:the\s+)?user\s+(?:asked|requested|wants?)\s+(?:me\s+)?(?:to\s+)?", "", text, flags=re.I)
+        if raw != text:
+            text = raw.strip()
+        if text.startswith(("Ongoing state:", "Completed state:", "Goal:", "Constraint:", "Stable preference:", "User stated:")):
             return text
-        for pattern in SUBJECT_VALUE_PATTERNS:
-            match = pattern.search(text)
-            if match:
-                focused = MemoryUpdater._snippet_around(
-                    text,
-                    match.start(),
-                    match.end(),
-                    max_chars=max_chars - 1,
-                )
-                if focused:
-                    return focused[:max_chars]
-        clipped = text[: max_chars - 1].rsplit(" ", 1)[0].rstrip(" ,;:-")
-        return clipped + "…"
+        prefix = {
+            "goal": "Goal",
+            "preferences": "Stable preference",
+            "status_changes": "Ongoing state",
+        }.get(section)
+        return f"{prefix}: {text}" if prefix else text
 
     def _cap_ops(self, ops: list[dict]) -> list[dict]:
         limit = self.policy.max_ops_per_batch
@@ -633,7 +778,9 @@ class MemoryUpdater:
         generated: list[dict] = []
 
         for turn in evicted_turns:
-            if turn.role not in {"user", "assistant"}:
+            # Assistant proposals are not user-owned state. Without an explicit
+            # acceptance event, deterministic extraction must remain user-only.
+            if turn.role != "user":
                 continue
             snippets = self._extract_subject_value_snippets(turn.content)
             per_turn = 0
@@ -843,15 +990,7 @@ class MemoryUpdater:
         snippet = prose[left:right].strip()
 
         if len(snippet) > max_chars:
-            window_left = max(left, match_start - max_chars // 2)
-            window_right = min(len(prose), match_end + max_chars // 2)
-            snippet = prose[window_left:window_right].strip()
-            first_space = snippet.find(" ")
-            last_space = snippet.rfind(" ")
-            if first_space > 0:
-                snippet = snippet[first_space + 1 :]
-            if last_space > 0:
-                snippet = snippet[:last_space]
+            return ""
 
         return MemoryUpdater._clean_subject_value_snippet(snippet)
 
@@ -935,20 +1074,8 @@ class MemoryUpdater:
         snippet = snippet.rstrip(" ->")
         if not snippet:
             return None
-        if len(snippet) > 170:
-            cue = cue_re.search(snippet)
-            if cue is None:
-                snippet = snippet[:167].rstrip() + "..."
-            else:
-                # Center the truncation window on the cue so the negation or
-                # correction phrase (and its nearby subject) always survives;
-                # a head-anchored cut can drop a cue sitting late in a long
-                # run-on sentence.
-                window_start = max(0, cue.start() - 60)
-                window_end = min(len(snippet), cue.end() + 110)
-                head = "..." if window_start > 0 else ""
-                tail = "..." if window_end < len(snippet) else ""
-                snippet = head + snippet[window_start:window_end].strip() + tail
+        if len(snippet) > 500:
+            return None
         return snippet
 
     @staticmethod

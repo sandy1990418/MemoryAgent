@@ -183,7 +183,7 @@ def test_chat_profile_skips_updater_llm_for_non_durable_batch():
     assert calls == []
 
 
-def test_chat_profile_bounds_llm_entry_text():
+def test_chat_profile_quarantines_oversized_llm_entry_instead_of_slicing():
     policy = get_memory_policy("chat")
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda system, messages: json.dumps([{
@@ -197,18 +197,18 @@ def test_chat_profile_bounds_llm_entry_text():
     )
     memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
     updater.update(memory, [Turn(id=1, role="user", content="My project uses Flask.")])
-    assert len(memory.entries["F1"].text) <= 200
+    assert memory.entries == {}
 
 
-def test_chat_entry_compaction_preserves_late_subject_value():
+def test_chat_entry_validation_does_not_slice_long_subject_value():
     text = (
         "User stated: trying to improve authentication and authorization with many "
         "security details and deployment constraints while the repository main branch "
         "has now reached 165 commits and requires a final review before launch."
     )
-    compact = MemoryUpdater._compact_chat_entry_text(text, max_chars=120)
-    assert len(compact) <= 120
-    assert "165 commits" in compact
+    canonical = MemoryUpdater._canonical_chat_entry_text(text, "facts")
+    assert canonical == text
+    assert "165 commits" in canonical
 
 
 def test_chat_profile_locally_consolidates_near_duplicate_facts():
@@ -226,21 +226,70 @@ def test_chat_profile_locally_consolidates_near_duplicate_facts():
     assert sorted(active[0].provenance) == [1, 2]
 
 
-def test_chat_profile_keeps_only_latest_commit_total_active():
+def test_chat_profile_does_not_mutate_untouched_legacy_subject_values():
     policy = get_memory_policy("chat")
     memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
     memory.apply_ops([
-        {"op":"ADD","section":"facts","text":"Repository had 150 commits.","provenance":[1]},
-        {"op":"ADD","section":"facts","text":"Main branch has now reached 165 commits.","provenance":[2]},
+        {"op":"ADD","section":"facts","text":"The batch worker queue depth is 150 items.","provenance":[1]},
+        {"op":"ADD","section":"facts","text":"The batch worker queue depth is 165 items.","provenance":[2]},
     ])
     applied = MemoryUpdater._consolidate_latest_subject_values(memory)
-    assert applied
+    assert applied == []
     active = [entry for entry in memory.entries.values() if entry.status == "active"]
-    assert len(active) == 1
-    assert "165 commits" in active[0].text
+    assert len(active) == 2
+    assert all(entry.subject_identity is None for entry in active)
 
 
-def test_chat_profile_keeps_updated_metric_as_fact_not_status_fragment():
+def test_latest_value_consolidation_keeps_distinct_latency_subjects():
+    policy = get_memory_policy("chat")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    memory.apply_ops([
+        {"op": "ADD", "section": "facts", "text": "The search API latency is 120 ms.", "provenance": [1]},
+        {"op": "ADD", "section": "facts", "text": "The billing API latency is 80 ms.", "provenance": [2]},
+    ])
+
+    assert MemoryUpdater._consolidate_latest_subject_values(memory) == []
+    assert len([entry for entry in memory.entries.values() if entry.status == "active"]) == 2
+
+
+def test_latest_value_consolidation_keeps_conditional_preferences_separate():
+    from memory_agent.models.memory import MemoryValue, SubjectIdentity
+
+    policy = get_memory_policy("chat")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    memory.apply_ops([
+        {
+            "op": "ADD", "section": "preferences", "text": "Use 2 workers when offline.", "provenance": [1],
+            "subject_identity": SubjectIdentity("chat", "worker count", "preference", "when offline"),
+            "value": MemoryValue("2", "workers"),
+        },
+        {
+            "op": "ADD", "section": "preferences", "text": "Use 8 workers when online.", "provenance": [2],
+            "subject_identity": SubjectIdentity("chat", "worker count", "preference", "when online"),
+            "value": MemoryValue("8", "workers"),
+        },
+    ])
+
+    assert MemoryUpdater._consolidate_latest_subject_values(memory) == []
+    assert len([entry for entry in memory.entries.values() if entry.status == "active"]) == 2
+
+
+def test_low_confidence_identity_never_mutates_latest_value():
+    from memory_agent.models.memory import MemoryValue, SubjectIdentity
+
+    policy = get_memory_policy("chat")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    for turn_id, value in ((1, "2"), (2, "8")):
+        memory.apply_ops([{
+            "op": "ADD", "section": "facts", "text": f"Possible pool size {value}.", "provenance": [turn_id],
+            "subject_identity": SubjectIdentity("chat", "pool", "size", confidence=0.4),
+            "value": MemoryValue(value, "workers"),
+        }])
+
+    assert MemoryUpdater._consolidate_latest_subject_values(memory, confidence_threshold=0.85) == []
+
+
+def test_chat_profile_does_not_require_domain_specific_count_extraction():
     policy = get_memory_policy("chat")
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda system, messages: '[{"op":"NOOP"}]'),
@@ -248,9 +297,8 @@ def test_chat_profile_keeps_updated_metric_as_fact_not_status_fragment():
         policy=policy,
     )
     memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
-    updater.update(memory, [Turn(id=1, role="user", content="The main branch has now reached 165 commits.")])
-    assert any(entry.section == "facts" and "165 commits" in entry.text for entry in memory.entries.values())
-    assert not any(entry.section == "status_changes" for entry in memory.entries.values())
+    updater.update(memory, [Turn(id=1, role="user", content="The service worker count updated to 12 workers.")])
+    assert memory.entries == {}
 
 
 def test_chat_profile_deterministically_keeps_implementation_state():
@@ -330,7 +378,7 @@ def test_practical_profile_keeps_subject_bound_latest_metric_without_exact_inven
     assert all(entry.section != "exact_values" for entry in memory.entries.values())
 
 
-def test_practical_profile_keeps_subject_bound_commit_total():
+def test_practical_profile_does_not_require_domain_specific_count_extraction():
     policy = get_memory_policy("practical")
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
@@ -346,16 +394,16 @@ def test_practical_profile_keeps_subject_bound_commit_total():
                 id=1,
                 role="user",
                 content=(
-                    "My repository has seen commits merged into the main branch, "
-                    "which has now reached 165, and I want to review security."
+                        "My service worker count updated to 12 workers, "
+                        "and I want to review security."
                 ),
             )
         ],
     )
 
     assert rejected == []
-    assert applied
-    assert any("165" in entry.text for entry in memory.entries.values())
+    assert applied == []
+    assert memory.entries == {}
 
 
 def test_practical_profile_keeps_explicit_project_denial_in_question():

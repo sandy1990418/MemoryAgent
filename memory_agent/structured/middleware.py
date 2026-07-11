@@ -34,6 +34,11 @@ from memory_agent.models.transcript import Turn
 from memory_agent.models.policy import MemoryPolicy
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
+from memory_agent.structured.answer_context import (
+    AnswerContextBudget,
+    AnswerContextConfig,
+    build_answer_memory_context,
+)
 from memory_agent.structured.transcript import Transcript
 from memory_agent.structured.compactor import MemoryCompactor
 from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
@@ -348,11 +353,13 @@ class StructuredMemoryMiddleware(AgentMiddleware):
             entry.status == "active" for entry in self.memory.entries.values()
         )
         if active <= self.compact_min_active_entries:
+            self.compactor.record_skip("below_threshold")
             return
         if (
             self._last_compaction_failure_active is not None
             and active < self._last_compaction_failure_active + self._compaction_retry_growth
         ):
+            self.compactor.record_skip("circuit_breaker")
             return
         try:
             applied, rejected = self.compactor.compact(self.memory)
@@ -387,12 +394,13 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         entries the selector guarantees.
         """
         query = self._query_from_messages(list(request.messages))
-        selected_entries = self.memory_selector.select(
-            memory=self.memory,
+        answer_context = build_answer_memory_context(
             query=query,
-            max_tokens=self.max_memory_tokens,
+            memory=self.memory,
+            config=AnswerContextConfig(selector=self.memory_selector),
+            budget=AnswerContextBudget(max_tokens=self.max_memory_tokens),
         )
-        rendered = self.memory.render(entries=selected_entries)
+        rendered = answer_context.rendered_context
         if rendered:
             new_prompt = (request.system_prompt or "") + "\n\n# Conversation Memory\n" + rendered
             if hasattr(request, "override"):

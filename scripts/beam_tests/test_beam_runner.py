@@ -9,10 +9,11 @@ from memory_agent.models.sections import CHAT_SECTIONS
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
 from scripts.run_beam_case import (
+    apply_score_ownership,
     answer_question,
     beam_answers_from_results,
     beam_evaluation_from_results,
-    build_answer_context,
+    build_oracle_answer_context,
     build_structured_beam_middleware,
     beam_config_snapshot,
     judge_response,
@@ -248,8 +249,6 @@ def test_answer_question_prompt_requires_supported_concise_answers():
     response = answer_question(
         llm=llm,
         model="answer-model",
-        topic={"title": "Budget tracker"},
-        question_type="abstention",
         question="Can you tell me about my previous projects?",
         context="No retrieved memory.",
     )
@@ -269,6 +268,8 @@ def test_answer_question_prompt_requires_supported_concise_answers():
     assert "Abstain only when no relevant memory entry" in user_prompt
     assert "Only output the answer to the question" in user_prompt
     assert "Can you tell me about my previous projects?" in user_prompt
+    assert "Topic metadata" not in user_prompt
+    assert "Question type" not in user_prompt
 
 
 def test_build_answer_context_includes_chronological_order_block():
@@ -294,7 +295,7 @@ def test_build_answer_context_includes_chronological_order_block():
         memory_selector=MemorySelector(),
     )
 
-    context = build_answer_context(
+    context = build_oracle_answer_context(
         structured_middleware=structured_middleware,
         active_messages=[HumanMessage(content="recent")],
         hits=[],
@@ -323,7 +324,7 @@ def test_contradiction_context_includes_superseded_history():
         {"op": "ADD", "section": "facts", "text": "User later said they never wrote Flask routes.", "provenance": [2]},
     ])
     middleware = SimpleNamespace(memory=memory, memory_selector=MemorySelector())
-    context = build_answer_context(
+    context = build_oracle_answer_context(
         structured_middleware=middleware,
         active_messages=[],
         hits=[],
@@ -347,7 +348,7 @@ def test_summarization_context_uses_broader_chronology_than_topical_selection():
         memory=memory,
         memory_selector=MemorySelector(pinned_sections=frozenset()),
     )
-    context = build_answer_context(
+    context = build_oracle_answer_context(
         structured_middleware=middleware,
         active_messages=[],
         hits=[],
@@ -457,3 +458,23 @@ def test_beam_config_snapshot_is_json_serializable():
     assert isinstance(snapshot["chat"], str)
     assert isinstance(snapshot["question_types"], list)
     assert snapshot["memory_profile"] == "chat"
+
+
+def test_score_ownership_separates_primary_from_oracle_diagnostic():
+    def output():
+        return {"results": {"recall": [{"llm_judge_score": 0.5}]},
+                "summary": {"recall": {"judge_score": 0.5},
+                            "overall": {"judge_score": 0.5,
+                                        "heuristic_rubric_rate": 1.0}}}
+
+    production = output()
+    apply_score_ownership(production, "production")
+    assert production["routing_mode"] == "production"
+    assert production["primary_score"] == 0.5 and "diagnostic_score" not in production
+
+    oracle = output()
+    apply_score_ownership(oracle, "oracle")
+    assert oracle["routing_mode"] == "oracle"
+    assert oracle["diagnostic_score"] == 0.5 and "primary_score" not in oracle
+    assert "judge_score" not in oracle["summary"]["overall"]
+    assert "llm_judge_score" not in oracle["results"]["recall"][0]

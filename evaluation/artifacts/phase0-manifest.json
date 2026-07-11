@@ -1,0 +1,148 @@
+{
+  "cases": [
+    {
+      "content_hash": "716f4142969090552321997557dc6b7e66101afc9cc3d5ff062630a3faff050c",
+      "id": "adv-dark-mode-unrelated-location"
+    },
+    {
+      "content_hash": "b9e97287e3c4837f3fdc53ac6998c0e625a4ff869f4ccbda6238f391b536d6f3",
+      "id": "adv-dashboard-unrelated-auth"
+    },
+    {
+      "content_hash": "a89e43bad92da0162e250c96cc6dce1a68df8efcd26625a47e008723fb7bc98a",
+      "id": "adv-latency-unrelated-preference"
+    },
+    {
+      "content_hash": "ec3d0ec3fe955767e1dc6694f97edd48229aa81af94005c5d6678b5bd102f63c",
+      "id": "adv-tea-unrelated-latency"
+    },
+    {
+      "content_hash": "5410d55ae4b2910d4d8ca3cd3fb25ef20b00d6a7e5456979cb70534f63771fac",
+      "id": "synthetic-development-update-selection-v1"
+    },
+    {
+      "content_hash": "d347365f59b31917614a163ddd73198d69701e6b5a8fcbde545aebe66f45f256",
+      "id": "synthetic-holdout-update-selection-v1"
+    }
+  ],
+  "dataset": {
+    "content_hash": "106245e5cc3a3d9b57766bb18bd84420b149369b2efd8881a2652ccfaebc53e3",
+    "id": "BEAM/100K"
+  },
+  "historical_artifact": {
+    "reason": "historical 0.700 artifact used oracle-like routing and is not a production baseline",
+    "status": "unavailable"
+  },
+  "probes": [
+    {
+      "content_hash": "9cecdd171306dbfed6d5f0427316476c8c780deab92861370c63029ef7a978ce",
+      "id": "1:0"
+    },
+    {
+      "content_hash": "53bab89b02a9b625ec459a21d379749c3da232359f558852075dd2aeb3d718f9",
+      "id": "1:1"
+    },
+    {
+      "content_hash": "defaced0a65e3f05fc1ccf4a150c95f6c932b2ea3cac0bacc069a296a40b138c",
+      "id": "1:2"
+    },
+    {
+      "content_hash": "204ec31922a83f2e11e83a6c439e5967268603f3417a11c4e5cd080d8777095d",
+      "id": "1:3"
+    },
+    {
+      "content_hash": "dd98658714b011a57f4e142a3db64d76bb0d32ad9bcda2a38da01ebaef68fb95",
+      "id": "1:4"
+    },
+    {
+      "content_hash": "4d1a52100b97c4610cad21dc041930cc259e68b6c64b00ddd0a99b311a675971",
+      "id": "1:5"
+    },
+    {
+      "content_hash": "668ea5e5b04cbdee4fe69b3f6e7bd79bb35899d79952ae59b4e4e42cfe8bb40f",
+      "id": "1:6"
+    },
+    {
+      "content_hash": "37a47dc2abdaeee36135cf07d6345ea75b80b9d59061f91452c8f892e1d4d295",
+      "id": "1:7"
+    },
+    {
+      "content_hash": "2580437fafa1c0efb9cd63aba98292e2ac934308f5b3b717cb083b4cfcd44953",
+      "id": "1:8"
+    },
+    {
+      "content_hash": "0bb5585dd879238f5f8c56a734f28340b702258db697b6e41a4dd459b6697976",
+      "id": "1:9"
+    }
+  ],
+  "resolved_configs": {
+    "beam": {
+      "abilities": [
+        "contradiction_resolution",
+        "knowledge_update",
+        "preference_following",
+        "instruction_following",
+        "abstention",
+        "summarization"
+      ],
+      "data_path": "BEAM/chats/100K/1",
+      "fixed_token_budgets": [
+        256,
+        512,
+        1024
+      ],
+      "judge": true,
+      "max_active_context_chars": 12000,
+      "max_hit_chars": 6000,
+      "max_questions_per_type": null,
+      "recursion_limit": 50,
+      "structured_answer_tokens": 4000,
+      "structured_evict_fraction": 0.5,
+      "structured_keep_messages": 2,
+      "structured_max_memory_tokens": 3000,
+      "structured_max_tokens": 12000,
+      "top_k": 8
+    },
+    "product": {
+      "compaction_threshold": 30,
+      "memory_model": "openai:gpt-5.4-nano",
+      "memory_profile": "chat",
+      "sections": "chat"
+    }
+  },
+  "resolved_models": {
+    "answer": "gpt-5.4-nano",
+    "judge": "gpt-5.4-nano",
+    "memory": "openai:gpt-5.4-nano"
+  },
+  "route": "production",
+  "schema_version": "production-memory-manifest/v1",
+  "source": {
+    "commit": "65d334462ae5884c825147fdfe3be333ff3e8ed4",
+    "dirty": true,
+    "dirty_digest": "2e3efc8fb6eaf1e94a28b725396d4fb3e44a80b0dd83b856239dacbf7ea908aa"
+  },
+  "splits": {
+    "development": {
+      "case_ids": [
+        "synthetic-development-update-selection-v1"
+      ],
+      "content_hash": "363ffe1898604b24b0f189eb7c2493b1e18e9d51023388bcad4e709d53ea20ef"
+    },
+    "holdout": {
+      "case_ids": [
+        "adv-dark-mode-unrelated-location",
+        "adv-dashboard-unrelated-auth",
+        "adv-latency-unrelated-preference",
+        "adv-tea-unrelated-latency",
+        "synthetic-holdout-update-selection-v1"
+      ],
+      "content_hash": "ffb92c70fcd22ae567d96a15c9214a6a04f6a22855ad220b8f3f44a9d8fb6f3d"
+    }
+  },
+  "token_count_provenance": {
+    "kind": "estimate",
+    "policy": "characters_divided_by_four",
+    "provider_usage": "reported separately"
+  }
+}

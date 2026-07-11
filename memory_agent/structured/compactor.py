@@ -2,18 +2,52 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+import re
 from typing import Callable
 
 from memory_agent.clients.llm import LLMClient
 from memory_agent.models.policy import MemoryPolicy, get_memory_policy, validate_policy_sections
 from memory_agent.models.sections import SectionConfig
 from memory_agent.structured.memory import Memory
-from memory_agent.structured.ops import UpdateFailed, parse_memory_ops
+from memory_agent.structured.ops import parse_memory_ops
 from memory_agent.structured.prompts import build_compactor_prompt
+from memory_agent.models.memory import MemoryEntry
 
 
 def _default_token_estimator(text: str) -> int:
     return max(1, len(text) // 4)
+
+
+@dataclass(frozen=True)
+class CompactionCandidate:
+    """A bounded active-entry cluster safe to consider in isolation."""
+
+    subject_key: str
+    entries: tuple[MemoryEntry, ...]
+    reason: str
+
+
+@dataclass
+class CompactionMetrics:
+    attempted_calls: int = 0
+    successful_compactions: int = 0
+    deterministic_compactions: int = 0
+    failed_compactions: int = 0
+    rejected_compactions: int = 0
+    skipped_compactions: int = 0
+    before_active: int = 0
+    after_active: int = 0
+    candidate_tokens: int = 0
+    failure_reasons: dict[str, int] = field(default_factory=dict)
+    candidate_results: list[dict[str, object]] = field(default_factory=list)
+
+    def record_reason(self, reason: str) -> None:
+        self.failure_reasons[reason] = self.failure_reasons.get(reason, 0) + 1
+
+
+_WORDS_RE = re.compile(r"[a-z0-9]+")
+_VALUE_RE = re.compile(r"^(?:\d+(?:\.\d+)?(?:ms|s|%|gb|mb)?|now|was|is|the|a|an|for|to|use|uses)$")
 
 
 class MemoryCompactor:
@@ -27,6 +61,8 @@ class MemoryCompactor:
         model: str | None = None,
         max_memory_tokens: int | None = None,
         token_estimator: Callable[[str], int] | None = None,
+        max_candidate_entries: int = 8,
+        max_candidate_tokens: int = 512,
     ) -> None:
         self.llm = llm
         self.sections = sections
@@ -35,64 +71,210 @@ class MemoryCompactor:
         self.model = model
         self.max_memory_tokens = max_memory_tokens
         self.token_estimator = token_estimator or _default_token_estimator
+        self.max_candidate_entries = max_candidate_entries
+        self.max_candidate_tokens = max_candidate_tokens
+        self.metrics = CompactionMetrics()
         self._section_keys = {section.key for section in sections}
         self._section_key_by_prefix = {
             section.prefix.lower(): section.key for section in sections
         }
 
-    def _build_prompt(self, memory: Memory) -> tuple[str, list[dict]]:
-        rendered = memory.render(
-            include_superseded=True,
-            max_tokens=self.max_memory_tokens,
-            token_estimator=self.token_estimator,
-        ) or "(No memory entries yet.)"
+    def record_skip(self, reason: str) -> None:
+        """Record a protective skip that intentionally avoids transport."""
+        self.metrics.skipped_compactions += 1
+        self.metrics.record_reason(reason)
+
+    def _build_prompt(
+        self, memory: Memory, candidate: CompactionCandidate | None = None
+    ) -> tuple[str, list[dict]]:
+        entries = list(candidate.entries) if candidate is not None else []
+        rendered = memory.render(entries=entries) or "(No candidate entries.)"
         return build_compactor_prompt(
             sections=self.sections,
             current_memory=rendered,
         )
 
+    @staticmethod
+    def _identity_key(entry: MemoryEntry) -> str | None:
+        identity = entry.subject_identity
+        if identity is None or identity.confidence < 0.8:
+            return None
+        unit = entry.value.unit if entry.value is not None else None
+        # Empty qualifier/unit are identity components too; omitting them would
+        # collapse qualified and unqualified facts or unit-bearing values.
+        return "|".join(
+            value if value is not None else "<none>" for value in (
+                identity.namespace, identity.entity, identity.attribute,
+                identity.qualifier, unit,
+            )
+        )
+
+    @staticmethod
+    def _lexical_key(entry: MemoryEntry) -> str:
+        words = [word for word in _WORDS_RE.findall(entry.text.lower()) if not _VALUE_RE.match(word)]
+        return f"{entry.section}:" + " ".join(sorted(set(words)))
+
+    def detect_candidates(self, memory: Memory) -> list[CompactionCandidate]:
+        """Detect deterministic, bounded active clusters without reading history."""
+        active = [entry for entry in memory.entries.values() if entry.status == "active"]
+        groups: dict[str, list[MemoryEntry]] = {}
+        reasons: dict[str, str] = {}
+        for entry in active:
+            identity_key = self._identity_key(entry)
+            text_key = " ".join(entry.text.lower().split())
+            key = identity_key or f"exact:{entry.section}:{text_key}"
+            groups.setdefault(key, []).append(entry)
+            reasons[key] = "typed-subject" if identity_key else "exact-duplicate"
+
+        # Conservative semantic clusters are LLM-only: require same section and
+        # meaningful token overlap, and never mix a typed group with another subject.
+        untyped = [entry for entry in active if self._identity_key(entry) is None]
+        for index, left in enumerate(untyped):
+            left_words = set(self._lexical_key(left).split(":", 1)[1].split())
+            for right in untyped[index + 1:]:
+                if left.section != right.section:
+                    continue
+                right_words = set(self._lexical_key(right).split(":", 1)[1].split())
+                if left_words & right_words:
+                    key = f"semantic:{left.section}:{min(left.id, right.id)}"
+                    groups.setdefault(key, []).extend((left, right))
+                    reasons[key] = "semantic-overlap"
+
+        by_section: dict[str, list[MemoryEntry]] = {}
+        for entry in untyped:
+            by_section.setdefault(entry.section, []).append(entry)
+        for section, entries in by_section.items():
+            if len(entries) == 2:
+                key = f"unresolved:{section}"
+                groups[key] = entries
+                reasons[key] = "unresolved-pair"
+
+        candidates: list[CompactionCandidate] = []
+        seen_sets: set[frozenset[str]] = set()
+        for key, entries in groups.items():
+            unique = tuple(dict.fromkeys(entry.id for entry in entries))
+            if len(unique) < 2:
+                continue
+            entry_set = frozenset(unique)
+            if entry_set in seen_sets:
+                continue
+            seen_sets.add(entry_set)
+            selected = tuple(memory.entries[entry_id] for entry_id in sorted(unique))
+            candidates.append(CompactionCandidate(key, selected, reasons[key]))
+        return sorted(candidates, key=lambda item: item.subject_key)
+
     def compact(self, memory: Memory) -> tuple[list[dict], list[dict]]:
-        """Generate, validate, and atomically apply compaction operations."""
-        system, messages = self._build_prompt(memory)
+        """Compatibility entry point: compact detected bounded candidates only."""
+        return self.compact_candidates(memory, self.detect_candidates(memory))
+
+    def compact_candidates(
+        self, memory: Memory, candidates: list[CompactionCandidate]
+    ) -> tuple[list[dict], list[dict]]:
+        all_applied: list[dict] = []
+        all_rejected: list[dict] = []
+        self.metrics.before_active = sum(e.status == "active" for e in memory.entries.values())
+        for candidate in candidates:
+            before = sum(e.status == "active" for e in memory.entries.values())
+            attempted_before = self.metrics.attempted_calls
+            deterministic_before = self.metrics.deterministic_compactions
+            applied, rejected = self._compact_candidate(memory, candidate)
+            after = sum(e.status == "active" for e in memory.entries.values())
+            if rejected:
+                outcome = "rejected" if rejected[0].get("reason") != "transport" else "failed"
+            elif self.metrics.deterministic_compactions > deterministic_before:
+                outcome = "deterministic"
+            elif self.metrics.attempted_calls > attempted_before and applied:
+                outcome = "successful"
+            else:
+                outcome = "skipped"
+            self.metrics.candidate_results.append({
+                "subject_key": candidate.subject_key,
+                "before_active": before,
+                "after_active": after,
+                "outcome": outcome,
+            })
+            all_applied.extend(applied)
+            all_rejected.extend(rejected)
+        self.metrics.after_active = sum(e.status == "active" for e in memory.entries.values())
+        return all_applied, all_rejected
+
+    def _compact_candidate(
+        self, memory: Memory, candidate: CompactionCandidate
+    ) -> tuple[list[dict], list[dict]]:
+        visible_ids = {entry.id for entry in candidate.entries}
+        if len(candidate.entries) > self.max_candidate_entries:
+            return self._reject(candidate, "budget")
+        rendered = memory.render(entries=list(candidate.entries))
+        tokens = self.token_estimator(rendered)
+        if tokens > self.max_candidate_tokens:
+            return self._reject(candidate, "budget")
+        self.metrics.candidate_tokens += tokens
+
+        texts = {" ".join(entry.text.lower().split()) for entry in candidate.entries}
+        identity_keys = [self._identity_key(entry) for entry in candidate.entries]
+        typed = identity_keys[0] is not None and len(set(identity_keys)) == 1
+        if len(texts) == 1 or typed:
+            latest = max(candidate.entries, key=lambda entry: (max(entry.provenance, default=-1), entry.id))
+            provenance = sorted({turn for entry in candidate.entries for turn in entry.provenance})
+            ops = [
+                {"op": "SUPERSEDE", "id": entry.id, "reason": "Deterministic subject compaction."}
+                for entry in candidate.entries
+            ] + [{"op": "ADD", "section": latest.section, "text": latest.text,
+                  "provenance": provenance, "subject_identity": latest.subject_identity,
+                  "value": latest.value}]
+            applied, rejected = self._apply_candidate_ops(memory, candidate, ops, visible_ids)
+            if rejected:
+                return applied, rejected
+            self.metrics.deterministic_compactions += 1
+            return applied, []
+
+        system, messages = self._build_prompt(memory, candidate)
         try:
+            self.metrics.attempted_calls += 1
             response = self.llm.complete(system, messages, model=self.model)
         except Exception as exc:
-            raise UpdateFailed(f"Compactor LLM transport error: {exc}") from exc
+            self.metrics.failed_compactions += 1
+            self.metrics.record_reason("transport")
+            return [], [{"candidate": candidate.subject_key, "reason": "transport", "detail": str(exc)}]
 
         ops = parse_memory_ops(response)
         if ops is None:
-            raise UpdateFailed(
-                f"Could not parse a JSON compaction ops array from LLM response: {response!r}"
-            )
+            return self._reject(candidate, "schema")
         ops = self._normalize_ops(ops, memory)
         ops = [
             op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
         ]
         if not ops:
+            self.metrics.skipped_compactions += 1
             return [], []
+        applied, rejected = self._apply_candidate_ops(memory, candidate, ops, visible_ids)
+        if not rejected:
+            self.metrics.successful_compactions += 1
+        return applied, rejected
 
+    def _reject(self, candidate: CompactionCandidate, reason: str):
+        self.metrics.rejected_compactions += 1
+        self.metrics.record_reason(reason)
+        return [], [{"candidate": candidate.subject_key, "reason": reason}]
+
+    def _apply_candidate_ops(self, memory, candidate, ops, visible_ids):
+        referenced = {op.get("id") for op in ops if isinstance(op, dict) and op.get("op") == "SUPERSEDE"}
+        if not referenced.issubset(visible_ids):
+            return self._reject(candidate, "hidden_id")
         rejected = self._validate_ops(memory, ops)
         if rejected:
-            return [], rejected
-
-        before_active = sum(entry.status == "active" for entry in memory.entries.values())
-        candidate = memory._copy()
-        applied, rejected = candidate.apply_ops_atomically(ops)
+            reason = "provenance" if any("provenance" in item["reason"] for item in rejected) else "schema"
+            return self._reject(candidate, reason)
+        before = sum(memory.entries[entry_id].status == "active" for entry_id in visible_ids)
+        trial = memory._copy()
+        applied, rejected = trial.apply_ops_atomically(ops)
         if rejected:
-            return [], rejected
-
-        after_active = sum(entry.status == "active" for entry in candidate.entries.values())
-        if after_active >= before_active:
-            return [], [
-                {
-                    "op": ops,
-                    "reason": "compaction must reduce the number of active entries",
-                }
-            ]
-
-        memory.entries = candidate.entries
-        memory.narrative = candidate.narrative
-        memory._counters = candidate._counters
+            return self._reject(candidate, "schema")
+        after = sum(entry.status == "active" for entry in trial.entries.values())
+        total_before = sum(entry.status == "active" for entry in memory.entries.values())
+        if after >= total_before or before < 2:
+            return self._reject(candidate, "no_reduction")
+        memory.entries, memory.narrative, memory._counters = trial.entries, trial.narrative, trial._counters
         return applied, []
 
     def _normalize_ops(self, ops: list[dict], memory: Memory) -> list[dict]:

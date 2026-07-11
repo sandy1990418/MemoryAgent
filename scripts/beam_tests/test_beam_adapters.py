@@ -1,7 +1,18 @@
+from pathlib import Path
+
 import pytest
 
 from evaluation.beam import BeamChatCaseAdapter, compare_fixed_budget_runs
 from memory_agent.domain import EventSourceType
+from memory_agent.models.sections import CHAT_SECTIONS
+from memory_agent.structured.answer_context import (
+    AnswerContextBudget,
+    AnswerContextConfig,
+    build_answer_memory_context,
+)
+from memory_agent.structured.memory import Memory
+from memory_agent.structured.selector import MemorySelector
+from scripts.run_beam_case import build_answer_context, build_answer_context_result
 
 
 def test_beam_chat_adapter_outputs_generic_events_and_keeps_metadata_at_boundary():
@@ -29,3 +40,37 @@ def test_fixed_budget_comparison_rejects_mismatched_question_sets():
             {"variant": "a", "case_id": "1", "question_id": "q1", "context_budget_tokens": 256},
             {"variant": "b", "case_id": "1", "question_id": "q2", "context_budget_tokens": 256},
         ])
+
+
+def test_beam_production_and_middleware_service_are_byte_identical():
+    memory = Memory(sections=CHAT_SECTIONS)
+    memory.apply_ops([
+        {"op": "ADD", "section": "facts", "text": "The project uses SQLite.", "provenance": [1]},
+        {"op": "ADD", "section": "decisions", "text": "The team chose Postgres.", "provenance": [2]},
+    ])
+    selector = MemorySelector(pinned_sections=frozenset())
+    result = build_answer_memory_context(
+        query="Which database does the project use?", memory=memory,
+        config=AnswerContextConfig(selector=selector), budget=AnswerContextBudget(max_tokens=500),
+    )
+    middleware = type("Middleware", (), {"memory": memory, "memory_selector": selector})()
+    beam = build_answer_context(
+        middleware, [], [], 100, 100, 500, query="Which database does the project use?",
+    )
+    typed_beam = build_answer_context_result(
+        middleware, [], [], 100, 100, 500, query="Which database does the project use?",
+    )
+    rendered = beam.split("Structured memory summary.\n", 1)[1].split("\n\n# Chronological Order", 1)[0]
+    assert rendered == result.rendered_context
+    assert result.selected_ids == ("D1", "F1")
+    assert typed_beam.selected_ids == result.selected_ids
+    assert typed_beam.rendered_context == beam
+
+
+def test_root_unit_tests_do_not_import_beam_evaluation():
+    offenders = []
+    for path in Path("tests").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "evaluation.beam" in text or "scripts.run_beam" in text:
+            offenders.append(path)
+    assert offenders == []

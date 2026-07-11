@@ -30,18 +30,12 @@ _LATEST_VALUE_QUERY_TERMS = {
     "updated",
     "update",
     "changed",
-    "quota",
-    "coverage",
     "percentage",
     "percent",
     "count",
     "total",
     "how",
     "many",
-    "deadline",
-    "commits",
-    "cards",
-    "columns",
 }
 
 
@@ -112,6 +106,15 @@ class MemorySelector:
             pinned_sections=pinned_sections,
         )
         return [item.entry for item in selected]
+
+    def select_for_answer(
+        self,
+        memory: Memory,
+        query: str = "",
+        budget: int | None = None,
+    ) -> list[MemoryEntry]:
+        """Production answer selection; ``select`` remains API-compatible."""
+        return self.select(memory=memory, query=query, max_tokens=budget)
 
     def select_with_scores(
         self,

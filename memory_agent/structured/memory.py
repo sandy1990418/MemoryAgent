@@ -85,6 +85,8 @@ class Memory:
                 provenance=list(entry.provenance),
                 status=entry.status,
                 note=entry.note,
+                subject_identity=entry.subject_identity,
+                value=entry.value,
             )
             for entry_id, entry in self.entries.items()
         }
@@ -118,6 +120,8 @@ class Memory:
                 section=section,
                 text=text,
                 provenance=list(provenance),
+                subject_identity=op.get("subject_identity"),
+                value=op.get("value"),
             )
             return True
 
@@ -136,6 +140,10 @@ class Memory:
                 return "invalid provenance"
             entry.text = text
             entry.provenance = sorted(set(entry.provenance) | set(provenance))
+            if "subject_identity" in op:
+                entry.subject_identity = op["subject_identity"]
+            if "value" in op:
+                entry.value = op["value"]
             return True
 
         if kind == "SUPERSEDE":
