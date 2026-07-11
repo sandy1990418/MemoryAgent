@@ -38,6 +38,8 @@ class TurnSimulation:
     selected_ids: tuple[str, ...]
     injected_context: str
     injection_tokens: int
+    working_window_tokens: int
+    answer_input_tokens: int
     answer_called: bool
     memory_ids_before_turn: tuple[str, ...]
     memory_ids_after_turn: tuple[str, ...]
@@ -120,14 +122,21 @@ class OnlineSimulation:
                 budget=AnswerContextBudget(self.answer_memory_budget),
             )
             injection_tokens = self.token_estimator(context.rendered_context)
+            working_messages = [
+                {"role": turn.role, "content": turn.content} for turn in self.window.turns()
+            ]
+            working_window_text = "\n".join(
+                f"{message['role']}: {message['content']}" for message in working_messages
+            )
+            working_window_tokens = self.token_estimator(working_window_text)
+            system = f"{self.base_system_prompt}\n\n# Conversation Memory\n{context.rendered_context}"
+            answer_input_tokens = self.token_estimator(system) + working_window_tokens
 
             answer_called = self.mode is SimulationMode.LIVE
             if answer_called:
                 self.answer_calls += 1
-                system = f"{self.base_system_prompt}\n\n# Conversation Memory\n{context.rendered_context}"
-                messages = [{"role": turn.role, "content": turn.content} for turn in self.window.turns()]
                 assert self.answer_llm is not None
-                assistant_text = self.answer_llm.complete(system, messages)
+                assistant_text = self.answer_llm.complete(system, working_messages)
             else:
                 assistant_text = exchange.assistant
 
@@ -139,6 +148,8 @@ class OnlineSimulation:
                 selected_ids=context.selected_ids,
                 injected_context=context.rendered_context,
                 injection_tokens=injection_tokens,
+                working_window_tokens=working_window_tokens,
+                answer_input_tokens=answer_input_tokens,
                 answer_called=answer_called,
                 memory_ids_before_turn=before_ids,
                 memory_ids_after_turn=tuple(sorted(self.memory.entries)),
@@ -147,6 +158,7 @@ class OnlineSimulation:
 
     def report(self) -> dict[str, object]:
         injections = [turn.injection_tokens for turn in self.turns]
+        answer_inputs = [turn.answer_input_tokens for turn in self.turns]
         total = sum(injections)
         quality = asdict(memory_quality_report(self.memory))
         compactor = asdict(self.compactor.metrics) if self.compactor is not None else None
@@ -163,6 +175,15 @@ class OnlineSimulation:
                 "max_tokens": max(injections, default=0),
                 "cumulative_tokens": total,
                 "zero_injection_turns": sum(value == 0 for value in injections),
+            },
+            "answer_input": {
+                "source": "estimator",
+                "estimator_policy": self.estimator_policy,
+                "average_tokens": sum(answer_inputs) / len(answer_inputs) if answer_inputs else 0.0,
+                "p50_tokens": _percentile(answer_inputs, 0.50),
+                "p95_tokens": _percentile(answer_inputs, 0.95),
+                "max_tokens": max(answer_inputs, default=0),
+                "cumulative_tokens": sum(answer_inputs),
             },
             "updater": self.updater.update_token_usage(),
             "compactor": compactor,

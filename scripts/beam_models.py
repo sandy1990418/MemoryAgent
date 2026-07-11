@@ -244,6 +244,7 @@ class BeamRunConfig:
     max_hit_chars: int = 6000
     max_active_context_chars: int = 12000
     skip_ingest: bool = False
+    routing_mode: str = "production"
     answer_model: str = DEFAULT_BEAM_MODEL
     structured_model: str = DEFAULT_BEAM_MEMORY_MODEL
     structured_max_tokens: int = 12000

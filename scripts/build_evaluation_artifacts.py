@@ -13,7 +13,11 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from memory_agent.evaluation.final_report import build_final_report, unavailable  # noqa: E402
+from memory_agent.evaluation.final_report import (  # noqa: E402
+    build_final_report,
+    build_paired_routing_result,
+    unavailable,
+)
 from memory_agent.evaluation.online_simulation import OnlineSimulation, TranscriptExchange  # noqa: E402
 from memory_agent.evaluation.manifest import build_frozen_manifest, content_hash  # noqa: E402
 from memory_agent.evaluation.update_selection import update_selection_metrics  # noqa: E402
@@ -28,6 +32,7 @@ from memory_agent.structured.update_selector import UpdateMemorySelector  # noqa
 from memory_agent.structured.updater import MemoryUpdater  # noqa: E402
 
 OUTPUT = ROOT / "evaluation" / "artifacts"
+LIVE_RESULTS = ROOT / "data" / "beam" / "results" / "100K" / "1"
 MATRIX = {
     "development": {
         "turn": "Please keep dark mode enabled",
@@ -80,18 +85,32 @@ def _adversarial_report() -> dict[str, Any]:
 def _online_injection_report() -> dict[str, Any]:
     memory = Memory(CHAT_SECTIONS, policy=CHAT_POLICY)
     memory.entries["M1"] = MemoryEntry("M1", "preferences", "User prefers dark mode", [1])
+    exchanges = tuple(
+        TranscriptExchange(
+            f"Turn {index}: keep dark mode enabled while discussing item {index}",
+            f"Recorded response {index}.",
+        )
+        for index in range(1, 21)
+    )
     report = OnlineSimulation(
         memory=memory,
         updater=MemoryUpdater(_NoCallLLM(), CHAT_SECTIONS, policy=CHAT_POLICY),
         answer_context_config=AnswerContextConfig(MemorySelector(policy=CHAT_POLICY)),
         answer_memory_budget=100, max_window_tokens=10_000,
-    ).run((TranscriptExchange("Keep dark mode enabled", "Okay."),
-           TranscriptExchange("What display mode do I prefer?", "Dark mode.")))
+    ).run(exchanges)
     metric = report["injection"]
+    answer_input = report["answer_input"]
     return {"average": metric["average_tokens"], "p50": metric["p50_tokens"],
             "p95": metric["p95_tokens"], "max": metric["max_tokens"],
             "cumulative": metric["cumulative_tokens"],
             "zero_injection_turns": metric["zero_injection_turns"],
+            "answer_input": answer_input,
+            "memory_share_of_cumulative_input": (
+                metric["cumulative_tokens"] / answer_input["cumulative_tokens"]
+                if answer_input["cumulative_tokens"] else 0.0
+            ),
+            "turn_count": report["turn_count"],
+            "budget_is_hard_limit": metric["max_tokens"] <= 100,
             "mode": report["mode"], "answer_calls": report["answer_calls"],
             "source": "deterministic-online-simulation",
             "estimator_policy": metric["estimator_policy"]}
@@ -99,6 +118,55 @@ def _online_injection_report() -> dict[str, Any]:
 
 def _config(path: Path) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _mean_result_score(items: list[dict[str, Any]], key: str) -> float | None:
+    scores = [item[key] for item in items if item.get(key) is not None]
+    return sum(scores) / len(scores) if scores else None
+
+
+def _live_routing_evidence() -> tuple[dict[str, Any], dict[str, Any], list[str], list[str]] | None:
+    production_path = LIVE_RESULTS / "production-live.json"
+    oracle_path = LIVE_RESULTS / "oracle-live.json"
+    if not production_path.exists() or not oracle_path.exists():
+        return None
+    production = json.loads(production_path.read_text(encoding="utf-8"))
+    oracle = json.loads(oracle_path.read_text(encoding="utf-8"))
+    if production.get("routing_mode") != "production" or oracle.get("routing_mode") != "oracle":
+        raise RuntimeError("live paired artifacts have invalid routing ownership")
+    abilities: dict[str, dict[str, Any]] = {}
+    names = sorted(set(production["results"]) | set(oracle["results"]))
+    for name in names:
+        abilities[name] = {
+            "production_score": _mean_result_score(
+                production["results"].get(name, []), "llm_judge_score"
+            ),
+            "oracle_score": _mean_result_score(
+                oracle["results"].get(name, []), "diagnostic_score"
+            ),
+        }
+    denominator = int(production["summary"]["overall"]["judge_rubric_total"])
+    sample_size = int(production["summary"]["overall"]["questions_answered"])
+    routing = build_paired_routing_result(
+        production_score=production["primary_score"],
+        oracle_score=oracle["diagnostic_score"],
+        paired_rubric_denominator=denominator,
+        sample_size=sample_size,
+        abilities=abilities,
+    )
+    provider_usage = {
+        "status": "available",
+        "source": "scripts/run_beam_case.py paired paid-live execution",
+        "production": production["token_usage"],
+        "oracle": oracle["token_usage"],
+        "artifacts": {
+            "production": str(production_path.relative_to(ROOT)),
+            "oracle": str(oracle_path.relative_to(ROOT)),
+        },
+    }
+    improved = [name for name, value in routing["abilities"].items() if value["status"] == "improved"]
+    regressed = [name for name, value in routing["abilities"].items() if value["status"] == "regressed"]
+    return routing, provider_usage, improved, regressed
 
 
 def _selection_report() -> dict[str, Any]:
@@ -172,13 +240,14 @@ def main() -> None:
     )
     selection = _selection_report()
     adversarial = _adversarial_report()
-    credential_reason = (
-        "paired paid-live production/oracle evaluation was not run because OPENAI_API_KEY "
-        "was unavailable to this deterministic artifact generator"
-    )
+    live = _live_routing_evidence()
+    credential_reason = "paired paid-live production/oracle artifacts are not present"
     live_gap = unavailable(credential_reason)
+    routing, provider_usage, improved, regressed = (
+        live if live is not None else (live_gap, live_gap, [], [])
+    )
     candidate = {
-        "routing": live_gap,
+        "routing": routing,
         "quality": {name: unavailable("not measured by offline artifact generation") for name in
                     ("canonical", "incomplete", "duplicate", "stale", "raw_request",
                      "active_conflict", "section_mismatch", "future_usefulness")},
@@ -192,16 +261,31 @@ def main() -> None:
     }
     report = build_final_report(
         baseline={}, candidate=candidate,
+        improved_cases=improved,
+        regressed_cases=regressed,
         failures={name: [] for name in ("routing", "memory_write", "update_selection",
                                          "answer_selection", "compactor")},
         token_estimates={"update_selection": selection,
+                         "online_replay": candidate["injection"],
                          "provenance": "characters_divided_by_four estimator"},
-        provider_usage=live_gap,
-        offline_ingestion=unavailable("offline ingestion was not executed for this artifact"),
+        provider_usage=provider_usage,
+        offline_ingestion=(
+            {
+                "status": "available",
+                "source": "paired live structured transcript ingestion",
+                "production": provider_usage["production"]["updater"],
+                "oracle": provider_usage["oracle"]["updater"],
+            }
+            if live is not None
+            else unavailable("offline ingestion was not executed for this artifact")
+        ),
         unavailable_reason="baseline metric was not reconstructable from production routing",
     )
-    report["validation"] = {"status": "validation_gap", "reason": credential_reason,
-                            "paid_live": False}
+    report["validation"] = (
+        {"status": "passed", "paid_live": True}
+        if live is not None
+        else {"status": "validation_gap", "reason": credential_reason, "paid_live": False}
+    )
     report["manifest_content_hash"] = content_hash(manifest)
     report["report_content_hash"] = content_hash({k: v for k, v in report.items()
                                                    if k != "report_content_hash"})

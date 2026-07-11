@@ -114,7 +114,7 @@ def test_empty_pinned_sections_restores_pure_budget_behavior():
     assert [entry.id for entry in selected] == ["D1"]
 
 
-def test_pinned_entry_is_included_even_when_over_budget_alone():
+def test_pinned_entry_cannot_exceed_hard_budget_alone():
     memory = Memory(sections=CHAT_SECTIONS)
     applied, rejected = memory.apply_ops(
         [
@@ -132,7 +132,21 @@ def test_pinned_entry_is_included_even_when_over_budget_alone():
 
     selected = selector.select(memory=memory, query="anything", max_tokens=0)
 
-    assert [entry.id for entry in selected] == ["U1"]
+    assert selected == []
+
+
+def test_multiple_pinned_entries_are_prioritized_but_still_bounded():
+    memory = make_memory()
+    memory.apply_ops([{
+        "op": "ADD", "section": "preferences",
+        "text": "prefers short examples", "provenance": [5],
+    }])
+    selector = MemorySelector(token_estimator=count_entries)
+
+    selected = selector.select(memory=memory, query="favorite color green", max_tokens=1)
+
+    assert len(selected) == 1
+    assert selected[0].section == "preferences"
 
 
 def test_call_site_can_disable_default_pinned_sections():

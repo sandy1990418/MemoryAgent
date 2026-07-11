@@ -150,8 +150,49 @@
       }
     },
     "routing": {
-      "reason": "paired paid-live production/oracle evaluation was not run because OPENAI_API_KEY was unavailable to this deterministic artifact generator",
-      "status": "unavailable"
+      "abilities": {
+        "abstention": {
+          "oracle_score": 0.0,
+          "production_score": 0.5,
+          "status": "improved"
+        },
+        "contradiction_resolution": {
+          "oracle_score": 0.375,
+          "production_score": 0.25,
+          "status": "regressed"
+        },
+        "instruction_following": {
+          "oracle_score": 0.75,
+          "production_score": 0.75,
+          "status": "unchanged"
+        },
+        "knowledge_update": {
+          "oracle_score": 0.5,
+          "production_score": 0.5,
+          "status": "unchanged"
+        },
+        "preference_following": {
+          "oracle_score": 0.875,
+          "production_score": 0.75,
+          "status": "regressed"
+        },
+        "summarization": {
+          "oracle_score": 0.25,
+          "production_score": 0.35,
+          "status": "improved"
+        }
+      },
+      "gap": -0.059,
+      "oracle_cannot_offset_production": true,
+      "oracle_score": 0.458,
+      "paired_rubric_denominator": 28,
+      "production_passed": true,
+      "production_score": 0.517,
+      "production_tolerance": 0.03571428571428571,
+      "provider_failures": [],
+      "routing_failures": [],
+      "sample_size": 12,
+      "validation_gap": false
     },
     "updater": {
       "development": {
@@ -203,14 +244,32 @@
     "routing": [],
     "update_selection": []
   },
-  "improved_cases": [],
-  "manifest_content_hash": "807571ae337b34e06be15163d201b037d0579079a44bc58312e39c325ab57e8d",
+  "improved_cases": [
+    "abstention",
+    "summarization"
+  ],
+  "manifest_content_hash": "b26a46cbf4a12e52fea8949fad2853adab80e5d3b915030b35baa19afc607254",
   "offline_ingestion": {
-    "reason": "offline ingestion was not executed for this artifact",
-    "status": "unavailable"
+    "oracle": {
+      "calls": 20,
+      "input_tokens": 48759,
+      "output_tokens": 1627,
+      "total_tokens": 50386
+    },
+    "production": {
+      "calls": 18,
+      "input_tokens": 43300,
+      "output_tokens": 1318,
+      "total_tokens": 44618
+    },
+    "source": "paired live structured transcript ingestion",
+    "status": "available"
   },
-  "regressed_cases": [],
-  "report_content_hash": "b9077a372d5a47675e63fb3b99887d3229b15f4b60a462026165fe1be54695ad",
+  "regressed_cases": [
+    "contradiction_resolution",
+    "preference_following"
+  ],
+  "report_content_hash": "9fc9d7ca9c2f6f2a904948a086637070865ab21c319d56285b73455425a8a747",
   "schema_version": "production-memory-report/v1",
   "tokens": {
     "estimates": {
@@ -259,13 +318,68 @@
       }
     },
     "provider_usage": {
-      "reason": "paired paid-live production/oracle evaluation was not run because OPENAI_API_KEY was unavailable to this deterministic artifact generator",
-      "status": "unavailable"
+      "artifacts": {
+        "oracle": "data/beam/results/100K/1/oracle-live.json",
+        "production": "data/beam/results/100K/1/production-live.json"
+      },
+      "oracle": {
+        "agent": {
+          "calls": 12,
+          "input_tokens": 43325,
+          "output_tokens": 2858,
+          "total_tokens": 46183
+        },
+        "compactor": {
+          "calls": 15,
+          "input_tokens": 7044,
+          "output_tokens": 2974,
+          "total_tokens": 10018
+        },
+        "judge": {
+          "calls": 28,
+          "input_tokens": 24368,
+          "output_tokens": 2429,
+          "total_tokens": 26797
+        },
+        "updater": {
+          "calls": 20,
+          "input_tokens": 48759,
+          "output_tokens": 1627,
+          "total_tokens": 50386
+        }
+      },
+      "production": {
+        "agent": {
+          "calls": 12,
+          "input_tokens": 38169,
+          "output_tokens": 2844,
+          "total_tokens": 41013
+        },
+        "compactor": {
+          "calls": 18,
+          "input_tokens": 8656,
+          "output_tokens": 3252,
+          "total_tokens": 11908
+        },
+        "judge": {
+          "calls": 28,
+          "input_tokens": 24879,
+          "output_tokens": 2332,
+          "total_tokens": 27211
+        },
+        "updater": {
+          "calls": 18,
+          "input_tokens": 43300,
+          "output_tokens": 1318,
+          "total_tokens": 44618
+        }
+      },
+      "source": "scripts/run_beam_case.py paired paid-live execution",
+      "status": "available"
     }
   },
   "validation": {
-    "paid_live": false,
-    "reason": "paired paid-live production/oracle evaluation was not run because OPENAI_API_KEY was unavailable to this deterministic artifact generator",
-    "status": "validation_gap"
+    "paid_live": true,
+    "status": "passed"
   }
 }

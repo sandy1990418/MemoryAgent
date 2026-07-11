@@ -81,7 +81,39 @@ def test_simulation_reports_cumulative_distribution_and_updater_attribution():
     assert injection["cumulative_tokens"] == sum(turn.injection_tokens for turn in runner.turns)
     assert injection["zero_injection_turns"] == 2
     assert set(injection) >= {"average_tokens", "p50_tokens", "p95_tokens", "max_tokens"}
+    answer_input = report["answer_input"]
+    assert answer_input["cumulative_tokens"] == sum(
+        turn.answer_input_tokens for turn in runner.turns
+    )
+    assert all(
+        turn.answer_input_tokens >= turn.injection_tokens + turn.working_window_tokens
+        for turn in runner.turns
+    )
     assert report["updater"]["visible_memory_tokens"] == 0
+
+
+def test_long_replay_keeps_memory_injection_bounded_while_reporting_total_input_growth():
+    memory = Memory(CHAT_SECTIONS, policy=CHAT_POLICY)
+    for index in range(10):
+        memory.apply_ops([{
+            "op": "ADD", "section": "preferences",
+            "text": f"Preference {index} has enough text to consume budget", "provenance": [index + 1],
+        }])
+    runner = OnlineSimulation(
+        memory=memory,
+        updater=MemoryUpdater(RecordingLLM([]), CHAT_SECTIONS, policy=CHAT_POLICY),
+        answer_context_config=AnswerContextConfig(MemorySelector(policy=CHAT_POLICY)),
+        answer_memory_budget=20, max_window_tokens=10_000,
+        token_estimator=lambda text: len(text.split()) if text else 0,
+    )
+
+    report = runner.run(
+        TranscriptExchange(f"question {index}", f"answer {index}") for index in range(20)
+    )
+
+    assert report["injection"]["max_tokens"] <= 20
+    assert report["answer_input"]["cumulative_tokens"] > report["injection"]["cumulative_tokens"]
+    assert report["answer_input"]["max_tokens"] > report["answer_input"]["p50_tokens"]
 
 
 def test_final_report_schema_separates_estimates_provider_and_offline_ingestion():

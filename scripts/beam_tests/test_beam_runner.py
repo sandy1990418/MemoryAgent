@@ -243,6 +243,18 @@ def test_beam_cli_all_question_types_disables_filter(monkeypatch):
     assert args.question_types is None
 
 
+def test_beam_cli_routes_into_run_config(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["run_beam_case.py", "--routing-mode", "oracle"],
+    )
+
+    args = parse_args()
+    config = BeamRunConfig.from_args(args)
+
+    assert config.routing_mode == "oracle"
+
+
 def test_answer_question_prompt_requires_supported_concise_answers():
     llm = FakeAnswerLLM("ok")
 

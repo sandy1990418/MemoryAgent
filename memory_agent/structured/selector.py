@@ -53,7 +53,7 @@ class MemorySelector:
     This is intentionally deterministic. It is not semantic search and does not
     need embeddings. The goal is to stop blindly rendering every active memory
     entry once a single session grows large. Entries in pinned sections are
-    always selected even when they exceed the nominal prompt budget.
+    considered first, but the prompt budget remains a hard upper bound.
     """
 
     # Status changes are rare, high-value contradiction/correction records.
@@ -142,20 +142,18 @@ class MemorySelector:
         if max_tokens is None:
             return candidates
 
-        # Pinned sections are a hard guarantee: include them even if rendering
-        # them alone exceeds max_tokens. Budget only gates non-pinned entries.
+        # Pinned sections get first claim on the budget, but cannot make answer
+        # prompts grow without bound. This matters in long-running production
+        # chats where preferences/status history can themselves become large.
         effective_pinned = (
             self.pinned_sections if pinned_sections is None else frozenset(pinned_sections)
         )
-        pinned_ids = {
-            candidate.entry.id
-            for candidate in candidates
-            if candidate.entry.section in effective_pinned
-        }
-        selected_ids = set(pinned_ids)
-        for candidate in candidates:
-            if candidate.entry.id in pinned_ids:
-                continue
+        ordered = [
+            *[item for item in candidates if item.entry.section in effective_pinned],
+            *[item for item in candidates if item.entry.section not in effective_pinned],
+        ]
+        selected_ids: set[str] = set()
+        for candidate in ordered:
             projected_ids = selected_ids | {candidate.entry.id}
             projected_entries = [
                 item.entry for item in candidates if item.entry.id in projected_ids
