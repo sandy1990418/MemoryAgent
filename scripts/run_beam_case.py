@@ -47,6 +47,11 @@ from scripts.beam_models import (
     normalize_beam_profile,
 )
 from evaluation.beam.chat_case_adapter import BeamChatCaseAdapter
+from evaluation.beam.memory_snapshot import (
+    load_memory_snapshot,
+    restore_from_snapshot,
+    write_memory_snapshot,
+)
 from evaluation.beam.routing import RoutingMode, build_oracle_memory_context
 from memory_agent.structured.answer_context import (
     AnswerContext,
@@ -200,6 +205,7 @@ def build_structured_beam_middleware(
             ),
             sections=sections,
             policy=memory_policy,
+            enable_semantic_candidates=False,
         )
         if is_chat_policy(memory_policy)
         else None
@@ -929,6 +935,12 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
     use_mem0 = args.memory_mode in ("structured_mem0", "raw_mem0")
     use_structured = args.memory_mode in ("structured_mem0", "structured_only")
 
+    replay_snapshot = None
+    if args.replay_memory is not None:
+        if not use_structured:
+            raise ValueError("--replay-memory requires a structured memory mode")
+        replay_snapshot = load_memory_snapshot(args.replay_memory)
+
     run_id = time.strftime("%Y%m%d-%H%M%S")
     results_dir = args.results_dir
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -982,8 +994,25 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
     active_messages: list[AnyMessage] = []
     token_ledger = TokenLedger()
     token_ledger.ensure_roles(*BEAM_TOKEN_ROLES)
+    structured_started = time.perf_counter()
 
-    if use_structured:
+    if use_structured and replay_snapshot is not None:
+        # Replay skips ingestion entirely: memory and the working tail come
+        # from a frozen snapshot so selector/answer changes are compared
+        # against identical memory state.
+        structured_middleware = build_structured_beam_middleware(args, token_ledger)
+        active_messages = restore_from_snapshot(
+            replay_snapshot,
+            memory=structured_middleware.memory,
+            expected_profile=normalize_beam_profile(args.memory_profile),
+        )
+        print(
+            f"Replaying frozen memory snapshot from {args.replay_memory} "
+            f"(entries={len(structured_middleware.memory.entries)}; "
+            f"active_messages={len(active_messages)})",
+            flush=True,
+        )
+    elif use_structured:
         structured_middleware = build_structured_beam_middleware(args, token_ledger)
 
         print(
@@ -1015,6 +1044,23 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                 f"entries={len(structured_middleware.memory.entries)}",
                 flush=True,
             )
+    structured_elapsed_seconds = round(time.perf_counter() - structured_started, 6)
+
+    memory_snapshot_path: Path | None = None
+    if structured_middleware is not None and replay_snapshot is None:
+        memory_snapshot_path = args.memory_snapshot_output or output_path.with_name(
+            f"{output_path.stem}_memory_snapshot.json"
+        )
+        write_memory_snapshot(
+            memory_snapshot_path,
+            memory=structured_middleware.memory,
+            active_messages=active_messages,
+            memory_profile=normalize_beam_profile(args.memory_profile),
+            run_id=run_id,
+            source_commit=current_source_commit(),
+            chat=str(args.chat),
+        )
+        print(f"Wrote frozen memory snapshot to {memory_snapshot_path}", flush=True)
 
     llm = OpenAIClient(args.answer_model, role="agent", token_ledger=token_ledger)
     judge_llm = (
@@ -1034,6 +1080,20 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "topics": str(args.topics),
         "store_dir": str(store_dir) if store_dir is not None else None,
         "output": str(output_path),
+        "memory_snapshot_output": (
+            str(memory_snapshot_path) if memory_snapshot_path is not None else None
+        ),
+        "replay_memory": str(args.replay_memory) if args.replay_memory else None,
+        "replay_source": (
+            {
+                "run_id": replay_snapshot.get("run_id"),
+                "source_commit": replay_snapshot.get("source_commit"),
+                "memory_profile": replay_snapshot.get("memory_profile"),
+                "chat": replay_snapshot.get("chat"),
+            }
+            if replay_snapshot is not None
+            else None
+        ),
         "answers_output": str(answers_output_path),
         "evaluation_output": str(evaluation_output_path) if args.judge_model else None,
         "answer_model": args.answer_model,
@@ -1044,6 +1104,16 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "structured_memory": (
             structured_middleware.memory.render(include_superseded=True)
             if structured_middleware is not None
+            else None
+        ),
+        "structured_memory_entries": (
+            [asdict(entry) for entry in structured_middleware.memory.entries.values()]
+            if structured_middleware is not None
+            else []
+        ),
+        "compactor_metrics": (
+            asdict(structured_middleware.compactor.metrics)
+            if structured_middleware is not None and structured_middleware.compactor is not None
             else None
         ),
         "structured_transcript_length": (
@@ -1078,11 +1148,9 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                 if memory is not None
                 else []
             )
-            response = answer_question(
-                llm=llm,
-                model=args.answer_model,
-                question=question,
-                context=(build_oracle_answer_context if RoutingMode(args.routing_mode) is RoutingMode.ORACLE else build_answer_context)(
+            selected_memory_ids: list[str] | None = None
+            if RoutingMode(args.routing_mode) is RoutingMode.ORACLE:
+                answer_context = build_oracle_answer_context(
                     structured_middleware=structured_middleware,
                     active_messages=active_messages,
                     hits=hits,
@@ -1090,9 +1158,28 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                     max_active_context_chars=args.max_active_context_chars,
                     structured_answer_tokens=args.structured_answer_tokens,
                     query=question,
-                    **({"question_type": question_type} if RoutingMode(args.routing_mode) is RoutingMode.ORACLE else {}),
-                ),
+                    question_type=question_type,
+                )
+            else:
+                context_result = build_answer_context_result(
+                    structured_middleware=structured_middleware,
+                    active_messages=active_messages,
+                    hits=hits,
+                    max_hit_chars=args.max_hit_chars,
+                    max_active_context_chars=args.max_active_context_chars,
+                    structured_answer_tokens=args.structured_answer_tokens,
+                    query=question,
+                )
+                selected_memory_ids = list(context_result.selected_ids)
+                answer_context = context_result.rendered_context
+            answer_started = time.perf_counter()
+            response = answer_question(
+                llm=llm,
+                model=args.answer_model,
+                question=question,
+                context=answer_context,
             )
+            answer_elapsed_seconds = round(time.perf_counter() - answer_started, 6)
             rubric_checks = [rubric_hit(response, line) for line in item.get("rubric", [])]
             hit_count = sum(1 for check in rubric_checks if check["hit"])
             category_hits += hit_count
@@ -1147,6 +1234,9 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                         for hit in hits
                     ],
                     "structured_memory_used": structured_middleware is not None,
+                    "selected_memory_ids": selected_memory_ids,
+                    "answer_context": answer_context,
+                    "answer_elapsed_seconds": answer_elapsed_seconds,
                     "rubric_checks": rubric_checks,
                     "heuristic_rubric_hits": hit_count,
                     "heuristic_rubric_total": len(rubric_checks),
@@ -1195,6 +1285,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             len(structured_middleware.transcript) if structured_middleware is not None else 0
         ),
         "structured_active_messages": len(active_messages) if structured_middleware is not None else 0,
+        "structured_elapsed_seconds": structured_elapsed_seconds,
         "questions_answered": sum(len(items) for items in probes.values()),
         "structured_memory_stats": structured_memory_stats(
             structured_middleware.memory if structured_middleware is not None else None
@@ -1321,6 +1412,22 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap per selected question type for quick smoke tests.",
     )
     parser.add_argument("--skip-ingest", action="store_true")
+    parser.add_argument(
+        "--memory-snapshot-output",
+        type=Path,
+        help=(
+            "Optional path for the frozen post-ingestion memory snapshot; "
+            "defaults next to --output."
+        ),
+    )
+    parser.add_argument(
+        "--replay-memory",
+        type=Path,
+        help=(
+            "Replay a frozen memory snapshot instead of ingesting the "
+            "transcript, for paired selector/answer A/B comparisons."
+        ),
+    )
     parser.add_argument(
         "--routing-mode",
         choices=tuple(mode.value for mode in RoutingMode),

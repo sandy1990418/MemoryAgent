@@ -63,6 +63,7 @@ class MemoryCompactor:
         token_estimator: Callable[[str], int] | None = None,
         max_candidate_entries: int = 8,
         max_candidate_tokens: int = 512,
+        enable_semantic_candidates: bool = True,
     ) -> None:
         self.llm = llm
         self.sections = sections
@@ -73,6 +74,7 @@ class MemoryCompactor:
         self.token_estimator = token_estimator or _default_token_estimator
         self.max_candidate_entries = max_candidate_entries
         self.max_candidate_tokens = max_candidate_tokens
+        self.enable_semantic_candidates = enable_semantic_candidates
         self.metrics = CompactionMetrics()
         self._section_keys = {section.key for section in sections}
         self._section_key_by_prefix = {
@@ -126,6 +128,9 @@ class MemoryCompactor:
             groups.setdefault(key, []).append(entry)
             reasons[key] = "typed-subject" if identity_key else "exact-duplicate"
 
+        if not self.enable_semantic_candidates:
+            return self._candidates_from_groups(memory, groups, reasons)
+
         # Conservative semantic clusters are LLM-only: require same section and
         # meaningful token overlap, and never mix a typed group with another subject.
         untyped = [entry for entry in active if self._identity_key(entry) is None]
@@ -149,6 +154,14 @@ class MemoryCompactor:
                 groups[key] = entries
                 reasons[key] = "unresolved-pair"
 
+        return self._candidates_from_groups(memory, groups, reasons)
+
+    @staticmethod
+    def _candidates_from_groups(
+        memory: Memory,
+        groups: dict[str, list[MemoryEntry]],
+        reasons: dict[str, str],
+    ) -> list[CompactionCandidate]:
         candidates: list[CompactionCandidate] = []
         seen_sets: set[frozenset[str]] = set()
         for key, entries in groups.items():

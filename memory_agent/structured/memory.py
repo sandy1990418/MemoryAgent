@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Callable
 
-from memory_agent.models.memory import MemoryEntry
+from memory_agent.models.memory import MemoryEntry, MemoryValue, SubjectIdentity
 from memory_agent.models.policy import MemoryPolicy
 from memory_agent.models.sections import CHAT_SECTIONS, SectionConfig
 
@@ -93,6 +94,68 @@ class Memory:
         clone.narrative = self.narrative
         clone._counters = dict(self._counters)
         return clone
+
+    def to_state(self) -> dict:
+        """Serialize entries, narrative, and id counters for persistence."""
+        entries = []
+        for entry in self.entries.values():
+            state: dict = {
+                "id": entry.id,
+                "section": entry.section,
+                "text": entry.text,
+                "provenance": list(entry.provenance),
+                "status": entry.status,
+                "note": entry.note,
+            }
+            if entry.subject_identity is not None:
+                state["subject_identity"] = asdict(entry.subject_identity)
+            if entry.value is not None:
+                state["value"] = asdict(entry.value)
+            entries.append(state)
+        return {
+            "entries": entries,
+            "narrative": self.narrative,
+            "counters": dict(self._counters),
+        }
+
+    def load_state(self, state: dict) -> None:
+        """Restore a to_state() payload, replacing entries and counters."""
+        entries: dict[str, MemoryEntry] = {}
+        for raw in state.get("entries", []):
+            section = raw.get("section")
+            if section not in self._section_by_key:
+                raise ValueError(f"unknown section in memory state: {section}")
+            subject = raw.get("subject_identity")
+            value = raw.get("value")
+            entry = MemoryEntry(
+                id=str(raw["id"]),
+                section=section,
+                text=str(raw["text"]),
+                provenance=list(raw.get("provenance", [])),
+                status=raw.get("status", "active"),
+                note=raw.get("note", ""),
+                subject_identity=(
+                    SubjectIdentity(**subject) if isinstance(subject, dict) else None
+                ),
+                value=MemoryValue(**value) if isinstance(value, dict) else None,
+            )
+            entries[entry.id] = entry
+
+        counters = {key: 0 for key in self._section_by_key}
+        saved_counters = state.get("counters") or {}
+        for key, count in saved_counters.items():
+            if key in counters:
+                counters[key] = int(count)
+        # Guard against id collisions when counters are missing or stale.
+        for entry in entries.values():
+            prefix = self._section_by_key[entry.section].prefix
+            suffix = entry.id[len(prefix):]
+            if entry.id.startswith(prefix) and suffix.isdigit():
+                counters[entry.section] = max(counters[entry.section], int(suffix))
+
+        self.entries = entries
+        self.narrative = str(state.get("narrative", ""))
+        self._counters = counters
 
     def _apply_one(self, op: dict):
         """Return True on success, or a string reason for rejection."""

@@ -185,4 +185,6 @@ def test_chat_compacts_after_crossing_configured_threshold():
 
     chat.update([Turn(id=1, role="user", content="I prefer concise replies")])
 
-    assert len(calls) == 2
+    assert len(calls) == 1
+    assert chat.compactor is not None
+    assert chat.compactor.metrics.attempted_calls == 0

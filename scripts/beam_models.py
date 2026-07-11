@@ -257,6 +257,8 @@ class BeamRunConfig:
     judge_model: str | None = DEFAULT_BEAM_JUDGE_MODEL
     question_types: list[str] | tuple[str, ...] | None = DEFAULT_BEAM_QUESTION_TYPES
     max_questions_per_type: int | None = None
+    memory_snapshot_output: Path | None = None
+    replay_memory: Path | None = None
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "BeamRunConfig":

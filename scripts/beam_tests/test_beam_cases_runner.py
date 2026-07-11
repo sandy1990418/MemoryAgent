@@ -1,8 +1,15 @@
 import json
 import sys
 
+import pytest
+
 from scripts.beam_models import DEFAULT_BEAM_QUESTION_TYPES
-from scripts.run_beam_cases import discover_case_dirs, parse_args
+from scripts.run_beam_cases import (
+    discover_case_dirs,
+    parse_args,
+    replay_snapshot_lookup,
+    resolve_replay_snapshot,
+)
 
 
 def _write_case(root, case_id: int) -> None:
@@ -89,3 +96,57 @@ def test_batch_cli_accepts_memory_profile(monkeypatch):
     args = parse_args()
 
     assert args.memory_profile == "eval"
+
+
+def test_batch_cli_accepts_frozen_split_repeats_and_baseline(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_beam_cases.py", "--split", "validation", "--repeats", "3",
+            "--baseline-manifest", "baseline.json",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.split == "validation"
+    assert args.repeats == 3
+    assert str(args.baseline_manifest) == "baseline.json"
+    assert args.routing_mode == "production"
+
+
+def test_batch_cli_accepts_replay_manifest(monkeypatch):
+    monkeypatch.setattr(
+        sys, "argv", ["run_beam_cases.py", "--replay-manifest", "baseline.json"]
+    )
+
+    args = parse_args()
+
+    assert str(args.replay_manifest) == "baseline.json"
+
+
+def _baseline_manifest() -> dict:
+    return {
+        "cases": [
+            {"case_id": "1", "repeat": 1, "status": "ok", "memory_snapshot": "a/1-r1.json"},
+            {"case_id": "1", "repeat": 2, "status": "ok", "memory_snapshot": "a/1-r2.json"},
+            {"case_id": "4", "repeat": 1, "status": "error"},
+            {"case_id": "5", "repeat": 1, "status": "ok", "memory_snapshot": None},
+        ]
+    }
+
+
+def test_replay_lookup_maps_case_and_repeat_to_ok_snapshots_only():
+    lookup = replay_snapshot_lookup(_baseline_manifest())
+
+    assert lookup == {("1", 1): "a/1-r1.json", ("1", 2): "a/1-r2.json"}
+
+
+def test_resolve_replay_snapshot_prefers_exact_repeat_then_falls_back():
+    lookup = replay_snapshot_lookup(_baseline_manifest())
+
+    assert resolve_replay_snapshot(lookup, "1", 2) == "a/1-r2.json"
+    assert resolve_replay_snapshot(lookup, "1", 9) == "a/1-r1.json"
+    with pytest.raises(FileNotFoundError, match="case 4"):
+        resolve_replay_snapshot(lookup, "4", 1)

@@ -105,7 +105,12 @@ def build_chat_memory(
         evicted_turn_token_budget=product.evicted_turn_token_budget,
     )
     compactor = (
-        MemoryCompactor(llm=compactor_llm, sections=sections, policy=policy)
+        MemoryCompactor(
+            llm=compactor_llm,
+            sections=sections,
+            policy=policy,
+            enable_semantic_candidates=False,
+        )
         if compact
         else None
     )

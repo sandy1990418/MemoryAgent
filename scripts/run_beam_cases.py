@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +21,12 @@ from scripts.beam_models import (
 from memory_agent.models.config import product_config_from_argv
 from scripts.run_beam_case import run as run_standard_case
 from scripts.run_beam_case_deepagent import run as run_deepagent_case
+from evaluation.beam.regression_report import aggregate_runs, compare_aggregates
 
 
 DEFAULT_CASE_ROOT = Path("BEAM/chats/100K")
 DEFAULT_RESULTS_ROOT = Path("data/beam/results/100K")
+DEFAULT_SPLIT_FILE = Path("evaluation/beam/splits-100k-v1.json")
 
 
 def discover_case_dirs(
@@ -89,6 +92,7 @@ def case_config(args: argparse.Namespace, case_dir: Path) -> BeamRunConfig:
         "max_hit_chars": args.max_hit_chars,
         "max_active_context_chars": args.max_active_context_chars,
         "skip_ingest": args.skip_ingest,
+        "routing_mode": args.routing_mode,
         "answer_model": args.answer_model,
         "structured_model": args.structured_model,
         "structured_max_tokens": args.structured_max_tokens,
@@ -107,7 +111,48 @@ def case_config(args: argparse.Namespace, case_dir: Path) -> BeamRunConfig:
     return BeamRunConfig(**common)
 
 
+def replay_snapshot_lookup(baseline_manifest: dict[str, Any]) -> dict[tuple[str, int], str]:
+    """Map (case_id, repeat) to the baseline run's frozen memory snapshot."""
+    lookup: dict[tuple[str, int], str] = {}
+    for case in baseline_manifest.get("cases", []):
+        snapshot = case.get("memory_snapshot")
+        if case.get("status") == "ok" and snapshot:
+            lookup[(str(case["case_id"]), int(case["repeat"]))] = snapshot
+    return lookup
+
+
+def resolve_replay_snapshot(
+    lookup: dict[tuple[str, int], str], case_id: str, repeat: int
+) -> str:
+    exact = lookup.get((case_id, repeat))
+    if exact is not None:
+        return exact
+    case_repeats = sorted(
+        (key_repeat, path) for (key_case, key_repeat), path in lookup.items()
+        if key_case == case_id
+    )
+    if case_repeats:
+        return case_repeats[0][1]
+    raise FileNotFoundError(
+        f"replay manifest has no memory snapshot for case {case_id}"
+    )
+
+
 def run_batch(args: argparse.Namespace) -> dict[str, Any]:
+    replay_lookup: dict[tuple[str, int], str] | None = None
+    if args.replay_manifest:
+        if args.runner != "standard":
+            raise ValueError("--replay-manifest is only supported by the standard runner")
+        replay_lookup = replay_snapshot_lookup(
+            json.loads(args.replay_manifest.read_text(encoding="utf-8"))
+        )
+    split_definition = None
+    if args.split:
+        split_definition = json.loads(args.split_file.read_text(encoding="utf-8"))
+        split_ids = [str(value) for value in split_definition[args.split]]
+        if args.case_ids and set(args.case_ids) != set(split_ids):
+            raise ValueError("--case-ids cannot override the frozen --split membership")
+        args.case_ids = split_ids
     case_dirs = discover_case_dirs(
         case_root=args.case_root,
         case_ids=args.case_ids,
@@ -131,34 +176,65 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
         "case_ids": [path.name for path in case_dirs],
         "question_types": args.question_types,
         "max_questions_per_type": args.max_questions_per_type,
+        "split": args.split,
+        "split_file": str(args.split_file) if args.split else None,
+        "split_definition": split_definition,
+        "repeats": args.repeats,
+        "config": {
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in vars(args).items()
+        },
         "cases": [],
     }
 
     runner = run_deepagent_case if args.runner == "deepagent" else run_standard_case
-    total = len(case_dirs)
-    for index, case_dir in enumerate(case_dirs, start=1):
+    total = len(case_dirs) * args.repeats
+    completed = 0
+    detailed_results: list[dict[str, Any]] = []
+    for repeat in range(1, args.repeats + 1):
+      for case_dir in case_dirs:
+        completed += 1
         case_id = case_dir.name
-        print(f"\n=== BEAM case {case_id} ({index}/{total}) ===", flush=True)
+        print(
+            f"\n=== BEAM case {case_id} repeat {repeat}/{args.repeats} "
+            f"({completed}/{total}) ===",
+            flush=True,
+        )
         started = time.time()
         try:
-            result = runner(case_config(args, case_dir))
+            config = case_config(args, case_dir)
+            output = args.results_root / case_id / f"{run_id}_repeat-{repeat}_{args.routing_mode}.json"
+            overrides: dict[str, Any] = {"output": output}
+            if replay_lookup is not None:
+                overrides["replay_memory"] = Path(
+                    resolve_replay_snapshot(replay_lookup, case_id, repeat)
+                )
+            result = runner(replace(config, **overrides))
+            detailed_results.append(result)
             overall = result.get("summary", {}).get("overall", {})
             manifest["cases"].append(
                 {
                     "case_id": case_id,
+                    "repeat": repeat,
                     "status": "ok",
                     "elapsed_seconds": round(time.time() - started, 2),
                     "results_dir": str(args.results_root / case_id),
                     "output": result.get("output"),
+                    "memory_snapshot": result.get("memory_snapshot_output"),
+                    "replay_memory": result.get("replay_memory"),
                     "answers_output": result.get("answers_output"),
                     "evaluation_output": result.get("evaluation_output"),
                     "summary": overall,
+                    "source_commit": result.get("source_commit"),
+                    "source_state": result.get("source_state"),
+                    "config": result.get("config"),
                 }
             )
         except Exception as exc:
             manifest["cases"].append(
                 {
                     "case_id": case_id,
+                    "repeat": repeat,
                     "status": "error",
                     "elapsed_seconds": round(time.time() - started, 2),
                     "error": str(exc),
@@ -172,7 +248,20 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
         with manifest_path.open("w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2, ensure_ascii=False)
 
+      if args.stop_on_error and manifest["cases"] and manifest["cases"][-1]["status"] == "error":
+          break
+
+    manifest["aggregate"] = aggregate_runs(detailed_results)
+    if args.baseline_manifest:
+        baseline = json.loads(args.baseline_manifest.read_text(encoding="utf-8"))
+        manifest["comparison"] = compare_aggregates(
+            baseline["aggregate"], manifest["aggregate"]
+        )
+        manifest["baseline_manifest"] = str(args.baseline_manifest)
+
     manifest["manifest_path"] = str(args.results_root / f"batch_manifest_{run_id}.json")
+    with Path(manifest["manifest_path"]).open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
     return manifest
 
 
@@ -190,6 +279,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-case", type=int)
     parser.add_argument("--end-case", type=int)
     parser.add_argument("--max-cases", type=int)
+    parser.add_argument("--split-file", type=Path, default=DEFAULT_SPLIT_FILE)
+    parser.add_argument(
+        "--split", choices=("development", "validation", "holdout"),
+        help="Use immutable case membership from --split-file.",
+    )
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--baseline-manifest", type=Path)
+    parser.add_argument(
+        "--replay-manifest",
+        type=Path,
+        help=(
+            "Batch manifest of a prior run whose frozen memory snapshots are "
+            "replayed instead of re-ingesting, for paired A/B comparisons."
+        ),
+    )
     parser.add_argument("--runner", choices=("standard", "deepagent"), default="standard")
     parser.add_argument(
         "--memory-mode",
@@ -235,6 +339,9 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap per selected question type for quick smoke tests.",
     )
     parser.add_argument("--skip-ingest", action="store_true")
+    parser.add_argument(
+        "--routing-mode", choices=("production", "oracle"), default="production"
+    )
     parser.add_argument("--answer-model", default=defaults["answer_model"])
     parser.add_argument("--structured-model", default=defaults["structured_model"])
     parser.add_argument(

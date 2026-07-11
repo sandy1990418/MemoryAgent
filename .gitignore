@@ -10,9 +10,12 @@ __pycache__/
 .pytest_cache/
 .venv-deepagents
 BEAM
-!evaluation/beam/
-!evaluation/beam/*.py
 .omc
 .omx
 .codex
 BEAM
+!evaluation/beam/
+evaluation/beam/*
+!evaluation/beam/regression_report.py
+!evaluation/beam/splits-*.json
+evaluation

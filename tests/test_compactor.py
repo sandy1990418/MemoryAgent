@@ -236,6 +236,23 @@ def test_typed_subject_with_incompatible_units_or_qualifiers_is_not_a_candidate(
     assert sum(entry.status == "active" for entry in memory.entries.values()) == 2
 
 
+def test_production_mode_disables_ambiguous_semantic_candidates():
+    policy = get_memory_policy("practical")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    memory.apply_ops([
+        {"op": "ADD", "section": "facts", "text": "Flask app uses SQLite.", "provenance": [1]},
+        {"op": "ADD", "section": "facts", "text": "Flask app uses Bootstrap.", "provenance": [2]},
+    ])
+    compactor = MemoryCompactor(
+        llm=ScriptedLLM(lambda *_: (_ for _ in ()).throw(AssertionError("transport called"))),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+        enable_semantic_candidates=False,
+    )
+
+    assert compactor.detect_candidates(memory) == []
+
+
 def test_candidate_budget_is_enforced_before_transport():
     policy = get_memory_policy("practical")
     memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
