@@ -12,6 +12,7 @@ from memory_agent.structured.compactor import MemoryCompactor
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.selector import MemorySelector
 from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.profiles.chat.subject_normalizer import ChatSubjectNormalizer
 from tests.fakes import ScriptedLLM
 
 
@@ -103,3 +104,33 @@ def test_similar_entities_are_not_automatically_sent_to_semantic_compaction():
 
     assert compactor.compact(memory) == ([], [])
     assert sum(entry.status == "active" for entry in memory.entries.values()) == 2
+
+
+def test_named_container_count_has_stable_identity_but_unanchored_count_does_not():
+    normalizer = ChatSubjectNormalizer()
+
+    old = normalizer.normalize("User has ~45 sources in Zotero.")
+    new = normalizer.normalize("I've added 52 sources to my Zotero library.")
+
+    assert old is not None and new is not None
+    assert old[0].entity == "zotero source count"
+    assert new[0].entity == "zotero source count"
+    assert normalizer.normalize("The example has 12 widgets.") is None
+
+
+def test_named_container_count_update_supersedes_older_active_value():
+    policy, memory = _memory()
+    updater = MemoryUpdater(
+        ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+
+    updater.update(memory, [Turn(1, "user", "I've added 45 sources to my Zotero library.")])
+    updater.update(memory, [Turn(2, "user", "I now have 52 sources in Zotero.")])
+
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    superseded = [entry for entry in memory.entries.values() if entry.status == "superseded"]
+    assert len(active) == 1 and active[0].value.value == "52"
+    assert len(superseded) == 1
+    assert active[0].provenance == [1, 2]

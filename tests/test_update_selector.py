@@ -1,4 +1,5 @@
-from memory_agent.models.sections import CHAT_SECTIONS
+from memory_agent.models.policy import get_memory_policy
+from memory_agent.models.sections import CHAT_SECTIONS, PRACTICAL_SECTIONS
 from memory_agent.models.config import ProductMemoryConfig
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
@@ -217,3 +218,41 @@ def test_chinese_oversized_group_and_tool_results_stay_complete():
     report = updater.turn_selection_reports[-1]
     assert report["dropped_turn_ids"] == [1, 2]
     assert report["groups"][-1]["type"] == "tool_call_result"
+
+
+def test_practical_budget_omits_transient_assistant_answers_but_keeps_user_sources():
+    policy = get_memory_policy("chat")
+    turns = [
+        Turn(1, "user", "Project Alpha is blocked."),
+        Turn(2, "assistant", "Long generic advice " * 200),
+        Turn(3, "user", "Project Beta is active."),
+        Turn(4, "assistant", "More generic advice " * 200),
+    ]
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+        evicted_turn_token_budget=20,
+        token_estimator=lambda text: max(1, len(text) // 20),
+    )
+
+    selected = updater._turns_within_budget(turns)
+
+    assert [turn.id for turn in selected] == [1, 3]
+
+
+def test_practical_budget_keeps_assistant_proposal_with_user_acceptance():
+    policy = get_memory_policy("chat")
+    turns = [
+        Turn(1, "assistant", "I propose using a weekly release train."),
+        Turn(2, "user", "Yes, let's do that."),
+    ]
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+        evicted_turn_token_budget=1,
+        token_estimator=lambda _text: 1,
+    )
+
+    assert updater._turns_within_budget(turns) == turns

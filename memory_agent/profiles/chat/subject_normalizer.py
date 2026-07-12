@@ -38,6 +38,20 @@ _NUMBER_RE = re.compile(
     r"(?P<unit>%|percent|books?|pages?|days?|weeks?|months?|years?|hours?|minutes?)?",
     re.IGNORECASE,
 )
+_COUNT_ITEM = r"[A-Za-z][A-Za-z'-]{2,}s"
+_COUNT_IN_CONTAINER_RE = re.compile(
+    rf"(?:\b(?:i|we|user)\s+(?:have|has|added|now have|currently have)\s+)?"
+    rf"~?(?P<value>\d+(?:,\d{{3}})*)\s+(?P<item>{_COUNT_ITEM})\s+"
+    r"(?:in|to)\s+(?:my|our|the)?\s*"
+    r"(?P<container>[A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,4})",
+    re.IGNORECASE,
+)
+_CONTAINER_HAS_COUNT_RE = re.compile(
+    rf"(?P<container>(?:my|our|the)\s+[A-Za-z][\w'-]*"
+    rf"(?:\s+[A-Za-z][\w'-]*){{0,4}})\s+(?:has|contains|holds|includes)\s+"
+    rf"~?(?P<value>\d+(?:,\d{{3}})*)\s+(?P<item>{_COUNT_ITEM})\b",
+    re.IGNORECASE,
+)
 
 
 class ChatSubjectNormalizer:
@@ -57,7 +71,7 @@ class ChatSubjectNormalizer:
             compact = (compact[: qualifier_match.start()] + compact[qualifier_match.end() :]).strip(" ,")
         match = _VALUE_RE.match(compact)
         if not match:
-            return self._normalize_personal_value(compact)
+            return self._normalize_count(compact) or self._normalize_personal_value(compact)
         subject = self._canonical(_LEADING_OWNER_RE.sub("", match.group("subject")))
         if len(subject.split()) < 2:
             return None
@@ -72,6 +86,34 @@ class ChatSubjectNormalizer:
                 confidence=0.9,
             ),
             MemoryValue(value=match.group("value"), unit=unit),
+        )
+
+    def _normalize_count(
+        self, compact: str
+    ) -> tuple[SubjectIdentity, MemoryValue] | None:
+        """Normalize counts only when a named container anchors the subject."""
+        compact = re.sub(r"^User stated:\s*", "", compact, flags=re.IGNORECASE)
+        match = _COUNT_IN_CONTAINER_RE.search(compact) or _CONTAINER_HAS_COUNT_RE.search(compact)
+        if match is None:
+            return None
+        container = self._canonical(_LEADING_OWNER_RE.sub("", match.group("container")))
+        container = re.sub(
+            r"\s+(?:collection|library|repository|repo|list)$", "", container
+        )
+        item = match.group("item").lower()
+        item_kind = item.rstrip("s")
+        if len(container.split()) > 5 or container in {
+            "project", "collection", "library", "example", "sample", "demo",
+        }:
+            return None
+        return (
+            SubjectIdentity(
+                self.namespace,
+                f"{container} {item_kind} count",
+                "count",
+                confidence=0.9,
+            ),
+            MemoryValue(match.group("value").replace(",", ""), item_kind),
         )
 
     def _normalize_personal_value(

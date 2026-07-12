@@ -282,6 +282,9 @@ class MemoryUpdater:
 
     def _turns_within_budget(self, turns: list[Turn]) -> list[Turn]:
         groups = self._semantic_turn_groups(turns)
+        prompt_turns_by_group = {
+            id(group): self._prompt_turns_for_group(group) for group in groups
+        }
         budget = self.evicted_turn_token_budget
         selected: list[TurnGroup] = []
         used = 0
@@ -291,7 +294,10 @@ class MemoryUpdater:
             # The newest group is mandatory: in particular this preserves a
             # latest unresolved user or its complete request/response exchange.
             for group in reversed(groups):
-                tokens = sum(self.token_estimator(turn.content) for turn in group.turns)
+                tokens = sum(
+                    self.token_estimator(turn.content)
+                    for turn in prompt_turns_by_group[id(group)]
+                )
                 if group.mandatory or used + tokens <= budget:
                     selected.append(group)
                     used += tokens
@@ -300,7 +306,11 @@ class MemoryUpdater:
                     # updater context remains a contiguous suffix.
                     break
             selected.reverse()
-        selected_ids = {turn.id for group in selected for turn in group.turns}
+        selected_ids = {
+            turn.id
+            for group in selected
+            for turn in prompt_turns_by_group[id(group)]
+        }
         selected_tokens = sum(
             self.token_estimator(turn.content) for turn in turns if turn.id in selected_ids
         )
@@ -323,6 +333,26 @@ class MemoryUpdater:
             ],
         })
         return [turn for turn in turns if turn.id in selected_ids]
+
+    def _prompt_turns_for_group(self, group: TurnGroup) -> tuple[Turn, ...]:
+        """Keep only source roles that can affect practical chat memory.
+
+        Ordinary assistant answers are transient under chat retention policy and
+        can be much larger than the user assertion they answer. Proposal
+        resolution, correction, and tool-result groups retain their full source
+        context because ownership or confirmation depends on multiple roles.
+        """
+        has_concrete_proposal = any(
+            turn.role == "assistant" and _PROPOSAL_RE.search(turn.content)
+            for turn in group.turns
+        )
+        if (
+            is_chat_policy(self.policy)
+            and group.group_type == "user_assistant"
+            and not has_concrete_proposal
+        ):
+            return tuple(turn for turn in group.turns if turn.role == "user")
+        return group.turns
 
     @staticmethod
     def _semantic_turn_groups(turns: list[Turn]) -> list[TurnGroup]:
