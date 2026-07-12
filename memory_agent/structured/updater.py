@@ -20,7 +20,7 @@ from memory_agent.models.policy import (
 )
 from memory_agent.models.sections import SectionConfig
 from memory_agent.models.transcript import Turn
-from memory_agent.models.memory import SubjectNormalizer
+from memory_agent.models.memory import MemoryValue, SubjectIdentity, SubjectNormalizer
 from memory_agent.profiles.chat.subject_normalizer import ChatSubjectNormalizer
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.heuristics import (
@@ -32,15 +32,18 @@ from memory_agent.structured.heuristics import (
     GENERIC_NON_DURABLE_MEMORY_RE,
     ORDINARY_QUESTION_RE,
     PROGRESS_VALUE_RE,
+    PERSONAL_SUBJECT_VALUE_PATTERNS,
     PROJECT_IMPLEMENTATION_STATE_RE,
     STATUS_CHANGE_CUE_RE,
     STATUS_VALUE_RE,
     STABLE_INSTRUCTION_RE,
     SUBJECT_VALUE_PATTERNS,
     SUBJECT_VALUE_SECTION_RE,
+    TECHNICAL_CONTEXT_RE,
     WHITESPACE_RE,
     content_words,
     status_change_cue_re,
+    trim_conversational_frame,
 )
 from memory_agent.structured.ops import UpdateFailed, parse_memory_ops
 from memory_agent.structured.prompts import build_updater_prompt
@@ -64,6 +67,41 @@ def _debug_ops(label: str, ops: list[dict]) -> None:
     )
 
 _TURN_SUFFIX_RE = re.compile(r"\s*\(turns?\s+([0-9,\-\s]+)\)\s*$", re.IGNORECASE)
+_ACCEPTANCE_RE = re.compile(
+    r"\b(?:yes|agreed|sounds good|let'?s do (?:it|that)|go with that|accepted?)\b"
+    r"|(?:同意|就這樣|採用這個|照這個做|可以，就這個)",
+    re.IGNORECASE,
+)
+_REJECTION_RE = re.compile(
+    r"\b(?:no|reject(?:ed)?|don'?t do that|do not do that|not that option|decline[ds]?)\b"
+    r"|(?:拒絕|不要這個|不採用|換一個方案)",
+    re.IGNORECASE,
+)
+_PURE_PROPOSAL_RESOLUTION_RE = re.compile(
+    r"^\s*(?:(?:yes|agreed|accepted?|sounds good)(?:[,;:]?\s*(?:go with that|"
+    r"let'?s do (?:it|that)))?|go with that|let'?s do (?:it|that)|"
+    r"no(?:[,;:]?\s*(?:reject that proposal|don'?t do that))?|reject(?:ed)?(?: that proposal)?|"
+    r"don'?t do that|do not do that|not that option|decline[ds]?|"
+    r"(?:同意|就這樣|採用這個|照這個做|可以，就這個)(?:[，,]?就這樣)?|"
+    r"拒絕|不要這個|不採用|換一個方案)\s*[.!。！]?\s*$",
+    re.IGNORECASE,
+)
+_PROPOSAL_RE = re.compile(
+    r"\b(?:i\s+(?:propose|suggest|recommend)|we\s+should|"
+    r"my recommendation is)\b|(?:我(?:建議|提議)|建議採用)",
+    re.IGNORECASE,
+)
+_EXPLICIT_STATE_RE = re.compile(
+    r"\b(?P<subject>(?:the|my|our)\s+[A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,4}|it)\s+"
+    r"(?:is|was|became|has been)\s+(?P<state>planned|active|blocked|resumed|"
+    r"paused|cancelled|canceled|complete|completed|shipped|failed|done|in progress)\b",
+    re.IGNORECASE,
+)
+_ZH_EXPLICIT_STATE_RE = re.compile(
+    r"(?P<subject>它|[\u4e00-\u9fffA-Za-z0-9_-]{1,12})"
+    r"(?:目前)?(?:是|已經?|變成)"
+    r"(?P<state>規劃中|進行中|受阻|恢復|暫停|完成|取消|失敗|已上線)",
+)
 
 
 def _default_token_estimator(text: str) -> int:
@@ -90,6 +128,7 @@ class UpdateTokenReport:
     rejected_ops_count: int = 0
     llm_call_required_reason: str = "call:possible_durable_assertion"
     required_exact_subject_overflow_tokens: int = 0
+    mandatory_overflow_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -99,6 +138,29 @@ class UpdateTokenReport:
     def input_tokens(self) -> int:
         return self.system_tokens + self.visible_memory_tokens + self.evicted_turn_tokens + self.retry_tokens
 
+
+@dataclass(frozen=True)
+class TurnGroup:
+    turns: tuple[Turn, ...]
+    group_type: str
+    mandatory: bool = False
+
+
+@dataclass
+class PreparedUpdate:
+    trial_memory: Memory
+    applied_ops: list[dict]
+    rejected_ops: list[dict]
+    base_revision: int
+    _committed: bool = False
+
+    def commit(self, live_memory: Memory) -> None:
+        if self.rejected_ops:
+            raise RuntimeError("cannot commit a prepared update with rejected operations")
+        if self._committed:
+            raise RuntimeError("prepared update was already committed")
+        live_memory.commit_trial(self.trial_memory, self.base_revision)
+        self._committed = True
 
 class MemoryUpdater:
     """Asks an LLM to translate evicted turns into ADD/UPDATE/SUPERSEDE ops."""
@@ -142,7 +204,10 @@ class MemoryUpdater:
         self.max_legacy_candidate_entries = max_legacy_candidate_entries
         self.enable_llm_gate = enable_llm_gate
         self.decision_reasons: Counter[str] = Counter()
+        self.write_suppression_reasons: Counter[str] = Counter()
+        self.lifecycle_diagnostics: Counter[str] = Counter()
         self.evicted_user_assistant_pairs = 0
+        self.turn_selection_reports: list[dict] = []
         # Fail fast on profile/section mismatches instead of silently running
         # with retention behavior the caller did not intend.
         validate_policy_sections(self.policy, sections)
@@ -182,9 +247,23 @@ class MemoryUpdater:
             "evicted_user_assistant_pairs": self.evicted_user_assistant_pairs,
             "calls_skipped_by_deterministic_gating": sum(v for k, v in self.decision_reasons.items() if k.startswith("skip:")),
             "decision_reasons": dict(self.decision_reasons),
+            "write_suppression_reasons": dict(self.write_suppression_reasons),
+            "suppressed_write_count": sum(self.write_suppression_reasons.values()),
+            "lifecycle_diagnostics": dict(self.lifecycle_diagnostics),
             "retries": sum(1 for r in self.token_reports if r.retry_tokens),
             "retry_tokens": sum(r.retry_tokens for r in self.token_reports),
             "rejected_ops_count": sum(r.rejected_ops_count for r in self.token_reports),
+            "mandatory_turn_budget_overflow_count": sum(
+                bool(report["mandatory_overflow_tokens"])
+                for report in self.turn_selection_reports
+            ),
+            "dropped_turn_count": sum(
+                len(report["dropped_turn_ids"]) for report in self.turn_selection_reports
+            ),
+            "non_contiguous_selection_count": sum(
+                not report["selection_is_contiguous"] for report in self.turn_selection_reports
+            ),
+            "turn_selection_reports": list(self.turn_selection_reports),
             "visible_entries_by_section": dict(visible_by_section),
             "provider_reported_input_tokens": sum(provider_inputs),
             "provider_reported_output_tokens": sum(provider_outputs),
@@ -202,18 +281,89 @@ class MemoryUpdater:
     _ALWAYS_CONTEXT_SECTIONS = frozenset({"preferences", "goal", "status_changes"})
 
     def _turns_within_budget(self, turns: list[Turn]) -> list[Turn]:
-        if self.evicted_turn_token_budget is None:
-            return turns
-        selected: list[Turn] = []
+        groups = self._semantic_turn_groups(turns)
+        budget = self.evicted_turn_token_budget
+        selected: list[TurnGroup] = []
         used = 0
-        # Keep the newest complete turns; never slice turn text mid-content.
-        for turn in reversed(turns):
-            tokens = self.token_estimator(turn.content)
-            if used + tokens > self.evicted_turn_token_budget:
-                continue
-            selected.append(turn)
-            used += tokens
-        return list(reversed(selected))
+        if budget is None:
+            selected = groups
+        else:
+            # The newest group is mandatory: in particular this preserves a
+            # latest unresolved user or its complete request/response exchange.
+            for group in reversed(groups):
+                tokens = sum(self.token_estimator(turn.content) for turn in group.turns)
+                if group.mandatory or used + tokens <= budget:
+                    selected.append(group)
+                    used += tokens
+                else:
+                    # Once a group is dropped, older groups are not backfilled:
+                    # updater context remains a contiguous suffix.
+                    break
+            selected.reverse()
+        selected_ids = {turn.id for group in selected for turn in group.turns}
+        selected_tokens = sum(
+            self.token_estimator(turn.content) for turn in turns if turn.id in selected_ids
+        )
+        overflow = max(0, selected_tokens - budget) if budget is not None else 0
+        dropped = [turn for turn in turns if turn.id not in selected_ids]
+        self.turn_selection_reports.append({
+            "selected_turn_ids": [turn.id for turn in turns if turn.id in selected_ids],
+            "dropped_turn_ids": [turn.id for turn in dropped],
+            "selected_group_count": len(selected),
+            "dropped_group_count": len(groups) - len(selected),
+            "selected_turn_tokens": selected_tokens,
+            "dropped_turn_tokens": sum(self.token_estimator(turn.content) for turn in dropped),
+            "mandatory_overflow_tokens": overflow,
+            "oversized_mandatory_group": overflow > 0,
+            "selection_is_contiguous": not dropped or not selected or max(t.id for t in dropped) < min(selected_ids),
+            "groups": [
+                {"type": group.group_type, "turn_ids": [turn.id for turn in group.turns],
+                 "mandatory": group.mandatory}
+                for group in groups
+            ],
+        })
+        return [turn for turn in turns if turn.id in selected_ids]
+
+    @staticmethod
+    def _semantic_turn_groups(turns: list[Turn]) -> list[TurnGroup]:
+        """Group contiguous conversational exchanges without slicing messages."""
+        raw: list[tuple[list[Turn], str]] = []
+        current: list[Turn] = []
+        for turn in turns:
+            if turn.role == "user" and current:
+                raw.append((current, MemoryUpdater._group_type(current)))
+                current = []
+            current.append(turn)
+        if current:
+            raw.append((current, MemoryUpdater._group_type(current)))
+
+        context_re = re.compile(
+            r"(?:\b(?:yes|agreed|accept|sounds good|go with|no|reject|instead|actually|correction|changed my mind|no longer|not anymore)\b|同意|接受|拒絕|不要|改成|更正|其實|不再)",
+            re.I,
+        )
+        merged: list[tuple[list[Turn], str]] = []
+        for group, kind in raw:
+            user_text = next((t.content for t in group if t.role == "user"), "")
+            if merged and context_re.search(user_text):
+                prior, _prior_kind = merged.pop()
+                kind = "correction_context" if re.search(r"(?:\b(?:instead|actually|correction|changed my mind|no longer|not anymore)\b|改成|更正|其實|不再)", user_text, re.I) else "acceptance_context"
+                group = [*prior, *group]
+            merged.append((group, kind))
+        return [
+            TurnGroup(tuple(group), kind, mandatory=index == len(merged) - 1)
+            for index, (group, kind) in enumerate(merged)
+        ]
+
+    @staticmethod
+    def _group_type(turns: list[Turn]) -> str:
+        roles = {turn.role for turn in turns}
+        if "tool" in roles or any("[tool_call]" in turn.content for turn in turns):
+            return "tool_call_result"
+        if turns and turns[0].role == "user" and len(turns) == 1:
+            return "unresolved_user"
+        if turns and turns[0].role == "user" and "assistant" in roles:
+            return "user_assistant"
+        return "standalone"
 
     def _select_update_context_entries(self, memory: Memory, evicted_turns: list[Turn]) -> list:
         """Pick the memory entries most relevant to the evicted turns.
@@ -286,7 +436,21 @@ class MemoryUpdater:
         if not user_turns:
             return "skip:no_durable_assertion"
         combined = " ".join(turn.content for turn in user_turns)
-        if re.search(r"\b(?:yes|agreed|sounds good|let'?s do (?:it|that)|go with that|accepted?)\b", combined, re.I):
+        has_deterministic_resolution = any(
+            isinstance(op, dict)
+            and op.get("op") == "ADD"
+            and op.get("section") == "decisions"
+            and str(op.get("text", "")).startswith(
+                ("Accepted strategy:", "Rejected proposal:")
+            )
+            for op in deterministic_ops
+        )
+        if has_deterministic_resolution and all(
+            _PURE_PROPOSAL_RESOLUTION_RE.fullmatch(turn.content)
+            for turn in user_turns
+        ):
+            return "skip:deterministic_ops_fully_cover_batch"
+        if _ACCEPTANCE_RE.search(combined):
             return "call:user_acceptance_ambiguous"
         if re.search(r"\b(?:correction|changed my mind|no longer|not anymore|instead|actually|contradict(?:s|ion|ory)?)\b", combined, re.I):
             return "call:unresolved_subject_conflict"
@@ -320,6 +484,17 @@ class MemoryUpdater:
         return usage.calls, usage.input_tokens, usage.output_tokens
 
     def update(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[list[dict], list[dict]]:
+        result = self.prepare_update(memory, evicted_turns)
+        if not result.rejected_ops:
+            result.commit(memory)
+        return result.applied_ops, result.rejected_ops
+
+    def prepare_update(self, memory: Memory, evicted_turns: list[Turn]) -> PreparedUpdate:
+        trial, base_revision = memory.transaction_snapshot()
+        applied, rejected = self._update_trial(trial, evicted_turns)
+        return PreparedUpdate(trial, applied, rejected, base_revision)
+
+    def _update_trial(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[list[dict], list[dict]]:
         users = sum(turn.role == "user" for turn in evicted_turns)
         assistants = sum(turn.role == "assistant" for turn in evicted_turns)
         self.evicted_user_assistant_pairs += min(users, assistants)
@@ -343,10 +518,8 @@ class MemoryUpdater:
         ) or (self.enable_llm_gate and decision_reason.startswith("skip:"))
         if should_skip:
             consolidated = [
+                *self._consolidate_lifecycle(memory),
                 *self._consolidate_near_duplicates(memory),
-                *self._consolidate_latest_subject_values(
-                    memory, self.subject_normalizer, self.identity_confidence_threshold
-                ),
             ]
             return det_applied + consolidated, []
 
@@ -404,11 +577,53 @@ class MemoryUpdater:
             try:
                 response = self.llm.complete(system, messages, model=self.model)
             except Exception as exc:
-                raise UpdateFailed(f"LLM transport error: {exc}") from exc
+                rejection = [{"op": None, "reason": f"LLM transport error: {exc}"}]
+                self._record_call_report(
+                    prompt_messages=messages,
+                    base_prompt_text=base_prompt_text,
+                    schema_tokens=schema_tokens,
+                    visible_component_tokens=visible_component_tokens,
+                    turn_component_tokens=turn_component_tokens,
+                    prompt_turns=prompt_turns,
+                    visible_entries=visible_entries,
+                    response="",
+                    provider_before=provider_before,
+                    deterministic_ops=deterministic_ops,
+                    llm_ops_count=0,
+                    rejected_count=1,
+                    decision_reason=decision_reason,
+                    required_overflow_tokens=selection.required_overflow_tokens,
+                )
+                if attempt < self.max_retries:
+                    messages = self._retry_failure_messages(messages, rejection)
+                    continue
+                raise UpdateFailed(f"LLM transport error after retry exhaustion: {exc}") from exc
 
             ops = parse_memory_ops(response)
             if ops is None:
-                raise UpdateFailed(f"Could not parse a JSON ops array from LLM response: {response!r}")
+                rejection = [{"op": response, "reason": "response was not a JSON ops array"}]
+                self._record_call_report(
+                    prompt_messages=messages,
+                    base_prompt_text=base_prompt_text,
+                    schema_tokens=schema_tokens,
+                    visible_component_tokens=visible_component_tokens,
+                    turn_component_tokens=turn_component_tokens,
+                    prompt_turns=prompt_turns,
+                    visible_entries=visible_entries,
+                    response=response,
+                    provider_before=provider_before,
+                    deterministic_ops=deterministic_ops,
+                    llm_ops_count=0,
+                    rejected_count=1,
+                    decision_reason=decision_reason,
+                    required_overflow_tokens=selection.required_overflow_tokens,
+                )
+                if attempt < self.max_retries:
+                    messages = self._retry_failure_messages(messages, rejection, response)
+                    continue
+                raise UpdateFailed(
+                    f"Could not parse a JSON ops array after retry exhaustion: {response!r}"
+                )
             ops = self._normalize_ops(ops, memory)
             hidden_id_rejections = [
                 {"op": op, "reason": "UPDATE/SUPERSEDE id was not visible to updater"}
@@ -447,6 +662,7 @@ class MemoryUpdater:
                 rejected_ops_count=len(hidden_id_rejections),
                 llm_call_required_reason=decision_reason,
                 required_exact_subject_overflow_tokens=selection.required_overflow_tokens,
+                mandatory_overflow_tokens=self.turn_selection_reports[-1]["mandatory_overflow_tokens"],
             )
             self.token_reports.append(call_report)
             if hidden_id_rejections:
@@ -459,16 +675,17 @@ class MemoryUpdater:
             ops = self._drop_duplicate_deterministic_adds(ops, memory)
             _debug_ops("llm before filter", ops)
             ops = self._apply_policy_filter(ops, memory, evicted_turns)
+            ops = self._suppress_redundant_and_transient_adds(
+                ops, memory, evicted_turns
+            )
             _debug_ops("llm after filter", ops)
             ops = [
                 op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
             ]
             if not ops:
                 consolidated = [
+                    *self._consolidate_lifecycle(memory),
                     *self._consolidate_near_duplicates(memory),
-                    *self._consolidate_latest_subject_values(
-                        memory, self.subject_normalizer, self.identity_confidence_threshold
-                    ),
                 ]
                 return det_applied + migrated_applied + consolidated, []
 
@@ -481,10 +698,8 @@ class MemoryUpdater:
 
             if not rejected:
                 consolidated = [
+                    *self._consolidate_lifecycle(memory),
                     *self._consolidate_near_duplicates(memory),
-                    *self._consolidate_latest_subject_values(
-                        memory, self.subject_normalizer, self.identity_confidence_threshold
-                    ),
                 ]
                 return det_applied + migrated_applied + applied + consolidated, []
 
@@ -563,7 +778,7 @@ class MemoryUpdater:
         normalizer: SubjectNormalizer | None = None,
         confidence_threshold: float = 0.85,
     ) -> list[dict]:
-        """Keep the latest value only for confidently identical typed subjects."""
+        """Keep a bounded value history for confidently identical subjects."""
         normalizer = normalizer or ChatSubjectNormalizer()
         ops: list[dict] = []
         groups: dict[tuple[str, str, str, str | None, str | None], list] = {}
@@ -582,17 +797,36 @@ class MemoryUpdater:
             identity, value = entry.subject_identity, entry.value
             if identity.confidence < confidence_threshold:
                 continue
+            if not MemoryUpdater._identity_is_specific(identity):
+                continue
             key = (identity.namespace, identity.entity, identity.attribute, identity.qualifier, value.unit)
             groups.setdefault(key, []).append(entry)
         for matches in groups.values():
             if len(matches) < 2:
                 continue
-            keep = max(matches, key=lambda entry: (max(entry.provenance or [0]), entry.id))
+            ordered = sorted(
+                matches,
+                key=lambda entry: (max(entry.provenance or [0]), entry.id),
+            )
+            keep = ordered[-1]
             provenance = sorted({turn_id for entry in matches for turn_id in entry.provenance})
+            values: list[str] = []
+            for entry in ordered:
+                for rendered in MemoryUpdater._entry_value_history(entry):
+                    if not values or rendered != values[-1]:
+                        values.append(rendered)
+            text = re.sub(
+                r"\s+Value history \(earliest→latest\):.*?\.\s*$",
+                "",
+                keep.text,
+            )
+            if len(values) > 1:
+                history = " → ".join(values[-4:])
+                text = f"{text} Value history (earliest→latest): {history}."
             ops.append({
                 "op": "UPDATE",
                 "id": keep.id,
-                "text": keep.text,
+                "text": text,
                 "provenance": provenance,
                 "subject_identity": keep.subject_identity,
                 "value": keep.value,
@@ -609,6 +843,75 @@ class MemoryUpdater:
             return []
         applied, rejected = memory.apply_ops_atomically(ops)
         return applied if not rejected else []
+
+    def _consolidate_lifecycle(self, memory: Memory) -> list[dict]:
+        ops = self._consolidate_latest_subject_values(
+            memory,
+            self.subject_normalizer,
+            self.identity_confidence_threshold,
+        )
+        if not ops:
+            self.lifecycle_diagnostics["uncertain_groups_skipped"] += 1
+            return []
+        superseded = sum(
+            isinstance(op, dict) and op.get("op") == "SUPERSEDE" for op in ops
+        )
+        histories = sum(
+            isinstance(op, dict)
+            and op.get("op") == "UPDATE"
+            and "Value history (earliest→latest):" in str(op.get("text", ""))
+            for op in ops
+        )
+        self.lifecycle_diagnostics["lifecycle_groups"] += sum(
+            isinstance(op, dict) and op.get("op") == "UPDATE" for op in ops
+        )
+        self.lifecycle_diagnostics["timeline_entries_created"] += histories
+        self.lifecycle_diagnostics["redundant_entries_superseded"] += superseded
+        self.lifecycle_diagnostics["important_transitions_preserved"] += histories
+        return ops
+
+    @staticmethod
+    def _identity_is_specific(identity) -> bool:
+        entity = identity.entity.strip().lower()
+        attribute = identity.attribute.strip().lower()
+        if not entity or entity == attribute:
+            return False
+        generic = {
+            "goal", "target", "budget", "rate", "duration", "value",
+            "my goal", "our goal", "the goal", "a goal",
+        }
+        if entity in generic:
+            return False
+        distinguishing = content_words(entity) - {
+            attribute, "goal", "target", "budget", "rate", "duration",
+            "set", "reach", "reached", "trying", "want", "wants",
+        }
+        required = 2 if attribute in {"goal", "target"} else 1
+        # ``content_words`` intentionally favors Latin words of length >= 3.
+        # A high-confidence typed identity should remain usable when its specific
+        # entity is written in another script.
+        if required == 1 and not distinguishing:
+            return any(ord(char) > 127 and char.isalnum() for char in entity)
+        return len(distinguishing) >= required
+
+    @staticmethod
+    def _render_memory_value(value) -> str:
+        unit = value.unit or ""
+        if unit in {"$", "€", "£"}:
+            return f"{unit}{value.value}"
+        return f"{value.value} {unit}".strip()
+
+    @staticmethod
+    def _entry_value_history(entry) -> list[str]:
+        match = re.search(
+            r"Value history \(earliest→latest\):\s*(.+?)\.\s*$",
+            entry.text,
+        )
+        if match:
+            values = [part.strip() for part in match.group(1).split("→")]
+            if values and all(values):
+                return values
+        return [MemoryUpdater._render_memory_value(entry.value)]
 
     @staticmethod
     def _retry_messages(messages: list[dict], ops: list[dict], rejected: list[dict]) -> list[dict]:
@@ -633,6 +936,73 @@ class MemoryUpdater:
                 ),
             },
         ]
+
+    @staticmethod
+    def _retry_failure_messages(
+        messages: list[dict], rejected: list[dict], response: str | None = None
+    ) -> list[dict]:
+        retry = list(messages)
+        if response:
+            retry.append({"role": "assistant", "content": response})
+        retry.append({
+            "role": "user",
+            "content": (
+                "The previous updater attempt failed before producing valid operations. "
+                "Retry the same turns and return only one valid JSON array of memory operations.\n"
+                f"{json.dumps({'errors': rejected}, ensure_ascii=False)}"
+            ),
+        })
+        return retry
+
+    def _record_call_report(
+        self,
+        *,
+        prompt_messages: list[dict],
+        base_prompt_text: str,
+        schema_tokens: int,
+        visible_component_tokens: int,
+        turn_component_tokens: int,
+        prompt_turns: list[Turn],
+        visible_entries: list,
+        response: str,
+        provider_before: tuple[int, int, int] | None,
+        deterministic_ops: list[dict],
+        llm_ops_count: int,
+        rejected_count: int,
+        decision_reason: str,
+        required_overflow_tokens: int,
+    ) -> None:
+        provider_after = self._provider_usage()
+        provider_input = provider_output = None
+        if (
+            provider_before is not None
+            and provider_after is not None
+            and provider_after[0] > provider_before[0]
+        ):
+            provider_input = provider_after[1] - provider_before[1]
+            provider_output = provider_after[2] - provider_before[2]
+        prompt_text = "\n".join(str(message.get("content", "")) for message in prompt_messages)
+        self.token_reports.append(UpdateTokenReport(
+            call_index=len(self.token_reports) + 1,
+            evicted_turn_count=len(prompt_turns),
+            visible_memory_entry_count=len(visible_entries),
+            visible_entries_by_section=dict(Counter(entry.section for entry in visible_entries)),
+            estimator_policy="characters_divided_by_four",
+            calls=1,
+            system_tokens=schema_tokens,
+            visible_memory_tokens=visible_component_tokens,
+            evicted_turn_tokens=turn_component_tokens,
+            output_tokens=self.token_estimator(response) if response else 0,
+            retry_tokens=max(0, self.token_estimator(prompt_text) - self.token_estimator(base_prompt_text)),
+            provider_input_tokens=provider_input,
+            provider_output_tokens=provider_output,
+            deterministic_ops_count=len(deterministic_ops),
+            llm_ops_count=llm_ops_count,
+            rejected_ops_count=rejected_count,
+            llm_call_required_reason=decision_reason,
+            required_exact_subject_overflow_tokens=required_overflow_tokens,
+            mandatory_overflow_tokens=self.turn_selection_reports[-1]["mandatory_overflow_tokens"],
+        ))
 
     def _normalize_ops(self, ops: list[dict], memory: Memory) -> list[dict]:
         normalized_ops: list[dict] = []
@@ -672,14 +1042,160 @@ class MemoryUpdater:
 
     def _deterministic_ops(self, memory: Memory, evicted_turns: list[Turn]) -> list[dict]:
         ops: list[dict] = []
+        ops.extend(self._deterministic_proposal_resolution_ops(memory, evicted_turns))
+        explicit_state_ops = self._deterministic_explicit_state_ops(memory, evicted_turns)
+        ops.extend(explicit_state_ops)
         ops.extend(self._deterministic_preference_ops(memory, evicted_turns))
         ops.extend(self._deterministic_project_state_ops(memory, evicted_turns))
         if self.policy.allow_exact_values:
             ops.extend(self._deterministic_exact_value_ops(memory, evicted_turns))
         if self.policy.allow_deterministic_subject_values:
             ops.extend(self._deterministic_subject_value_ops(memory, evicted_turns))
-        ops.extend(self._deterministic_status_change_ops(memory, evicted_turns))
+        covered_state_turns = {
+            turn_id
+            for op in explicit_state_ops
+            for turn_id in op.get("provenance", [])
+        }
+        ops.extend(
+            op
+            for op in self._deterministic_status_change_ops(memory, evicted_turns)
+            if not covered_state_turns.intersection(op.get("provenance", []))
+        )
         return ops
+
+    def _deterministic_proposal_resolution_ops(
+        self, memory: Memory, evicted_turns: list[Turn]
+    ) -> list[dict]:
+        if not self._has_section("decisions"):
+            return []
+        seen = self._active_text_keys(memory, "decisions")
+        generated: list[dict] = []
+        for index, turn in enumerate(evicted_turns):
+            if turn.role != "user":
+                continue
+            accepted = bool(_ACCEPTANCE_RE.search(turn.content))
+            rejected = bool(_REJECTION_RE.search(turn.content)) and not accepted
+            if not accepted and not rejected:
+                continue
+            previous = next(
+                (
+                    candidate
+                    for candidate in reversed(evicted_turns[:index])
+                    if candidate.role in {"assistant", "user"}
+                ),
+                None,
+            )
+            if previous is None or previous.role != "assistant":
+                continue
+            proposal = self._proposal_summary(previous.content)
+            if proposal is None:
+                continue
+            prefix = "Accepted strategy" if accepted else "Rejected proposal"
+            text = f"{prefix}: {proposal}"
+            if self._has_seen_text(text, seen):
+                continue
+            seen.add(self._text_key(text))
+            generated.append({
+                "op": "ADD",
+                "section": "decisions",
+                "text": text,
+                "provenance": [previous.id, turn.id],
+            })
+        return generated
+
+    @staticmethod
+    def _proposal_summary(content: str) -> str | None:
+        prose = MemoryUpdater._strip_code_fences(content).strip()
+        if not prose or not _PROPOSAL_RE.search(prose):
+            return None
+        sentence = re.split(r"(?<=[.!?。！？])(?:\s+|$)|\n", prose, maxsplit=1)[0].strip()
+        sentence = re.sub(
+            r"^(?:i\s+(?:propose|suggest|recommend)(?:\s+that)?|"
+            r"my recommendation is|we\s+(?:can|could|should)|let'?s)\s+",
+            "",
+            sentence,
+            flags=re.IGNORECASE,
+        ).strip()
+        sentence = re.sub(
+            r"^(?:我(?:建議(?:採用)?|提議)|我們可以|建議採用)\s*",
+            "",
+            sentence,
+        ).strip()
+        if not sentence or len(sentence) > 300:
+            return None
+        return sentence.rstrip(".")
+
+    def _deterministic_explicit_state_ops(
+        self, memory: Memory, evicted_turns: list[Turn]
+    ) -> list[dict]:
+        if not self._has_section("status_changes"):
+            return []
+        seen = self._active_text_keys(memory, "status_changes")
+        generated: list[dict] = []
+        last_subject: str | None = None
+        for turn in evicted_turns:
+            if turn.role != "user":
+                continue
+            for match in _EXPLICIT_STATE_RE.finditer(turn.content):
+                subject = match.group("subject").lower()
+                if subject == "it":
+                    if last_subject is None:
+                        continue
+                    subject = last_subject
+                else:
+                    subject = re.sub(r"^(?:the|my|our)\s+", "", subject)
+                    last_subject = subject
+                state = match.group("state").lower()
+                state = {"completed": "complete", "done": "complete"}.get(state, state)
+                text = f"State: {subject} is {state}."
+                if self._has_seen_text(text, seen):
+                    continue
+                seen.add(self._text_key(text))
+                generated.append({
+                    "op": "ADD",
+                    "section": "status_changes",
+                    "text": text,
+                    "provenance": [turn.id],
+                    "subject_identity": SubjectIdentity(
+                        "chat", subject, "state", confidence=0.95
+                    ),
+                    "value": MemoryValue(state),
+                })
+            for match in _ZH_EXPLICIT_STATE_RE.finditer(turn.content):
+                subject = match.group("subject")
+                if subject == "它":
+                    if last_subject is None:
+                        continue
+                    subject = last_subject
+                else:
+                    last_subject = subject
+                raw_state = match.group("state")
+                state = {
+                    "規劃中": "planned",
+                    "進行中": "active",
+                    "受阻": "blocked",
+                    "恢復": "resumed",
+                    "暫停": "paused",
+                    "完成": "complete",
+                    "取消": "cancelled",
+                    "失敗": "failed",
+                    "已上線": "shipped",
+                }[raw_state]
+                text = f"State: {subject} is {state}."
+                if self._has_seen_text(text, seen):
+                    continue
+                seen.add(self._text_key(text))
+                generated.append({
+                    "op": "ADD",
+                    "section": "status_changes",
+                    "text": text,
+                    "provenance": [turn.id],
+                    "subject_identity": SubjectIdentity(
+                        "chat", subject, "state", confidence=0.95
+                    ),
+                    "value": MemoryValue(state),
+                })
+        return generated
 
     def _deterministic_project_state_ops(
         self,
@@ -691,7 +1207,10 @@ class MemoryUpdater:
             return []
         seen = self._active_text_keys(memory, "facts")
         generated: list[dict] = []
-        for turn in evicted_turns:
+        # One newest explicit project event per eviction batch gives long-range
+        # summaries broader coverage without turning every implementation
+        # question into a permanent entry.
+        for turn in reversed(evicted_turns):
             if turn.role != "user":
                 continue
             prose = self._strip_code_fences(turn.content).split("->->", 1)[0]
@@ -699,6 +1218,9 @@ class MemoryUpdater:
                 sentence = WHITESPACE_RE.sub(" ", sentence).strip()
                 if not sentence or not PROJECT_IMPLEMENTATION_STATE_RE.search(sentence):
                     continue
+                trimmed = trim_conversational_frame(sentence)
+                if PROJECT_IMPLEMENTATION_STATE_RE.search(trimmed):
+                    sentence = trimmed
                 state = "Completed state" if re.search(r"\b(?:completed|implemented|fixed|finished|done)\b", sentence, re.I) else "Ongoing state"
                 text = f"{state}: {sentence}"
                 if self._has_seen_text(text, seen):
@@ -710,8 +1232,7 @@ class MemoryUpdater:
                     "text": text,
                     "provenance": [turn.id],
                 })
-                if len(generated) >= 2:
-                    return generated
+                return generated
         return generated
 
     def _deterministic_preference_ops(
@@ -784,7 +1305,13 @@ class MemoryUpdater:
                 explicit_denial = section == "status_changes" and bool(
                     EXPLICIT_PROJECT_DENIAL_RE.search(text)
                 )
-                if ordinary_question and not explicit_denial:
+                subject_identity = op.get("subject_identity")
+                typed_state = (
+                    isinstance(subject_identity, SubjectIdentity)
+                    and subject_identity.attribute == "state"
+                    and isinstance(op.get("value"), MemoryValue)
+                )
+                if ordinary_question and not explicit_denial and not typed_state:
                     continue
             elif kind == "UPDATE":
                 text = op.get("text")
@@ -810,6 +1337,16 @@ class MemoryUpdater:
     @staticmethod
     def _canonical_chat_entry_text(text: str, section: str | None) -> str | None:
         text = WHITESPACE_RE.sub(" ", text).strip()
+        prefix = ""
+        body = text
+        prefix_match = re.match(
+            r"^(Ongoing state:|Completed state:|Goal:|Constraint:|"
+            r"Stable preference:|User stated:)\s*",
+            body,
+        )
+        if prefix_match:
+            prefix, body = text[: prefix_match.end()], text[prefix_match.end() :]
+        text = prefix + trim_conversational_frame(body)
         if not text or text.endswith(("…", "...", ":", ",", ";", "-")):
             return None
         # Quarantine oversized model prose instead of creating a sliced fragment.
@@ -886,6 +1423,8 @@ class MemoryUpdater:
         combined = " ".join(user_texts)
         if DURABLE_USER_STATE_RE.search(combined):
             return False
+        if any(MemoryUpdater._extract_subject_value_snippets(text) for text in user_texts):
+            return False
         for text in user_texts:
             is_question = text.endswith("?") or bool(ORDINARY_QUESTION_RE.search(text))
             if cue_re.search(text) and not is_question:
@@ -901,13 +1440,12 @@ class MemoryUpdater:
 
         This is not the legacy exact-values inventory: generated entries go
         into normal semantic sections and keep the sentence subject attached to
-        the value. It is enabled only for richer agent memory configs that have
-        timeline/progress/status-change sections, so simple chat memory does
-        not become a numeric scrape.
+        the value. Compact chat memory stores these in ``facts``; requiring a
+        complete subject-bearing sentence and a durable cue prevents a bare
+        numeric inventory.
         """
-        if not any(
-            self._has_section(section)
-            for section in ("timeline", "progress", "status_changes")
+        if not self._has_section("facts") and not any(
+            self._has_section(section) for section in ("timeline", "progress", "status_changes")
         ):
             return []
 
@@ -916,6 +1454,9 @@ class MemoryUpdater:
             for section in ("timeline", "progress", "status_changes", "facts")
             if self._has_section(section)
         }
+        rich_sections = any(
+            self._has_section(section) for section in ("timeline", "progress", "status_changes")
+        )
         generated: list[dict] = []
 
         for turn in evicted_turns:
@@ -926,6 +1467,8 @@ class MemoryUpdater:
             snippets = self._extract_subject_value_snippets(turn.content)
             per_turn = 0
             for snippet, kind in snippets:
+                if (self.policy.name == "chat" or not rich_sections) and kind != "personal_value":
+                    continue
                 section = self._subject_value_section(snippet, kind)
                 if section is None:
                     continue
@@ -934,14 +1477,19 @@ class MemoryUpdater:
                     continue
                 key = self._text_key(text)
                 seen_by_section[section].add(key)
-                generated.append(
-                    {
-                        "op": "ADD",
-                        "section": section,
-                        "text": text,
-                        "provenance": [turn.id],
-                    }
-                )
+                op = {
+                    "op": "ADD",
+                    "section": section,
+                    "text": text,
+                    "provenance": [turn.id],
+                }
+                normalized = self.subject_normalizer.normalize(snippet)
+                if (
+                    normalized is not None
+                    and normalized[0].confidence >= self.identity_confidence_threshold
+                ):
+                    op["subject_identity"], op["value"] = normalized
+                generated.append(op)
                 per_turn += 1
                 if per_turn >= 6:
                     break
@@ -1039,6 +1587,7 @@ class MemoryUpdater:
             if section not in active_keys_by_section:
                 active_keys_by_section[section] = self._active_text_keys(memory, section)
             if self._has_seen_text(text, active_keys_by_section[section]):
+                self.write_suppression_reasons["redundant_add"] += 1
                 continue
             if section == "preferences":
                 provenance = set(op.get("provenance") or [])
@@ -1048,10 +1597,98 @@ class MemoryUpdater:
                     and provenance.intersection(entry.provenance)
                     for entry in memory.entries.values()
                 ):
+                    self.write_suppression_reasons["redundant_add"] += 1
                     continue
             filtered.append(op)
 
         return filtered
+
+    def _suppress_redundant_and_transient_adds(
+        self,
+        ops: list[dict],
+        memory: Memory,
+        evicted_turns: list[Turn],
+    ) -> list[dict]:
+        """Drop ADDs that add no durable information to the trial memory.
+
+        The checks deliberately require concrete evidence: an identical typed
+        subject/value, an exact/contained restatement within the same section
+        and source turns, or assistant-only provenance without user acceptance.
+        UPDATE and SUPERSEDE operations are never changed here.
+        """
+        turns_by_id = {turn.id: turn for turn in evicted_turns}
+        has_user_acceptance = any(
+            turn.role == "user"
+            and re.search(
+                r"\b(?:yes|agreed|sounds good|let'?s do (?:it|that)|"
+                r"go with that|accepted?)\b",
+                turn.content,
+                re.I,
+            )
+            for turn in evicted_turns
+        )
+        active = [entry for entry in memory.entries.values() if entry.status == "active"]
+        kept: list[dict] = []
+
+        for op in ops:
+            if not isinstance(op, dict) or op.get("op") != "ADD":
+                kept.append(op)
+                continue
+
+            provenance = {
+                turn_id for turn_id in op.get("provenance", [])
+                if isinstance(turn_id, int)
+            }
+            source_turns = [turns_by_id[turn_id] for turn_id in provenance if turn_id in turns_by_id]
+            user_sources = [turn for turn in source_turns if turn.role == "user"]
+            if source_turns and not user_sources and not has_user_acceptance:
+                self.write_suppression_reasons["assistant_only_proposal"] += 1
+                continue
+            section = op.get("section")
+            text = op.get("text")
+            if not isinstance(section, str) or not isinstance(text, str):
+                kept.append(op)
+                continue
+            op_key = self._text_key(text)
+            op_identity = op.get("subject_identity")
+            op_value = op.get("value")
+            redundant = False
+            for entry in active:
+                if entry.section != section:
+                    continue
+                if (
+                    section == "decisions"
+                    and provenance
+                    and provenance.issubset(set(entry.provenance))
+                    and entry.text.startswith(
+                        ("Accepted strategy:", "Rejected proposal:")
+                    )
+                ):
+                    redundant = True
+                    break
+                if (
+                    op_identity is not None
+                    and op_value is not None
+                    and entry.subject_identity == op_identity
+                    and entry.value == op_value
+                ):
+                    redundant = True
+                    break
+                if not provenance.intersection(entry.provenance):
+                    continue
+                entry_key = self._text_key(entry.text)
+                contained = bool(op_key and entry_key) and (
+                    op_key in entry_key or entry_key in op_key
+                )
+                if op_key == entry_key or contained:
+                    redundant = True
+                    break
+            if redundant:
+                self.write_suppression_reasons["redundant_add"] += 1
+                continue
+            kept.append(op)
+
+        return kept
 
     def _has_section(self, section_key: str) -> bool:
         return any(section.key == section_key for section in self.sections)
@@ -1100,6 +1737,11 @@ class MemoryUpdater:
         matches: list[tuple[int, int, str]] = []
         for pattern in EXACT_VALUE_DATE_PATTERNS:
             matches.extend((match.start(), match.end(), "date") for match in pattern.finditer(prose))
+        for pattern in PERSONAL_SUBJECT_VALUE_PATTERNS:
+            matches.extend(
+                (match.start(), match.end(), "personal_value")
+                for match in pattern.finditer(prose)
+            )
         for pattern in SUBJECT_VALUE_PATTERNS:
             matches.extend((match.start(), match.end(), "value") for match in pattern.finditer(prose))
 
@@ -1109,6 +1751,11 @@ class MemoryUpdater:
             snippet = MemoryUpdater._snippet_around(prose, start, end)
             if not snippet or not SUBJECT_VALUE_SECTION_RE.search(snippet):
                 continue
+            if kind == "personal_value" and TECHNICAL_CONTEXT_RE.search(snippet):
+                continue
+            trimmed = trim_conversational_frame(snippet)
+            if trimmed != snippet and SUBJECT_VALUE_SECTION_RE.search(trimmed):
+                snippet = trimmed
             key = MemoryUpdater._text_key(f"{kind}:{snippet}")
             if key in seen:
                 continue
@@ -1215,6 +1862,9 @@ class MemoryUpdater:
         snippet = snippet.rstrip(" ->")
         if not snippet:
             return None
+        trimmed = trim_conversational_frame(snippet)
+        if cue_re.search(trimmed):
+            snippet = trimmed
         if len(snippet) > 500:
             return None
         return snippet

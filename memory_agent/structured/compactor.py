@@ -101,6 +101,13 @@ class MemoryCompactor:
         identity = entry.subject_identity
         if identity is None or identity.confidence < 0.8:
             return None
+        entity = identity.entity.strip().lower()
+        attribute = identity.attribute.strip().lower()
+        if not entity or entity == attribute or entity in {
+            "goal", "target", "budget", "rate", "duration", "value",
+            "my goal", "our goal", "the goal", "a goal",
+        }:
+            return None
         unit = entry.value.unit if entry.value is not None else None
         # Empty qualifier/unit are identity components too; omitting them would
         # collapse qualified and unqualified facts or unit-bearing values.
@@ -133,7 +140,11 @@ class MemoryCompactor:
 
         # Conservative semantic clusters are LLM-only: require same section and
         # meaningful token overlap, and never mix a typed group with another subject.
-        untyped = [entry for entry in active if self._identity_key(entry) is None]
+        untyped = [
+            entry
+            for entry in active
+            if entry.subject_identity is None and self._identity_key(entry) is None
+        ]
         for index, left in enumerate(untyped):
             left_words = set(self._lexical_key(left).split(":", 1)[1].split())
             for right in untyped[index + 1:]:

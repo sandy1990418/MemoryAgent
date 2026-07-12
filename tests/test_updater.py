@@ -1,6 +1,11 @@
 import pytest
 
-from memory_agent.models.sections import AGENT_SECTIONS, CHAT_SECTIONS, EXACT_VALUES
+from memory_agent.models.sections import (
+    AGENT_SECTIONS,
+    CHAT_SECTIONS,
+    EXACT_VALUES,
+    PRACTICAL_SECTIONS,
+)
 from memory_agent.models.policy import get_memory_policy
 from memory_agent.models.transcript import Turn
 from memory_agent.structured.memory import Memory
@@ -207,7 +212,7 @@ def test_status_change_snippets_are_extracted_with_agent_sections():
     assert status_entries[0].provenance == [58]
 
 
-def test_deterministic_status_change_survives_rejected_llm_batch():
+def test_rejected_llm_batch_does_not_commit_deterministic_status_change():
     response = '[{"op": "UPDATE", "id": "C999", "text": "bad update", "provenance": [58]}]'
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda system, messages: response),
@@ -234,12 +239,105 @@ def test_deterministic_status_change_survives_rejected_llm_batch():
     status_entries = [
         entry for entry in mem.entries.values() if entry.section == "status_changes"
     ]
-    assert len(status_entries) == 1
-    assert status_entries[0].text == (
-        "User stated: I've never written any Flask routes or handled HTTP requests "
-        "in this project, so I'm starting from scratch."
+    assert status_entries == []
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        lambda _system, _messages: (_ for _ in ()).throw(RuntimeError("network down")),
+        lambda _system, _messages: "not JSON",
+    ],
+    ids=["transport", "parse"],
+)
+def test_failed_update_leaves_complete_live_state_unchanged(script):
+    updater = MemoryUpdater(llm=ScriptedLLM(script), sections=AGENT_SECTIONS, max_retries=0)
+    mem = Memory(sections=AGENT_SECTIONS)
+    mem.apply_ops([{"op": "ADD", "section": "facts", "text": "existing", "provenance": [9]}])
+    before = mem.to_state()
+
+    with pytest.raises(UpdateFailed):
+        updater.update(mem, [Turn(58, "user", "Actually, I have never deployed it.")])
+
+    assert mem.to_state() == before
+
+
+def test_retry_exhaustion_and_provenance_rejection_leave_live_state_unchanged():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"ADD","section":"facts","text":"bad","provenance":[999]}]'),
+        sections=AGENT_SECTIONS,
+        max_retries=1,
     )
-    assert status_entries[0].provenance == [58]
+    mem = Memory(sections=AGENT_SECTIONS)
+    before = mem.to_state()
+
+    _applied, rejected = updater.update(
+        mem, [Turn(58, "user", "Actually, I have never deployed it.")]
+    )
+
+    assert rejected
+    assert len(updater.token_reports) == 2
+    assert mem.to_state() == before
+
+
+def test_successful_prepared_update_commits_complete_state_once():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"ADD","section":"facts","text":"deployed","provenance":[1]}]'),
+        sections=AGENT_SECTIONS,
+    )
+    mem = Memory(sections=AGENT_SECTIONS)
+    prepared = updater.prepare_update(mem, [Turn(1, "user", "The project is deployed.")])
+    assert mem.entries == {}
+    assert prepared.trial_memory.entries
+
+    prepared.commit(mem)
+    committed = mem.to_state()
+    with pytest.raises(RuntimeError, match="already committed"):
+        prepared.commit(mem)
+    assert mem.to_state() == committed
+
+
+def test_prepared_update_rejects_commit_after_hidden_id_validation_failure():
+    mem = Memory(sections=CHAT_SECTIONS)
+    mem.apply_ops([
+        {"op": "ADD", "section": "facts", "text": "visible deployment", "provenance": [1]},
+        {"op": "ADD", "section": "facts", "text": "hidden unrelated value", "provenance": [2]},
+    ])
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(
+            lambda *_: '[{"op":"SUPERSEDE","id":"F2","reason":"hidden"}]'
+        ),
+        sections=CHAT_SECTIONS,
+        max_retries=0,
+        max_candidate_entries=1,
+    )
+    before = mem.to_state()
+
+    prepared = updater.prepare_update(
+        mem, [Turn(3, "user", "The deployment status changed.")]
+    )
+
+    assert prepared.rejected_ops[0]["reason"] == (
+        "UPDATE/SUPERSEDE id was not visible to updater"
+    )
+    with pytest.raises(RuntimeError, match="rejected operations"):
+        prepared.commit(mem)
+    assert mem.to_state() == before
+
+
+def test_prepared_update_detects_intervening_live_memory_change():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"ADD","section":"facts","text":"trial","provenance":[1]}]'),
+        sections=CHAT_SECTIONS,
+    )
+    mem = Memory(sections=CHAT_SECTIONS)
+    prepared = updater.prepare_update(mem, [Turn(1, "user", "Remember the trial fact.")])
+    mem.apply_ops([{"op": "ADD", "section": "facts", "text": "concurrent", "provenance": [2]}])
+
+    with pytest.raises(RuntimeError, match="memory changed"):
+        prepared.commit(mem)
+
+    assert [entry.text for entry in mem.entries.values()] == ["concurrent"]
 
 
 def test_numeric_update_id_is_rejected_to_avoid_turn_id_confusion():
@@ -424,6 +522,216 @@ def test_text_suffix_turns_are_stripped_even_when_provenance_exists():
     assert mem.entries["F1"].provenance == [7]
 
 
+def test_assistant_only_unaccepted_proposal_is_not_stored():
+    updater = make_updater(
+        lambda *_: (
+            '[{"op":"ADD","section":"decisions","text":"Use Redis",'
+            '"provenance":[2]}]'
+        )
+    )
+    memory = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        memory,
+        [
+            Turn(1, "user", "How could caching work?"),
+            Turn(2, "assistant", "I propose using Redis."),
+        ],
+    )
+
+    assert rejected == []
+    assert applied == []
+    assert memory.entries == {}
+    assert updater.update_token_usage()["write_suppression_reasons"] == {
+        "assistant_only_proposal": 1
+    }
+
+
+def test_accepted_assistant_proposal_can_be_stored_with_assistant_provenance():
+    updater = make_updater(
+        lambda *_: pytest.fail("pure accepted proposal should not call the LLM"),
+        enable_llm_gate=True,
+    )
+    memory = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        memory,
+        [
+            Turn(1, "assistant", "I propose using Redis."),
+            Turn(2, "user", "Yes, let's do that."),
+        ],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert memory.entries["D1"].text == "Accepted strategy: using Redis"
+    assert memory.entries["D1"].provenance == [1, 2]
+    assert updater.update_token_usage()["calls"] == 0
+
+
+@pytest.mark.parametrize(
+    ("proposal", "resolution", "expected"),
+    [
+        ("I propose PostgreSQL.", "Yes, go with that.", "Accepted strategy: PostgreSQL"),
+        ("I propose Redis.", "No, reject that proposal.", "Rejected proposal: Redis"),
+        ("我建議採用 PostgreSQL。", "同意，就這樣。", "Accepted strategy: PostgreSQL。"),
+    ],
+)
+def test_pure_proposal_resolution_is_deterministic_without_llm(
+    proposal, resolution, expected
+):
+    updater = make_updater(
+        lambda *_: pytest.fail("pure proposal resolution should not call the LLM"),
+        enable_llm_gate=True,
+    )
+    memory = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        memory,
+        [Turn(1, "assistant", proposal), Turn(2, "user", resolution)],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert memory.entries["D1"].text == expected
+    assert memory.entries["D1"].provenance == [1, 2]
+    assert updater.update_token_usage()["calls"] == 0
+
+
+def test_acceptance_with_an_additional_assertion_still_calls_llm():
+    calls = []
+
+    def respond(system, messages):
+        calls.append((system, messages))
+        return '[{"op":"NOOP"}]'
+
+    updater = make_updater(respond, enable_llm_gate=True)
+    memory = Memory(sections=CHAT_SECTIONS)
+
+    updater.update(
+        memory,
+        [
+            Turn(1, "assistant", "I propose PostgreSQL."),
+            Turn(2, "user", "Yes, go with that. My deployment remains blocked."),
+        ],
+    )
+
+    assert len(calls) == 1
+    assert updater.update_token_usage()["decision_reasons"] == {
+        "call:user_acceptance_ambiguous": 1
+    }
+
+
+def test_explicit_project_work_inside_a_question_is_retained_without_llm():
+    updater = make_updater(
+        lambda *_: pytest.fail("deterministic project work should not call the LLM"),
+        enable_llm_gate=True,
+    )
+    memory = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        memory,
+        [
+            Turn(
+                1,
+                "user",
+                "I'm trying to implement password hashing with Werkzeug.security, "
+                "but I'm not sure how to verify passwords correctly. Can you help?",
+            ),
+            Turn(2, "assistant", "Use check_password_hash."),
+        ],
+    )
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert memory.entries["F1"].text == (
+        "Ongoing state: I'm trying to implement password hashing with "
+        "Werkzeug.security, but I'm not sure how to verify passwords correctly."
+    )
+    assert updater.update_token_usage()["calls"] == 0
+
+
+def test_project_work_retention_is_bounded_to_newest_event_per_batch():
+    calls = []
+
+    def respond(system, messages):
+        calls.append((system, messages))
+        return '[{"op":"NOOP"}]'
+
+    updater = make_updater(respond, enable_llm_gate=True)
+    memory = Memory(sections=CHAT_SECTIONS)
+
+    updater.update(
+        memory,
+        [
+            Turn(1, "user", "I'm trying to implement password hashing. Can you help?"),
+            Turn(2, "assistant", "Yes."),
+            Turn(
+                3,
+                "user",
+                "I'm working on project documentation in Confluence with API tables "
+                "and architecture diagrams. Can you review it?",
+            ),
+            Turn(4, "assistant", "Yes."),
+        ],
+    )
+
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert "Confluence" in active[0].text
+    assert active[0].provenance == [3]
+    assert len(calls) == 1
+
+
+def test_generic_assistant_intro_is_not_treated_as_a_rejected_proposal():
+    updater = make_updater(
+        lambda *_: pytest.fail("non-durable rejection should not call the LLM"),
+        enable_llm_gate=True,
+    )
+    memory = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(
+        memory,
+        [
+            Turn(1, "assistant", "Certainly! Let's walk through the error."),
+            Turn(2, "user", "No, that did not solve it."),
+        ],
+    )
+
+    assert applied == []
+    assert rejected == []
+    assert memory.entries == {}
+
+
+def test_exact_restatement_from_same_source_is_suppressed_before_write():
+    updater = make_updater(
+        lambda *_: (
+            '[{"op":"ADD","section":"facts","text":"Project uses SQLite",'
+            '"provenance":[1]}]'
+        )
+    )
+    memory = Memory(sections=CHAT_SECTIONS)
+    memory.apply_ops_atomically([
+        {
+            "op": "ADD",
+            "section": "facts",
+            "text": "Project uses SQLite",
+            "provenance": [1],
+        }
+    ])
+
+    applied, rejected = updater.update(
+        memory, [Turn(1, "user", "My project uses SQLite")]
+    )
+
+    assert rejected == []
+    assert applied == []
+    assert len(memory.entries) == 1
+    assert updater.update_token_usage()["write_suppression_reasons"] == {
+        "redundant_add": 1
+    }
+
+
 def test_garbage_response_raises_update_failed():
     updater = make_updater(lambda system, messages: "this is not json at all, sorry")
     mem = Memory(sections=CHAT_SECTIONS)
@@ -549,6 +857,143 @@ def test_transport_error_raises_update_failed():
 
     with pytest.raises(UpdateFailed):
         updater.update(mem, turns)
+
+
+@pytest.mark.parametrize("first", ["transport", "parse"])
+def test_transport_and_parse_failures_retry_inside_one_transaction(first):
+    responses = iter([
+        RuntimeError("temporary outage") if first == "transport" else "not JSON",
+        '[{"op":"ADD","section":"facts","text":"retry succeeded","provenance":[1]}]',
+    ])
+
+    def script(_system, _messages):
+        result = next(responses)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(script), sections=CHAT_SECTIONS, max_retries=1
+    )
+    mem = Memory(sections=CHAT_SECTIONS)
+
+    applied, rejected = updater.update(mem, [Turn(1, "user", "Remember this result.")])
+
+    assert rejected == []
+    assert len(applied) == 1
+    assert [entry.text for entry in mem.entries.values()] == ["retry succeeded"]
+    assert len(updater.token_reports) == 2
+    assert updater.token_reports[0].rejected_ops_count == 1
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            "I joined a winter reading challenge aiming for 10 books by March 1.",
+            "10 books",
+        ),
+        (
+            "I spent $43 this month, which is over my $35 monthly book budget.",
+            "$35 monthly book budget",
+        ),
+        (
+            "The probate process now takes 5-7 months.",
+            "5-7 months",
+        ),
+        (
+            "The estate tax rate is 12% on assets above $200,000.",
+            "12% on assets above $200,000",
+        ),
+    ],
+)
+def test_general_subject_bound_personal_values_are_retained(content, expected):
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        sections=CHAT_SECTIONS,
+        policy=get_memory_policy("chat"),
+        enable_llm_gate=True,
+    )
+    mem = Memory(sections=CHAT_SECTIONS, policy=get_memory_policy("chat"))
+
+    updater.update(mem, [Turn(1, "user", content)])
+
+    assert any(expected in entry.text for entry in mem.entries.values())
+
+
+def test_counted_noun_values_are_retained_without_a_fixed_unit_vocabulary():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        sections=CHAT_SECTIONS,
+        policy=get_memory_policy("chat"),
+        enable_llm_gate=True,
+    )
+    mem = Memory(sections=CHAT_SECTIONS, policy=get_memory_policy("chat"))
+
+    updater.update(
+        mem,
+        [Turn(1, "user", "My Zotero library now has 52 sources after the import.")],
+    )
+
+    assert any("52 sources" in entry.text for entry in mem.entries.values())
+
+
+def test_conversational_frame_is_trimmed_but_values_and_cues_survive():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        sections=CHAT_SECTIONS,
+        policy=get_memory_policy("chat"),
+        enable_llm_gate=True,
+    )
+    mem = Memory(sections=CHAT_SECTIONS, policy=get_memory_policy("chat"))
+
+    updater.update(
+        mem,
+        [
+            Turn(
+                1,
+                "user",
+                "I'm kinda worried that I spent $43 on books in January, which is "
+                "$8 over my $35 monthly budget, can you help me find a way to cut back?",
+            )
+        ],
+    )
+
+    texts = [entry.text for entry in mem.entries.values()]
+    assert any("$35 monthly budget" in text for text in texts)
+    assert all("can you help" not in text for text in texts)
+    assert all("worried" not in text for text in texts)
+
+
+def test_trailing_request_clause_with_a_value_is_never_trimmed():
+    from memory_agent.structured.heuristics import trim_conversational_frame
+
+    text = (
+        "The probate process was shortened, so can you tell me how the 12% rate "
+        "on assets above $200,000 affects my planning"
+    )
+    assert trim_conversational_frame(text) == text
+
+
+def test_latest_typed_personal_budget_supersedes_older_value():
+    policy = get_memory_policy("chat")
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+        enable_llm_gate=True,
+    )
+    mem = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+
+    updater.update(mem, [Turn(1, "user", "My monthly book budget is $35.")])
+    updater.update(mem, [Turn(2, "user", "My monthly book budget is now $50.")])
+
+    active = [entry for entry in mem.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert "$50" in active[0].text
+    assert active[0].provenance == [1, 2]
+    assert active[0].subject_identity is not None
+    assert active[0].value.value == "50"
 
 
 def test_status_change_snippet_truncation_keeps_late_cue_phrase():
@@ -725,7 +1170,7 @@ def test_subject_bound_values_are_extracted_to_progress_with_agent_sections():
     assert "API integration test coverage" in entry.text
 
 
-def test_subject_bound_value_extraction_stays_disabled_for_simple_chat_sections():
+def test_technical_subject_bound_value_extraction_stays_disabled_for_simple_chat_sections():
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
         sections=CHAT_SECTIONS,

@@ -58,7 +58,34 @@ EXACT_VALUE_PATTERNS = [
         r"(?::\s*['\"]?[\w.-]+['\"]?)?",
     ),
 ]
+PERSONAL_SUBJECT_VALUE_PATTERNS = [
+    re.compile(r"(?:[$€£]\s?\d+(?:,\d{3})*(?:\.\d{1,2})?)", re.IGNORECASE),
+    re.compile(r"\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:%|percent\b)", re.IGNORECASE),
+    # A counted noun is not tied to any fixed vocabulary: "12 books",
+    # "52 sources", "4,700 words", and "3 sessions" are the same shape. The
+    # SUBJECT_VALUE_SECTION_RE cue gate keeps this from becoming an inventory.
+    re.compile(
+        r"\b\d+(?:,\d{3})*(?:\.\d+)?\s+"
+        r"(?:days?|weeks?|months?|years?|hours?|minutes?|[A-Za-z][a-z]{2,}s)\b",
+        re.IGNORECASE,
+    ),
+]
+# Personal values belong to the user's life (money, reading goals, study
+# counts). Software-project metrics reaching memory deterministically is the
+# practical/eval profiles' job via SUBJECT_VALUE_PATTERNS; for personal-value
+# extraction a technical context means "not a personal value".
+TECHNICAL_CONTEXT_RE = re.compile(
+    r"\b(?:api|server|service|worker|endpoint|deploy(?:ment|ed)?|build|pipeline|"
+    r"database|schema|coverage|latency|response time|integration|unit test|"
+    r"tests?|codebase|repositor(?:y|ies)|branch(?:es)?)\b",
+    re.IGNORECASE,
+)
 SUBJECT_VALUE_PATTERNS = [
+    re.compile(
+        r"\b\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*"
+        r"(?:days?|weeks?|months?|years?|hours?|minutes?)\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*"
         r"(?:calls(?:/day| per day)?|project cards?|cards?|columns?|"
@@ -76,8 +103,9 @@ SUBJECT_VALUE_PATTERNS = [
 ]
 SUBJECT_VALUE_SECTION_RE = re.compile(
     r"\b(?:updated|changed|moved|new|now|latest|increased|decreased|reduced|"
-    r"improved|completed|achieved|coverage|quota|deadline|count|total|cards?|"
-    r"columns?|calls?|latency|response time|rate limit|test)\b",
+    r"improved|completed|achieved|added|reached|coverage|quota|deadline|"
+    r"count|total|cards?|columns?|calls?|latency|response time|"
+    r"rate(?: limit)?|budget|aim(?:ing)?|goal|target|duration|takes?|test)\b",
     re.IGNORECASE,
 )
 STATUS_VALUE_RE = re.compile(
@@ -110,10 +138,15 @@ PRACTICAL_STATUS_CHANGE_CUE_RE = re.compile(
     r"|(?:改成|不再|不要記|改用|更正)",
     re.IGNORECASE,
 )
+# A first-person denial of past experience is durable regardless of domain:
+# it contradicts (or preempts) any affirmative record about the same subject,
+# so both project verbs and common personal-history verbs are cues.
 EXPLICIT_PROJECT_DENIAL_RE = re.compile(
     r"\bI(?:'ve| have) never (?:actually )?"
     r"(?:written|implemented|integrated|deployed|used|handled|managed|configured|"
-    r"installed|enabled|created|built|completed)\b",
+    r"installed|enabled|created|built|completed|"
+    r"met|read|visited|attended|listened|watched|seen|joined|finished|signed|"
+    r"missed)\b",
     re.IGNORECASE,
 )
 
@@ -177,7 +210,13 @@ STABLE_INSTRUCTION_RE = re.compile(
 )
 PROJECT_IMPLEMENTATION_STATE_RE = re.compile(
     r"\b(?:i(?:'ve| have) (?:already )?(?:implemented|integrated|completed|managed to)|"
-    r"we(?:'ve| have) (?:implemented|integrated|completed))\b",
+    r"we(?:'ve| have) (?:implemented|integrated|completed)|"
+    r"i(?:'m| am) (?:working on|having trouble with|trying to "
+    r"(?:implement|integrate|configure|set up|optimize|debug|fix|document|plan))|"
+    r"i (?:implemented|integrated|completed|configured|deployed|fixed|resolved|"
+    r"documented|added|tested)|"
+    r"we (?:implemented|integrated|completed|configured|deployed|fixed|resolved|"
+    r"documented|added|tested))\b",
     re.IGNORECASE,
 )
 ORDINARY_QUESTION_RE = re.compile(
@@ -185,6 +224,45 @@ ORDINARY_QUESTION_RE = re.compile(
     r"do|does|did|explain|translate|show|give|tell)\b",
     re.IGNORECASE,
 )
+
+
+# Chat turns often wrap one durable statement in a conversational frame:
+# "I'm kinda worried that <state>, can you help me <request>?". The frame adds
+# tokens without adding memory value. Trimming never removes a span that
+# carries a number, currency, or percent — those may be the value itself.
+_LEADING_FRAME_RE = re.compile(
+    r"^(?:(?:so|but|and|well|ok(?:ay)?)[,\s]+)?"
+    r"i'?m\s+(?:kinda\s+|really\s+|a\s+bit\s+|just\s+)?"
+    r"(?:worried|concerned|wondering|curious|thinking|torn|confused|unsure|not\s+sure)\s*"
+    r"(?:that\s+|about\s+(?:how\s+|whether\s+|if\s+)?|if\s+|whether\s+|how\s+)?",
+    re.IGNORECASE,
+)
+_TRAILING_REQUEST_RE = re.compile(
+    r"[,;]?\s*(?:(?:so|but|and)\s+)?"
+    r"(?:(?:can|could|would|will|should)\s+you\b"
+    r"|do\s+you\s+think\b|what(?:'s|\s+is)\s+the\s+best\s+way\b"
+    r"|any\s+(?:suggestions?|advice|thoughts?)\b"
+    r"|(?:so\s+)?i'?m\s+wondering\s+if\b"
+    r"|how\s+(?:should|can|do)\s+i\b).*$",
+    re.IGNORECASE,
+)
+_VALUE_BEARING_RE = re.compile(r"[\d$€£%]")
+
+
+def trim_conversational_frame(text: str) -> str:
+    """Strip question framing around a durable statement, keeping any values."""
+    trimmed = text
+    trailing = _TRAILING_REQUEST_RE.search(trimmed)
+    if trailing and not _VALUE_BEARING_RE.search(trailing.group(0)):
+        candidate = trimmed[: trailing.start()].rstrip(" ,;")
+        if len(candidate) >= 20:
+            trimmed = candidate
+    leading = _LEADING_FRAME_RE.match(trimmed)
+    if leading and not _VALUE_BEARING_RE.search(leading.group(0)):
+        candidate = trimmed[leading.end():].lstrip()
+        if len(candidate) >= 20:
+            trimmed = candidate
+    return trimmed
 
 
 def content_words(text: str) -> set[str]:

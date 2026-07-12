@@ -314,7 +314,8 @@ class StructuredMemoryMiddleware(AgentMiddleware):
         evicted_turns = self._turns_for(evicted)
 
         try:
-            _applied, rejected = self.updater.update(self.memory, evicted_turns)
+            prepared = self.updater.prepare_update(self.memory, evicted_turns)
+            _applied, rejected = prepared.applied_ops, prepared.rejected_ops
         except UpdateFailed as exc:
             logger.warning("Memory update failed; keeping messages for retry: %s", exc)
             return None
@@ -329,13 +330,19 @@ class StructuredMemoryMiddleware(AgentMiddleware):
             evicted_turns=evicted_turns,
             applied_ops=_applied,
             rejected_ops=rejected,
-            memory=self.memory,
+            memory=prepared.trial_memory,
         )
         if not verification.passed:
             logger.warning(
                 "Memory update failed semantic verification; keeping messages for retry: %s",
                 verification.errors,
             )
+            return None
+
+        try:
+            prepared.commit(self.memory)
+        except RuntimeError as exc:
+            logger.warning("Memory changed before updater commit; keeping messages for retry: %s", exc)
             return None
 
         self._maybe_compact()

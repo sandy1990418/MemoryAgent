@@ -250,6 +250,24 @@ def test_typed_subject_with_incompatible_units_or_qualifiers_is_not_a_candidate(
     assert sum(entry.status == "active" for entry in memory.entries.values()) == 2
 
 
+def test_generic_typed_identity_is_not_a_safe_compaction_candidate():
+    policy = get_memory_policy("practical")
+    memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
+    generic_goal = SubjectIdentity("chat", "goal", "goal", confidence=0.9)
+    memory.apply_ops([
+        {"op":"ADD", "section":"facts", "text":"Emergency fund goal is $2,000.", "provenance":[1], "subject_identity":generic_goal, "value":MemoryValue("2000", "$")},
+        {"op":"ADD", "section":"facts", "text":"Family car goal is $5,000.", "provenance":[2], "subject_identity":generic_goal, "value":MemoryValue("5000", "$")},
+    ])
+    compactor = MemoryCompactor(
+        llm=ScriptedLLM(lambda *_: (_ for _ in ()).throw(AssertionError("transport called"))),
+        sections=PRACTICAL_SECTIONS,
+        policy=policy,
+    )
+
+    assert compactor.detect_candidates(memory) == []
+    assert compactor.compact(memory) == ([], [])
+
+
 def test_production_mode_disables_ambiguous_semantic_candidates():
     policy = get_memory_policy("practical")
     memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)

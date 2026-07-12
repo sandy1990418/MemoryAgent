@@ -177,3 +177,43 @@ def test_evicted_budget_preserves_complete_multiformat_turns():
     selected = updater._turns_within_budget(turns)
     assert selected == turns[-3:]
     assert selected[0].content == "mixed 中文 JSON: {\"ok\": true}"
+
+
+def test_evicted_budget_never_orphans_assistant_and_records_mandatory_overflow():
+    turns = [
+        Turn(1, "user", "x " * 3000),
+        Turn(2, "assistant", "I will implement the complete requirement."),
+    ]
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'), sections=CHAT_SECTIONS,
+        evicted_turn_token_budget=1200,
+    )
+
+    assert updater._turns_within_budget(turns) == turns
+    report = updater.turn_selection_reports[-1]
+    assert report["selected_turn_ids"] == [1, 2]
+    assert report["dropped_turn_ids"] == []
+    assert report["oversized_mandatory_group"] is True
+    assert report["mandatory_overflow_tokens"] > 0
+    assert report["selection_is_contiguous"] is True
+
+
+def test_chinese_oversized_group_and_tool_results_stay_complete():
+    turns = [
+        Turn(1, "user", "需求" * 3000),
+        Turn(2, "assistant", "我會完整處理。"),
+        Turn(3, "user", "請查詢狀態"),
+        Turn(4, "assistant", "[tool_call] status({'project': 'A'})"),
+        Turn(5, "tool", "running"),
+        Turn(6, "tool", "healthy"),
+    ]
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'), sections=CHAT_SECTIONS,
+        evicted_turn_token_budget=1200,
+    )
+
+    selected = updater._turns_within_budget(turns)
+    assert [turn.id for turn in selected] == [3, 4, 5, 6]
+    report = updater.turn_selection_reports[-1]
+    assert report["dropped_turn_ids"] == [1, 2]
+    assert report["groups"][-1]["type"] == "tool_call_result"

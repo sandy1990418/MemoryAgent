@@ -9,6 +9,7 @@ from memory_agent.models.sections import CHAT_SECTIONS
 from memory_agent.structured.memory import Memory
 from memory_agent.structured.middleware import StructuredMemoryMiddleware
 from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.structured.verifier import MemoryUpdateVerification
 from tests.fakes import ScriptedLLM
 
 
@@ -174,6 +175,49 @@ def test_updater_transport_error_returns_none_and_keeps_messages():
 
     assert result is None
     assert middleware.memory.entries == {}
+    assert len(middleware.transcript) == 8
+
+
+def test_semantic_verifier_failure_observes_trial_but_leaves_live_memory_unchanged():
+    class RejectingVerifier:
+        def verify(self, **kwargs):
+            assert kwargs["memory"].entries
+            return MemoryUpdateVerification(False, ["forced failure"])
+
+    middleware = make_middleware(max_tokens=6)
+    middleware.update_verifier = RejectingVerifier()
+    messages = linear_messages(8)
+    before = middleware.memory.to_state()
+
+    assert middleware.before_model({"messages": messages}, None) is None
+    assert middleware.memory.to_state() == before
+
+
+def test_retrying_retained_messages_commits_once_without_duplicate_provenance():
+    class FailOnceVerifier:
+        def __init__(self):
+            self.calls = 0
+
+        def verify(self, **kwargs):
+            self.calls += 1
+            return MemoryUpdateVerification(
+                self.calls > 1,
+                [] if self.calls > 1 else ["retry retained messages"],
+            )
+
+    middleware = make_middleware(max_tokens=6)
+    verifier = FailOnceVerifier()
+    middleware.update_verifier = verifier
+    messages = linear_messages(8)
+
+    assert middleware.before_model({"messages": messages}, None) is None
+    assert middleware.memory.entries == {}
+    result = middleware.before_model({"messages": messages}, None)
+
+    assert result is not None
+    assert len(middleware.memory.entries) == 1
+    entry = next(iter(middleware.memory.entries.values()))
+    assert entry.provenance == sorted(set(entry.provenance))
     assert len(middleware.transcript) == 8
 
 

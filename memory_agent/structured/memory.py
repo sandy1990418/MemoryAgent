@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from threading import RLock
 from typing import Callable
 
 from memory_agent.models.memory import MemoryEntry, MemoryValue, SubjectIdentity
@@ -33,6 +34,8 @@ class Memory:
         self.entries: dict[str, MemoryEntry] = {}
         self.narrative: str = ""
         self._counters: dict[str, int] = {s.key: 0 for s in self.sections}
+        self._lock = RLock()
+        self._revision = 0
 
     def _next_id(self, section_key: str) -> str:
         cfg = self._section_by_key[section_key]
@@ -41,21 +44,22 @@ class Memory:
 
     def apply_ops(self, ops: list[dict]) -> tuple[list[dict], list[dict]]:
         """Apply a batch of ops. Returns (applied, rejected). Never raises."""
-        applied: list[dict] = []
-        rejected: list[dict] = []
-
-        for op in ops:
-            try:
-                result = self._apply_one(op)
-            except Exception as exc:  # defensive: malformed ops must never raise
-                rejected.append({"op": op, "reason": f"exception: {exc}"})
-                continue
-            if result is True:
-                applied.append(op)
-            else:
-                rejected.append({"op": op, "reason": result})
-
-        return applied, rejected
+        with self._lock:
+            applied: list[dict] = []
+            rejected: list[dict] = []
+            for op in ops:
+                try:
+                    result = self._apply_one(op)
+                except Exception as exc:  # defensive: malformed ops must never raise
+                    rejected.append({"op": op, "reason": f"exception: {exc}"})
+                    continue
+                if result is True:
+                    applied.append(op)
+                else:
+                    rejected.append({"op": op, "reason": result})
+            if applied:
+                self._revision += 1
+            return applied, rejected
 
     def apply_ops_atomically(self, ops: list[dict]) -> tuple[list[dict], list[dict]]:
         """Apply a batch only when every op is valid.
@@ -66,15 +70,15 @@ class Memory:
         facts that never reached memory. This method validates on a copy and
         commits only a fully accepted batch.
         """
-        candidate = self._copy()
-        applied, rejected = candidate.apply_ops(ops)
-        if rejected:
-            return [], rejected
-
-        self.entries = candidate.entries
-        self.narrative = candidate.narrative
-        self._counters = candidate._counters
-        return applied, []
+        if not ops:
+            return [], []
+        with self._lock:
+            candidate = self._copy()
+            applied, rejected = candidate.apply_ops(ops)
+            if rejected:
+                return [], rejected
+            self._replace_from(candidate)
+            return applied, []
 
     def _copy(self) -> "Memory":
         clone = Memory(sections=list(self.sections), policy=self.policy)
@@ -93,7 +97,27 @@ class Memory:
         }
         clone.narrative = self.narrative
         clone._counters = dict(self._counters)
+        clone._revision = self._revision
         return clone
+
+    def transaction_snapshot(self) -> tuple["Memory", int]:
+        """Return an isolated copy and the live revision it was based on."""
+        with self._lock:
+            return self._copy(), self._revision
+
+    def commit_trial(self, trial: "Memory", base_revision: int) -> None:
+        """Atomically install a completed trial iff live memory did not change."""
+        with self._lock:
+            if self._revision != base_revision:
+                raise RuntimeError("memory changed while update transaction was in progress")
+            self._replace_from(trial)
+
+    def _replace_from(self, source: "Memory") -> None:
+        snapshot = source._copy()
+        self.entries = snapshot.entries
+        self.narrative = snapshot.narrative
+        self._counters = snapshot._counters
+        self._revision += 1
 
     def to_state(self) -> dict:
         """Serialize entries, narrative, and id counters for persistence."""
@@ -156,6 +180,7 @@ class Memory:
         self.entries = entries
         self.narrative = str(state.get("narrative", ""))
         self._counters = counters
+        self._revision += 1
 
     def _apply_one(self, op: dict):
         """Return True on success, or a string reason for rejection."""

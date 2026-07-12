@@ -61,7 +61,112 @@ def test_equal_typed_state_dimension_supersedes_older_state():
     ])
     MemoryUpdater._consolidate_latest_subject_values(memory)
     active = [e.text for e in memory.entries.values() if e.status == "active"]
-    assert active == ["Completed state: release shipped"]
+    assert active == [
+        "Completed state: release shipped "
+        "Value history (earliest→latest): building → shipped."
+    ]
+
+
+def test_generic_goal_identity_never_merges_distinct_goals():
+    memory = Memory()
+    identity = SubjectIdentity("chat", "goal", "goal", confidence=0.9)
+    memory.apply_ops([
+        {
+            "op": "ADD",
+            "section": "facts",
+            "text": "Emergency fund goal is $2,000",
+            "provenance": [1],
+            "subject_identity": identity,
+            "value": MemoryValue("2000", "$"),
+        },
+        {
+            "op": "ADD",
+            "section": "facts",
+            "text": "Family car goal is $5,000",
+            "provenance": [2],
+            "subject_identity": identity,
+            "value": MemoryValue("5000", "$"),
+        },
+    ])
+
+    assert MemoryUpdater._consolidate_latest_subject_values(memory) == []
+    assert len([entry for entry in memory.entries.values() if entry.status == "active"]) == 2
+
+
+def test_lifecycle_value_history_survives_repeated_consolidation():
+    memory = Memory()
+    identity = SubjectIdentity("chat", "monthly book budget", "budget", confidence=0.9)
+    for turn_id, value in ((1, "35"), (2, "50"), (3, "35")):
+        memory.apply_ops([{
+            "op": "ADD",
+            "section": "facts",
+            "text": f"Monthly book budget is ${value}",
+            "provenance": [turn_id],
+            "subject_identity": identity,
+            "value": MemoryValue(value, "$"),
+        }])
+        MemoryUpdater._consolidate_latest_subject_values(memory)
+
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert active[0].provenance == [1, 2, 3]
+    assert active[0].text.endswith(
+        "Value history (earliest→latest): $35 → $50 → $35."
+    )
+
+
+def test_non_latin_typed_state_lifecycle_consolidates_like_english():
+    from memory_agent.models.transcript import Turn
+
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(
+            lambda *_: (_ for _ in ()).throw(
+                AssertionError("explicit state lifecycle should not call the LLM")
+            )
+        ),
+        sections=PRACTICAL_SECTIONS,
+        policy=get_memory_policy("chat"),
+        enable_llm_gate=True,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS)
+
+    updater.update(
+        memory,
+        [
+            Turn(1, "user", "專案是規劃中。"),
+            Turn(2, "user", "它目前是進行中。"),
+            Turn(3, "user", "它已經完成。"),
+        ],
+    )
+
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert active[0].text == (
+        "Ongoing state: State: 專案 is complete. "
+        "Value history (earliest→latest): planned → active → complete."
+    )
+    assert active[0].provenance == [1, 2, 3]
+
+
+def test_state_pronoun_does_not_resolve_across_update_batches():
+    from memory_agent.models.transcript import Turn
+
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        sections=PRACTICAL_SECTIONS,
+        policy=get_memory_policy("chat"),
+        enable_llm_gate=True,
+    )
+    memory = Memory(sections=PRACTICAL_SECTIONS)
+
+    updater.update(memory, [Turn(1, "user", "專案是規劃中。")])
+    updater.update(memory, [Turn(2, "user", "它已經完成。")])
+
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert [entry.text for entry in active] == [
+        "Ongoing state: State: 專案 is planned."
+    ]
+    assert active[0].provenance == [1]
 
 
 def test_assistant_suggestion_cannot_become_user_decision():

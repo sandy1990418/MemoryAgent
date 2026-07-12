@@ -271,7 +271,8 @@ def test_answer_question_prompt_requires_supported_concise_answers():
     user_prompt = llm.calls[0]["messages"][0]["content"]
     assert "MUST answer questions using ONLY the information provided" in user_prompt
     assert "Do NOT invent user history or project facts" in user_prompt
-    assert "Follow durable user instructions" in user_prompt
+    assert "MUST be satisfied inside the answer itself" in user_prompt
+    assert "Never ask whether to apply a stored preference" in user_prompt
     assert "do not output unversioned dependencies" in user_prompt
     assert "explicitly state how the answer follows" in user_prompt
     assert "ANSWER REQUIREMENTS" in user_prompt
