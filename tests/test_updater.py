@@ -975,6 +975,46 @@ def test_trailing_request_clause_with_a_value_is_never_trimmed():
     assert trim_conversational_frame(text) == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The release is ready, but can you help without changing Project Atlas?",
+        "The release is ready, but can you help with ACME?",
+        "The release is ready, but can you help with the plan we approved?",
+        "專案已完成，但你可以幫忙嗎？必須保留客戶的限制。",
+    ],
+)
+def test_conversational_trimming_preserves_material_request_clauses(text):
+    from memory_agent.structured.heuristics import trim_conversational_frame
+
+    assert trim_conversational_frame(text) == text
+
+
+def test_conversational_trimming_still_removes_non_material_request_clause():
+    from memory_agent.structured.heuristics import trim_conversational_frame
+
+    text = "The release is ready, can you help me think through it?"
+    assert trim_conversational_frame(text) == "The release is ready"
+
+
+def test_conversational_trimming_removes_emotion_and_question_around_durable_state():
+    from memory_agent.structured.heuristics import trim_conversational_frame
+
+    text = "I'm feeling worried that Project Atlas is blocked, what should I do next?"
+    assert trim_conversational_frame(text) == "Project Atlas is blocked"
+
+
+def test_exact_value_shapes_are_domain_neutral_and_bounded():
+    values = MemoryUpdater._extract_exact_values(
+        "AcmeDB 4.7.2 raised CustomQuotaError: limit with 12 workers."
+    )
+
+    assert "AcmeDB 4.7.2" in values
+    assert "CustomQuotaError: limit" in values
+    assert "12 workers" in values
+    assert MemoryUpdater._extract_exact_values("We discussed version planning.") == []
+
+
 def test_latest_typed_personal_budget_supersedes_older_value():
     policy = get_memory_policy("chat")
     updater = MemoryUpdater(

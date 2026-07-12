@@ -38,6 +38,7 @@ from memory_agent.structured.heuristics import (
     STATUS_VALUE_RE,
     STABLE_INSTRUCTION_RE,
     SUBJECT_VALUE_PATTERNS,
+    SUBJECT_COUNT_PATTERNS,
     SUBJECT_VALUE_SECTION_RE,
     TECHNICAL_CONTEXT_RE,
     WHITESPACE_RE,
@@ -1485,7 +1486,8 @@ class MemoryUpdater:
             if self._has_section(section)
         }
         rich_sections = any(
-            self._has_section(section) for section in ("timeline", "progress", "status_changes")
+            self._has_section(section)
+            for section in ("timeline", "progress", "status_changes")
         )
         generated: list[dict] = []
 
@@ -1497,7 +1499,11 @@ class MemoryUpdater:
             snippets = self._extract_subject_value_snippets(turn.content)
             per_turn = 0
             for snippet, kind in snippets:
-                if (self.policy.name == "chat" or not rich_sections) and kind != "personal_value":
+                if (
+                    self.policy.name == "chat" or not rich_sections
+                ) and kind != "personal_value":
+                    continue
+                if self.policy.name == "practical" and kind == "count":
                     continue
                 section = self._subject_value_section(snippet, kind)
                 if section is None:
@@ -1774,6 +1780,8 @@ class MemoryUpdater:
             )
         for pattern in SUBJECT_VALUE_PATTERNS:
             matches.extend((match.start(), match.end(), "value") for match in pattern.finditer(prose))
+        for pattern in SUBJECT_COUNT_PATTERNS:
+            matches.extend((match.start(), match.end(), "count") for match in pattern.finditer(prose))
 
         snippets: list[tuple[str, str]] = []
         seen: set[str] = set()

@@ -36,16 +36,14 @@ EXACT_VALUE_DATE_PATTERNS = [
 ]
 EXACT_VALUE_PATTERNS = [
     re.compile(
-        r"\b(?:Python|Flask(?:-Login|-SQLAlchemy|-Migrate|-WTF|-Argon2|-Talisman)?|"
-        r"SQLite|Jinja2|Bootstrap|Chart\.js|Marshmallow|SQLAlchemy|Gunicorn|Redis|"
-        r"PostgreSQL|Loggly|WCAG|flake8|black|pytest|bcrypt|Argon2)"
-        r"\s+v?\d+(?:\.\d+){0,3}(?:\s+[A-Z]{1,3})?\b",
+        r"\b[A-Za-z][A-Za-z0-9_.-]{1,40}\s+v?\d+(?:\.\d+){1,3}"
+        r"(?:\s+[A-Z]{1,3})?\b",
         re.IGNORECASE,
     ),
     re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|MB|GB|fps|%)\b", re.IGNORECASE),
     re.compile(
-        r"\b\d+(?:\.\d+)?\s+"
-        r"(?:workers?|branches?|users?|failed login attempts?|attempts?)\b",
+        r"\b\d+(?:,\d{3})*(?:\.\d+)?\s+"
+        r"[A-Za-z][A-Za-z'-]{2,}s\b",
         re.IGNORECASE,
     ),
     re.compile(r"\bport\s+\d{2,5}\b", re.IGNORECASE),
@@ -54,7 +52,7 @@ EXACT_VALUE_PATTERNS = [
     re.compile(r"(?<!\w)/(?:[\w.-]+/)*[\w.-]+"),
     re.compile(r"\b[A-Za-z_][\w.-]*\.(?:py|html|css|js|json|log|yml|yaml|md|txt)\b"),
     re.compile(
-        r"\b(?:TemplateNotFound|OperationalError|KeyError|TypeError|ValueError)"
+        r"\b[A-Z][A-Za-z0-9_]*(?:Error|Exception|Failure)"
         r"(?::\s*['\"]?[\w.-]+['\"]?)?",
     ),
 ]
@@ -86,20 +84,15 @@ SUBJECT_VALUE_PATTERNS = [
         r"(?:days?|weeks?|months?|years?|hours?|minutes?)\b",
         re.IGNORECASE,
     ),
-    re.compile(
-        r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*"
-        r"(?:calls(?:/day| per day)?|project cards?|cards?|columns?|"
-        r"features?|items?|days?|weeks?|attempts?|failed login attempts?)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b\d+(?:\.\d+)?\s*"
-        r"(?:calls/day|calls per day|project cards?|cards?|columns?|"
-        r"features?|items?|days?|weeks?|attempts?|failed login attempts?)\b",
-        re.IGNORECASE,
-    ),
     re.compile(r"\b\d+(?:\.\d+)?\s?%"),
     re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|MB|GB|seconds?|minutes?)\b", re.IGNORECASE),
+]
+SUBJECT_COUNT_PATTERNS = [
+    re.compile(
+        r"\b\d+(?:,\d{3})*(?:\.\d+)?\s+"
+        r"(?:[A-Za-z][A-Za-z'-]{2,}s|[A-Za-z][A-Za-z'-]{2,}/day)\b",
+        re.IGNORECASE,
+    ),
 ]
 SUBJECT_VALUE_SECTION_RE = re.compile(
     r"\b(?:updated|changed|moved|new|now|latest|increased|decreased|reduced|"
@@ -232,7 +225,7 @@ ORDINARY_QUESTION_RE = re.compile(
 # carries a number, currency, or percent — those may be the value itself.
 _LEADING_FRAME_RE = re.compile(
     r"^(?:(?:so|but|and|well|ok(?:ay)?)[,\s]+)?"
-    r"i'?m\s+(?:kinda\s+|really\s+|a\s+bit\s+|just\s+)?"
+    r"i'?m\s+(?:feeling\s+)?(?:kinda\s+|really\s+|a\s+bit\s+|just\s+)?"
     r"(?:worried|concerned|wondering|curious|thinking|torn|confused|unsure|not\s+sure)\s*"
     r"(?:that\s+|about\s+(?:how\s+|whether\s+|if\s+)?|if\s+|whether\s+|how\s+)?",
     re.IGNORECASE,
@@ -240,25 +233,36 @@ _LEADING_FRAME_RE = re.compile(
 _TRAILING_REQUEST_RE = re.compile(
     r"[,;]?\s*(?:(?:so|but|and)\s+)?"
     r"(?:(?:can|could|would|will|should)\s+you\b"
+    r"|(?:can|could|would|will|should)\s+i\b"
     r"|do\s+you\s+think\b|what(?:'s|\s+is)\s+the\s+best\s+way\b"
+    r"|(?:what|where|when|why)\s+(?:should|can|could|would|do)\b"
+    r"|was\s+that\s+the\s+right\b"
     r"|any\s+(?:suggestions?|advice|thoughts?)\b"
     r"|(?:so\s+)?i'?m\s+wondering\s+if\b"
     r"|how\s+(?:should|can|do)\s+i\b).*$",
     re.IGNORECASE,
 )
-_VALUE_BEARING_RE = re.compile(r"[\d$€£%]")
+_MATERIAL_FRAME_RE = re.compile(
+    rf"[\d$€£%]|\b(?:{MONTH_NAMES})\b|\b\d{{4}}-\d{{2}}-\d{{2}}\b|"
+    r"\b(?:not|never|no longer|without|except|unless|only|must|required?|"
+    r"correction|instead|changed my mind|agreed|accepted|decided|approved|"
+    r"my|our|their|owner|manager|client|customer)\b|"
+    r"\b(?-i:[A-Z]{2,})\b|\b(?:with|for|from|by|about)\s+(?-i:[A-Z][\w-]+)|"
+    r"(?:不|沒有|不可|只能|必須|更正|改成|同意|決定|我的|我們的|客戶)",
+    re.IGNORECASE,
+)
 
 
 def trim_conversational_frame(text: str) -> str:
-    """Strip question framing around a durable statement, keeping any values."""
+    """Strip only framing that carries no material durable information."""
     trimmed = text
     trailing = _TRAILING_REQUEST_RE.search(trimmed)
-    if trailing and not _VALUE_BEARING_RE.search(trailing.group(0)):
+    if trailing and not _MATERIAL_FRAME_RE.search(trailing.group(0)):
         candidate = trimmed[: trailing.start()].rstrip(" ,;")
         if len(candidate) >= 20:
             trimmed = candidate
     leading = _LEADING_FRAME_RE.match(trimmed)
-    if leading and not _VALUE_BEARING_RE.search(leading.group(0)):
+    if leading and not _MATERIAL_FRAME_RE.search(leading.group(0)):
         candidate = trimmed[leading.end():].lstrip()
         if len(candidate) >= 20:
             trimmed = candidate
