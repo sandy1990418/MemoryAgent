@@ -117,21 +117,26 @@ FAILED_ATTEMPTS = SectionConfig(
 )
 
 
-CHAT_SECTIONS: list[SectionConfig] = [
-    DECISIONS,
-    PREFERENCES,
-    FACTS,
-    OPEN_QUESTIONS,
-]
-
-# No TIMELINE/TOOL_FACTS/EXACT_VALUES/PROGRESS: practical memory keeps a small
-# set of consolidated durable entries; progress-style state folds into facts.
 PRACTICAL_SECTIONS: list[SectionConfig] = [
     DECISIONS,
     PREFERENCES,
     STATUS_CHANGES,
     GOAL,
     FACTS,
+    OPEN_QUESTIONS,
+    FAILED_ATTEMPTS,
+]
+
+# Product chat extends the practical current-state schema with one bounded
+# chronological rollup. Related progress entries are compacted into a new
+# canonical summary rather than retained as an ever-growing event log.
+CHAT_SECTIONS: list[SectionConfig] = [
+    DECISIONS,
+    PREFERENCES,
+    STATUS_CHANGES,
+    GOAL,
+    FACTS,
+    PROGRESS,
     OPEN_QUESTIONS,
     FAILED_ATTEMPTS,
 ]
@@ -158,7 +163,7 @@ EVAL_SECTIONS: list[SectionConfig] = [
 def sections_for_preset(name: str) -> list[SectionConfig]:
     """Return a fresh section list for a policy section preset."""
     presets = {
-        "chat": PRACTICAL_SECTIONS,
+        "chat": CHAT_SECTIONS,
         "practical": PRACTICAL_SECTIONS,
         "agent": AGENT_SECTIONS,
         "eval": EVAL_SECTIONS,

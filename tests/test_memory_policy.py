@@ -4,7 +4,7 @@ import pytest
 
 from memory_agent.agents.structured import build_structured_middleware
 from memory_agent.models.config import StructuredAgentConfig
-from memory_agent.core.sections import EVAL_SECTIONS, PRACTICAL_SECTIONS
+from memory_agent.core.sections import EVAL_SECTIONS, PRACTICAL_SECTIONS, sections_for_preset
 from memory_agent.core.store import Memory
 from memory_agent.core.transcript import Turn
 from memory_agent.policies.structured import get_memory_policy, is_chat_policy
@@ -481,7 +481,7 @@ def test_structured_builder_wires_chat_policy_to_components():
     assert middleware.updater.policy is middleware.policy
     assert middleware.memory_selector.policy is middleware.policy
     assert {section.key for section in middleware.memory.sections} == {
-        section.key for section in PRACTICAL_SECTIONS
+        section.key for section in sections_for_preset("chat")
     }
 
 

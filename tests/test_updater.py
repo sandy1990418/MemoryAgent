@@ -1210,12 +1210,14 @@ def test_subject_bound_values_are_extracted_to_progress_with_agent_sections():
     assert "API integration test coverage" in entry.text
 
 
-def test_technical_subject_bound_value_extraction_stays_disabled_for_simple_chat_sections():
+def test_technical_subject_bound_value_extraction_stays_disabled_for_chat_policy():
+    policy = get_memory_policy("chat")
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
         sections=CHAT_SECTIONS,
+        policy=policy,
     )
-    mem = Memory(sections=CHAT_SECTIONS)
+    mem = Memory(sections=CHAT_SECTIONS, policy=policy)
 
     applied, rejected = updater.update(
         mem,

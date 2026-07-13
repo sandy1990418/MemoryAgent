@@ -1,5 +1,7 @@
+import json
+
 from memory_agent.adapters.langchain.structured_memory import StructuredMemoryMiddleware
-from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.core.sections import CHAT_SECTIONS, sections_for_preset
 from memory_agent.core.store import Memory
 from memory_agent.policies.structured import get_memory_policy
 from memory_agent.update.compactor import MemoryCompactor
@@ -55,3 +57,48 @@ def test_candidate_presence_controls_deterministic_compaction():
     assert report["checks"][0]["skip_reason"] == "deterministic_candidate"
     assert middleware.compactor.metrics.deterministic_compactions == 1
     assert report["attempted_calls"] == 0
+
+
+def test_progress_rollup_bypasses_global_scan_threshold():
+    policy = get_memory_policy("chat")
+    sections = sections_for_preset("chat")
+    memory = Memory(sections, policy=policy)
+    updater = MemoryUpdater(ScriptedLLM(lambda *_: "[]"), sections, policy=policy)
+    response = json.dumps([
+        {"op": "SUPERSEDE", "id": "P1", "reason": "Topic rollup."},
+        {"op": "SUPERSEDE", "id": "P2", "reason": "Topic rollup."},
+        {"op": "SUPERSEDE", "id": "P3", "reason": "Topic rollup."},
+        {
+            "op": "ADD",
+            "section": "progress",
+            "text": "Triangle work progressed from area methods to medians and congruence.",
+            "provenance": [1, 2, 3, 4, 5, 6],
+        },
+    ])
+    compactor = MemoryCompactor(
+        ScriptedLLM(lambda *_: response),
+        sections,
+        policy=policy,
+        enable_semantic_candidates=False,
+    )
+    middleware = StructuredMemoryMiddleware(
+        memory,
+        updater,
+        max_tokens=100,
+        policy=policy,
+        compactor=compactor,
+        compact_min_active_entries=30,
+    )
+    memory.apply_ops([
+        {"op": "ADD", "section": "progress", "text": "Triangle area used Heron's formula.", "provenance": [1, 2]},
+        {"op": "ADD", "section": "progress", "text": "Triangle medians split equal areas.", "provenance": [3, 4]},
+        {"op": "ADD", "section": "progress", "text": "Triangle congruence compared SAS and ASA.", "provenance": [5, 6]},
+    ])
+
+    middleware._maybe_compact()
+
+    report = middleware.compaction_diagnostics()
+    assert report["checks"][0]["active_entries_at_check"] == 3
+    assert report["checks"][0]["skip_reason"] == "llm_candidate"
+    assert report["attempted_calls"] == 1
+    assert sum(entry.status == "active" for entry in memory.entries.values()) == 1

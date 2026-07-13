@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import re
 from typing import Callable
 
@@ -16,7 +17,10 @@ from memory_agent.policies.structured import (
     validate_policy_sections,
 )
 from memory_agent.update.operations import parse_memory_ops
-from memory_agent.update.prompts import build_compactor_prompt
+from memory_agent.update.prompts import (
+    build_compactor_prompt,
+    build_progress_rollup_prompt,
+)
 
 
 def _default_token_estimator(text: str) -> int:
@@ -52,6 +56,10 @@ class CompactionMetrics:
 
 _WORDS_RE = re.compile(r"[a-z0-9]+")
 _VALUE_RE = re.compile(r"^(?:\d+(?:\.\d+)?(?:ms|s|%|gb|mb)?|now|was|is|the|a|an|for|to|use|uses)$")
+_ROLLUP_STOPWORDS = frozenset({
+    "and", "are", "as", "at", "by", "covered", "discussion", "from",
+    "in", "into", "of", "on", "or", "then", "through", "with",
+})
 
 
 class MemoryCompactor:
@@ -67,7 +75,9 @@ class MemoryCompactor:
         token_estimator: Callable[[str], int] | None = None,
         max_candidate_entries: int = 8,
         max_candidate_tokens: int = 512,
+        max_progress_candidate_tokens: int = 1200,
         enable_semantic_candidates: bool = True,
+        min_progress_entries: int = 3,
     ) -> None:
         self.llm = llm
         self.sections = sections
@@ -76,8 +86,14 @@ class MemoryCompactor:
         self.model = model
         self.max_memory_tokens = max_memory_tokens
         self.token_estimator = token_estimator or _default_token_estimator
-        self.max_candidate_entries = max_candidate_entries
+        self.min_progress_entries = max(2, min_progress_entries)
+        self.max_candidate_entries = max(
+            self.min_progress_entries, max_candidate_entries
+        )
         self.max_candidate_tokens = max_candidate_tokens
+        self.max_progress_candidate_tokens = max(
+            max_candidate_tokens, max_progress_candidate_tokens
+        )
         self.enable_semantic_candidates = enable_semantic_candidates
         self.metrics = CompactionMetrics()
         self._section_keys = {section.key for section in sections}
@@ -133,11 +149,53 @@ class MemoryCompactor:
         groups: dict[str, list[MemoryEntry]] = {}
         reasons: dict[str, str] = {}
         for entry in active:
+            # Progress has append-like ingestion semantics but bounded active
+            # storage. It is rolled up by topic below, never compacted as a
+            # latest-value fact or an isolated exact duplicate.
+            if entry.section == "progress":
+                continue
             identity_key = self._identity_key(entry)
             text_key = " ".join(entry.text.lower().split())
             key = identity_key or f"exact:{entry.section}:{text_key}"
             groups.setdefault(key, []).append(entry)
             reasons[key] = "typed-subject" if identity_key else "exact-duplicate"
+
+        progress = [entry for entry in active if entry.section == "progress"]
+        remaining = set(range(len(progress)))
+        progress_words = [
+            {
+                word
+                for word in self._lexical_key(entry).split(":", 1)[1].split()
+                if word not in _ROLLUP_STOPWORDS
+            }
+            for entry in progress
+        ]
+        while remaining:
+            seed = remaining.pop()
+            component = {seed}
+            frontier = [seed]
+            while frontier:
+                left = frontier.pop()
+                linked = {
+                    right
+                    for right in remaining
+                    if progress_words[left] & progress_words[right]
+                }
+                remaining.difference_update(linked)
+                component.update(linked)
+                frontier.extend(linked)
+            if len(component) < self.min_progress_entries:
+                continue
+            entries = [progress[index] for index in sorted(component)]
+            while entries:
+                take = min(self.max_candidate_entries, len(entries))
+                remainder = len(entries) - take
+                if 0 < remainder < self.min_progress_entries:
+                    take -= self.min_progress_entries - remainder
+                chunk, entries = entries[:take], entries[take:]
+                key = "progress-rollup:" + ",".join(entry.id for entry in chunk)
+                groups[key] = chunk
+                reasons[key] = "progress-rollup"
 
         if not self.enable_semantic_candidates:
             return self._candidates_from_groups(memory, groups, reasons)
@@ -225,9 +283,17 @@ class MemoryCompactor:
             return self._reject(candidate, "budget")
         rendered = memory.render(entries=list(candidate.entries))
         tokens = self.token_estimator(rendered)
-        if tokens > self.max_candidate_tokens:
+        candidate_token_limit = (
+            self.max_progress_candidate_tokens
+            if candidate.reason == "progress-rollup"
+            else self.max_candidate_tokens
+        )
+        if tokens > candidate_token_limit:
             return self._reject(candidate, "budget")
         self.metrics.candidate_tokens += tokens
+
+        if candidate.reason == "progress-rollup":
+            return self._compact_progress_candidate(memory, candidate, visible_ids)
 
         texts = {" ".join(entry.text.lower().split()) for entry in candidate.entries}
         identity_keys = [self._identity_key(entry) for entry in candidate.entries]
@@ -271,19 +337,133 @@ class MemoryCompactor:
             self.metrics.successful_compactions += 1
         return applied, rejected
 
-    def _reject(self, candidate: CompactionCandidate, reason: str):
+    def _compact_progress_candidate(
+        self,
+        memory: Memory,
+        candidate: CompactionCandidate,
+        visible_ids: set[str],
+    ) -> tuple[list[dict], list[dict]]:
+        source_chars = sum(len(entry.text) for entry in candidate.entries)
+        max_chars = min(600, max(280, int(source_chars * 0.7)))
+        rendered = memory.render(entries=list(candidate.entries))
+        system, messages = build_progress_rollup_prompt(
+            source_entries=rendered,
+            max_chars=max_chars,
+        )
+        try:
+            self.metrics.attempted_calls += 1
+            response = self.llm.complete(system, messages, model=self.model)
+        except Exception as exc:
+            self.metrics.failed_compactions += 1
+            self.metrics.record_reason("transport")
+            return [], [{
+                "candidate": candidate.subject_key,
+                "reason": "transport",
+                "detail": str(exc),
+            }]
+
+        summary = self._progress_summary_text(response)
+        if not summary:
+            return self._reject(candidate, "empty_summary")
+        summary = self._bound_summary(summary, max_chars)
+        ops = self._canonical_progress_rollup_ops(candidate, summary)
+        applied, rejected = self._apply_candidate_ops(
+            memory, candidate, ops, visible_ids
+        )
+        if not rejected:
+            self.metrics.successful_compactions += 1
+        return applied, rejected
+
+    @staticmethod
+    def _progress_summary_text(response: str) -> str:
+        """Accept plain text and common legacy JSON shapes without ops semantics."""
+        text = response.strip()
+        fenced = re.fullmatch(r"```(?:\w+)?\s*(.*?)\s*```", text, re.DOTALL)
+        if fenced:
+            text = fenced.group(1).strip()
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+        candidates = payload if isinstance(payload, list) else [payload]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            for key in ("summary", "text", "content", "value"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        text = re.sub(r"^(?:summary|progress summary)\s*:\s*", "", text, flags=re.I)
+        return text.strip().strip('"')
+
+    @staticmethod
+    def _bound_summary(text: str, max_chars: int) -> str:
+        text = " ".join(text.split())
+        if len(text) <= max_chars:
+            return text
+        prefix = text[: max_chars + 1]
+        boundaries = [prefix.rfind(mark) for mark in (". ", "。", "! ", "? ", "; ")]
+        cut = max(boundaries)
+        if cut >= max_chars // 2:
+            return prefix[: cut + 1].strip()
+        return prefix[: max_chars - 1].rstrip(" ,;:-") + "…"
+
+    @staticmethod
+    def _canonical_progress_rollup_ops(
+        candidate: CompactionCandidate,
+        summary: str,
+    ) -> list[dict]:
+        """Own source replacement and provenance entirely in application code."""
+        provenance = sorted({
+            turn_id
+            for entry in candidate.entries
+            for turn_id in entry.provenance
+        })
+        return [
+            *[
+                {
+                    "op": "SUPERSEDE",
+                    "id": entry.id,
+                    "reason": "Consolidated into progress topic rollup.",
+                }
+                for entry in candidate.entries
+            ],
+            {
+                "op": "ADD",
+                "section": "progress",
+                "text": summary,
+                "provenance": provenance,
+            },
+        ]
+
+    def _reject(
+        self,
+        candidate: CompactionCandidate,
+        reason: str,
+        detail: object | None = None,
+    ):
         self.metrics.rejected_compactions += 1
         self.metrics.record_reason(reason)
-        return [], [{"candidate": candidate.subject_key, "reason": reason}]
+        rejection = {"candidate": candidate.subject_key, "reason": reason}
+        if detail is not None:
+            rejection["detail"] = detail
+        return [], [rejection]
 
     def _apply_candidate_ops(self, memory, candidate, ops, visible_ids):
         referenced = {op.get("id") for op in ops if isinstance(op, dict) and op.get("op") == "SUPERSEDE"}
         if not referenced.issubset(visible_ids):
-            return self._reject(candidate, "hidden_id")
+            return self._reject(
+                candidate,
+                "hidden_id",
+                {
+                    "unexpected_ids": sorted(referenced - visible_ids),
+                    "visible_ids": sorted(visible_ids),
+                },
+            )
         rejected = self._validate_ops(memory, ops)
         if rejected:
             reason = "provenance" if any("provenance" in item["reason"] for item in rejected) else "schema"
-            return self._reject(candidate, reason)
+            return self._reject(candidate, reason, rejected)
         before = sum(memory.entries[entry_id].status == "active" for entry_id in visible_ids)
         trial = memory._copy()
         applied, rejected = trial.apply_ops_atomically(ops)
@@ -432,6 +612,7 @@ class MemoryCompactor:
             "decisions",
             "failed_attempts",
             "open_questions",
+            "progress",
         }
         missing_sections = (affected_sections & protected_sections) - add_sections
         if missing_sections:

@@ -1,6 +1,6 @@
 """Production-style memory invariants with no BEAM adapter or LLM judge."""
 
-from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.sections import PRACTICAL_SECTIONS, sections_for_preset
 from memory_agent.core.store import Memory
 from memory_agent.core.transcript import Turn
 from memory_agent.normalization.chat import ChatSubjectNormalizer
@@ -31,6 +31,39 @@ def test_unaccepted_assistant_proposal_is_not_written():
     ])
 
     assert applied == [] and rejected == [] and memory.entries == {}
+
+
+def test_substantive_exchange_is_saved_as_one_compactable_progress_rollup_source():
+    policy = get_memory_policy("chat")
+    sections = sections_for_preset("chat")
+    memory = Memory(sections, policy=policy)
+    assistant = (
+        "Use one-half base times height when the altitude is known. Heron's formula "
+        "works from three side lengths after computing the semiperimeter. For the "
+        "median, apply Apollonius' theorem and compare the result with the geometric "
+        "construction. These methods solve different information setups and should "
+        "not be treated as interchangeable shortcuts."
+    )
+    updater = MemoryUpdater(
+        ScriptedLLM(lambda *_: (
+            '[{"op":"ADD","section":"progress",'
+            '"text":"Discussion covered base-height and Heron area methods, then derived the median length.",'
+            '"provenance":[1,2]}]'
+        )),
+        sections,
+        policy=policy,
+    )
+
+    applied, rejected = updater.update(memory, [
+        Turn(1, "user", "Show me different triangle area methods and find the median."),
+        Turn(2, "assistant", assistant),
+    ])
+
+    assert applied and rejected == []
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert active[0].section == "progress"
+    assert active[0].provenance == [1, 2]
 
 
 def test_explicit_user_acceptance_can_be_saved_as_decision():

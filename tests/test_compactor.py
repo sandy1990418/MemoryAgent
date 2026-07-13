@@ -1,7 +1,7 @@
 import json
 
 from memory_agent.core.models import MemoryValue, SubjectIdentity
-from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.sections import PRACTICAL_SECTIONS, sections_for_preset
 from memory_agent.core.store import Memory
 from memory_agent.policies.structured import get_memory_policy
 from memory_agent.update.compactor import CompactionCandidate, MemoryCompactor
@@ -104,6 +104,126 @@ def test_exactly_two_unrelated_entries_do_not_create_candidate():
         policy=policy, enable_semantic_candidates=True,
     )
     assert compactor.detect_candidates(memory) == []
+
+
+def test_related_progress_is_rolled_up_by_topic_and_preserves_provenance():
+    policy = get_memory_policy("chat")
+    sections = sections_for_preset("chat")
+    memory = Memory(sections=sections, policy=policy)
+    memory.apply_ops([
+        {
+            "op": "ADD",
+            "section": "progress",
+            "text": "Triangle work compared base-height and Heron area methods.",
+            "provenance": [1, 2],
+        },
+        {
+            "op": "ADD",
+            "section": "progress",
+            "text": "Triangle work derived the median formula and equal-area property.",
+            "provenance": [3, 4],
+        },
+        {
+            "op": "ADD",
+            "section": "progress",
+            "text": "Triangle work progressed through SSS, SAS, and ASA comparisons.",
+            "provenance": [5, 6],
+        },
+    ])
+    response = json.dumps([
+        {"op": "SUPERSEDE", "id": "P1", "reason": "Topic rollup."},
+        {"op": "SUPERSEDE", "id": "P2", "reason": "Topic rollup."},
+        {"op": "SUPERSEDE", "id": "P3", "reason": "Topic rollup."},
+        {
+            "op": "ADD",
+            "section": "progress",
+            "text": (
+                "Triangle study progressed from area methods to median properties, "
+                "then compared SSS, SAS, and ASA congruence criteria."
+            ),
+            "provenance": [1, 2, 3, 4, 5, 6],
+        },
+    ])
+    compactor = MemoryCompactor(
+        llm=ScriptedLLM(lambda *_: response),
+        sections=sections,
+        policy=policy,
+        enable_semantic_candidates=False,
+    )
+
+    candidates = compactor.detect_candidates(memory)
+    assert len(candidates) == 1
+    assert candidates[0].reason == "progress-rollup"
+
+    applied, rejected = compactor.compact_candidates(memory, candidates)
+
+    assert len(applied) == 4 and rejected == []
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert active[0].id == "P4"
+    assert active[0].provenance == [1, 2, 3, 4, 5, 6]
+    assert all(memory.entries[entry_id].status == "superseded" for entry_id in ("P1", "P2", "P3"))
+
+
+def test_progress_rollup_ignores_model_managed_source_ids():
+    policy = get_memory_policy("chat")
+    sections = sections_for_preset("chat")
+    memory = Memory(sections=sections, policy=policy)
+    memory.apply_ops([
+        {"op": "ADD", "section": "progress", "text": "Flask auth covered login routes.", "provenance": [1, 2]},
+        {"op": "ADD", "section": "progress", "text": "Flask auth added CSRF handling.", "provenance": [3, 4]},
+        {"op": "ADD", "section": "progress", "text": "Flask auth compared password hashing.", "provenance": [5, 6]},
+        {"op": "ADD", "section": "progress", "text": "Flask auth documented session security.", "provenance": [7, 8]},
+    ])
+    # Small models sometimes hallucinate an id outside the visible candidate.
+    # The summary is useful, but source lifecycle must remain deterministic.
+    response = json.dumps([
+        {"op": "SUPERSEDE", "id": "P99", "reason": "Merged."},
+        {
+            "op": "ADD",
+            "section": "progress",
+            "text": "Flask authentication progressed through routes, CSRF, hashing, and session security.",
+            "provenance": [999],
+        },
+    ])
+    compactor = MemoryCompactor(
+        llm=ScriptedLLM(lambda *_: response),
+        sections=sections,
+        policy=policy,
+        enable_semantic_candidates=False,
+    )
+
+    applied, rejected = compactor.compact(memory)
+
+    assert rejected == []
+    assert len(applied) == 5
+    assert memory.entries["P5"].provenance == list(range(1, 9))
+    assert all(memory.entries[f"P{index}"].status == "superseded" for index in range(1, 5))
+
+
+def test_large_progress_backlog_is_split_into_bounded_rollup_candidates():
+    policy = get_memory_policy("chat")
+    sections = sections_for_preset("chat")
+    memory = Memory(sections=sections, policy=policy)
+    for index in range(12):
+        memory.apply_ops([{
+            "op": "ADD",
+            "section": "progress",
+            "text": f"Flask project authentication topic step {index + 1}.",
+            "provenance": [index * 2 + 1, index * 2 + 2],
+        }])
+    compactor = MemoryCompactor(
+        llm=ScriptedLLM(lambda *_: "[]"),
+        sections=sections,
+        policy=policy,
+        enable_semantic_candidates=False,
+        max_candidate_entries=8,
+    )
+
+    candidates = compactor.detect_candidates(memory)
+
+    assert [len(candidate.entries) for candidate in candidates] == [8, 4]
+    assert all(candidate.reason == "progress-rollup" for candidate in candidates)
 
 
 def test_compactor_accepts_string_noop_from_small_models():

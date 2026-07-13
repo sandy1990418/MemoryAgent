@@ -58,8 +58,10 @@ def _chat_updater_system(
         '- NOOP {"op":"NOOP"}\n\n'
         "PRACTICAL PROFILE rules:\n"
         "- Default to NOOP. Save durable user preferences, instructions, decisions, goals, current project state, observed results, blockers, failed attempts, and explicit corrections.\n"
-        "- Do not save ordinary questions. Do not save generic assistant advice, tutorials, examples, or unaccepted recommendations.\n"
-        "- Keep entries concise but aggregated, normally under 25 words. Prefer one consolidated entry per subject. Do not infer missing details.\n"
+        "- For a substantive completed user/assistant exchange, ADD at most one topic-scoped progress entry summarizing the concrete methods, comparisons, outcomes, or learning progression covered across both turns. Use neutral wording such as 'Discussion covered'; never claim the user implemented or accepted assistant content.\n"
+        "- Do not save a bare question, greeting, short answer, generic recommendation, or unaccepted proposal as progress. Do not copy snippets turn-by-turn.\n"
+        "- Do not save generic assistant advice as a user or project fact.\n"
+        "- Keep semantic entries normally under 25 words. A progress entry may use up to 60 words when needed to preserve concrete chronology for later compaction. Prefer one consolidated entry per topic per batch. Do not infer missing details.\n"
         "- A batch may produce at most three concise ADD or UPDATE operations.\n"
         "- For a reversal, MUST SUPERSEDE the old active entry, then ADD a new replacement entry. Never use UPDATE for that case.\n"
         "- UPDATE/SUPERSEDE ids must appear in Current memory. Never use a turn_id as an entry id; if no exact id exists, ADD or NOOP.\n"
@@ -74,7 +76,9 @@ def _profile_rules(policy: StructuredMemoryPolicy) -> str:
         return (
             "   - PRACTICAL PROFILE: default to NOOP for ordinary Q&A, "
             "explanations, tutorials, examples, translations, and one-off questions.\n"
-            "   - Do not save that the user merely asked about or discussed a topic.\n"
+            "   - Do not save that the user merely asked about a topic. A completed, "
+            "substantive exchange may produce one compactable progress summary when "
+            "it records concrete methods, comparisons, outcomes, or learning steps.\n"
             "   - Save only durable state: preferences, confirmed decisions, current "
             "project state, accepted implementation direction, observed results or "
             "errors, active blockers, failed attempts, and explicit corrections.\n"
@@ -129,7 +133,8 @@ def _assistant_rules(policy: StructuredMemoryPolicy) -> str:
     if is_chat_policy(policy):
         return (
             "   - Do not save generic assistant advice, tutorials, examples, "
-            "translations, recommendations, or proposed plans. Save an implementation "
+            "translations, recommendations, or proposed plans as user/project facts. "
+            "A substantive completed exchange may be summarized neutrally in progress. Save an implementation "
             "direction only after the user accepts or reports it.\n"
         )
     return (
@@ -296,6 +301,7 @@ def build_compactor_prompt(
         "2. SUPERSEDE every replaced active entry, then ADD one canonical entry.\n"
         "3. Preserve latest truth, preferences, decisions, current state, blockers, "
         "and failed attempts.\n"
+        "3a. A progress rollup is a topic summary, not a latest-value overwrite.\n"
         "4. Canonical ADD provenance must be the union of source provenance ids.\n"
         "5. Never supersede without a canonical ADD; never delete entries.\n"
         "6. Never operate on or re-activate a superseded entry.\n"
@@ -311,3 +317,21 @@ def build_compactor_prompt(
             "content": "Return subject-based compaction operations for the active entries.",
         }
     ]
+
+
+def build_progress_rollup_prompt(
+    *,
+    source_entries: str,
+    max_chars: int,
+) -> tuple[str, list[dict]]:
+    """Prompt for content generation only; the application owns all memory ops."""
+    system = (
+        "Summarize the supplied progress entries into one compact chronological "
+        "topic summary. Preserve concrete methods, outcomes, decisions, and important "
+        "distinctions, while removing repetition. Do not mention memory ids, source "
+        "entries, provenance, compaction, or superseding. Return plain summary text "
+        f"only, with no JSON, markdown, label, or preamble. Maximum {max_chars} "
+        "characters.\n\nProgress entries:\n"
+        f"{source_entries}"
+    )
+    return system, [{"role": "user", "content": "Return the compact summary only."}]

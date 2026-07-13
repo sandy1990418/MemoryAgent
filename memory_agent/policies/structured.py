@@ -48,7 +48,7 @@ CHAT_POLICY = StructuredMemoryPolicy(
     retention_semantics="durable_chat",
     subject_value_retention="personal_only",
     disallowed_sections=frozenset(
-        {"exact_values", "timeline", "tool_facts", "progress"}
+        {"exact_values", "timeline", "tool_facts"}
     ),
 )
 

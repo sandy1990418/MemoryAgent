@@ -347,13 +347,32 @@ class MemoryUpdater:
             turn.role == "assistant" and _PROPOSAL_RE.search(turn.content)
             for turn in group.turns
         )
+        has_progress_source = self._has_section("progress") and self._is_substantive_exchange(
+            group.turns
+        )
         if (
             is_chat_policy(self.policy)
             and group.group_type == "user_assistant"
             and not has_concrete_proposal
+            and not has_progress_source
         ):
             return tuple(turn for turn in group.turns if turn.role == "user")
         return group.turns
+
+    @staticmethod
+    def _is_substantive_exchange(turns: tuple[Turn, ...] | list[Turn]) -> bool:
+        """Conservative gate for exchanges worth a compactable progress rollup."""
+        has_user = any(turn.role == "user" and turn.content.strip() for turn in turns)
+        assistant_text = " ".join(
+            turn.content.strip()
+            for turn in turns
+            if turn.role == "assistant" and turn.content.strip()
+        )
+        return (
+            has_user
+            and len(assistant_text) >= 180
+            and len(content_words(assistant_text)) >= 25
+        )
 
     @staticmethod
     def _semantic_turn_groups(turns: list[Turn]) -> list[TurnGroup]:
@@ -488,6 +507,10 @@ class MemoryUpdater:
         if self._is_ordinary_non_durable_batch(
             evicted_turns, cue_re=status_change_cue_re(self.policy)
         ):
+            if self._has_section("progress") and self._is_substantive_exchange(
+                evicted_turns
+            ):
+                return "call:progress_rollup_source"
             return "skip:no_durable_assertion"
         covered_turn_ids = {
             turn_id
@@ -1308,7 +1331,7 @@ class MemoryUpdater:
             return ops
 
         allowed_sections = {section.key for section in self.sections}
-        disallowed_sections = {"timeline", "tool_facts", "exact_values", "progress"}
+        disallowed_sections = {"timeline", "tool_facts", "exact_values"}
         ordinary_question = self._is_ordinary_non_durable_batch(
             evicted_turns, cue_re=status_change_cue_re(self.policy)
         )
@@ -1329,6 +1352,16 @@ class MemoryUpdater:
                     continue
                 if ASSISTANT_ATTRIBUTED_RE.search(text):
                     continue
+                if section == "progress":
+                    provenance = set(op.get("provenance") or [])
+                    turns_by_id = {turn.id: turn for turn in evicted_turns}
+                    roles = {
+                        turns_by_id[turn_id].role
+                        for turn_id in provenance
+                        if turn_id in turns_by_id
+                    }
+                    if not {"user", "assistant"} <= roles:
+                        continue
                 canonical = self._canonical_chat_entry_text(text, section)
                 if canonical is None:
                     continue
@@ -1342,7 +1375,12 @@ class MemoryUpdater:
                     and subject_identity.attribute == "state"
                     and isinstance(op.get("value"), MemoryValue)
                 )
-                if ordinary_question and not explicit_denial and not typed_state:
+                if (
+                    ordinary_question
+                    and section != "progress"
+                    and not explicit_denial
+                    and not typed_state
+                ):
                     continue
             elif kind == "UPDATE":
                 text = op.get("text")
@@ -1840,7 +1878,11 @@ class MemoryUpdater:
             and self._has_section("status_changes")
         ):
             return "status_changes"
-        if PROGRESS_VALUE_RE.search(snippet) and self._has_section("progress"):
+        if (
+            not is_chat_policy(self.policy)
+            and PROGRESS_VALUE_RE.search(snippet)
+            and self._has_section("progress")
+        ):
             return "progress"
         if self._has_section("facts"):
             return "facts"
