@@ -385,6 +385,8 @@ class MemoryCompactor:
             payload = json.loads(text)
         except json.JSONDecodeError:
             payload = None
+        if isinstance(payload, str):
+            return payload.strip()
         candidates = payload if isinstance(payload, list) else [payload]
         for item in candidates:
             if not isinstance(item, dict):
@@ -393,6 +395,8 @@ class MemoryCompactor:
                 value = item.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+        if payload is not None:
+            return ""
         text = re.sub(r"^(?:summary|progress summary)\s*:\s*", "", text, flags=re.I)
         return text.strip().strip('"')
 
@@ -469,6 +473,13 @@ class MemoryCompactor:
         applied, rejected = trial.apply_ops_atomically(ops)
         if rejected:
             return self._reject(candidate, "schema")
+        if candidate.reason == "progress-rollup":
+            # Progress entries are transient rollup material, not durable audit
+            # records. Their provenance is carried into the canonical ADD, so
+            # replacement removes only the exact candidate sources instead of
+            # retaining an ever-growing superseded progress history.
+            for entry_id in visible_ids:
+                trial.entries.pop(entry_id, None)
         after = sum(entry.status == "active" for entry in trial.entries.values())
         total_before = sum(entry.status == "active" for entry in memory.entries.values())
         if after >= total_before or before < 2:

@@ -162,7 +162,7 @@ def test_related_progress_is_rolled_up_by_topic_and_preserves_provenance():
     assert len(active) == 1
     assert active[0].id == "P4"
     assert active[0].provenance == [1, 2, 3, 4, 5, 6]
-    assert all(memory.entries[entry_id].status == "superseded" for entry_id in ("P1", "P2", "P3"))
+    assert all(entry_id not in memory.entries for entry_id in ("P1", "P2", "P3"))
 
 
 def test_progress_rollup_ignores_model_managed_source_ids():
@@ -198,7 +198,7 @@ def test_progress_rollup_ignores_model_managed_source_ids():
     assert rejected == []
     assert len(applied) == 5
     assert memory.entries["P5"].provenance == list(range(1, 9))
-    assert all(memory.entries[f"P{index}"].status == "superseded" for index in range(1, 5))
+    assert all(f"P{index}" not in memory.entries for index in range(1, 5))
 
 
 def test_large_progress_backlog_is_split_into_bounded_rollup_candidates():
@@ -224,6 +224,42 @@ def test_large_progress_backlog_is_split_into_bounded_rollup_candidates():
 
     assert [len(candidate.entries) for candidate in candidates] == [8, 4]
     assert all(candidate.reason == "progress-rollup" for candidate in candidates)
+
+
+def test_progress_rollup_accepts_plain_text_and_replaces_only_candidate_entries():
+    policy = get_memory_policy("chat")
+    sections = sections_for_preset("chat")
+    memory = Memory(sections=sections, policy=policy)
+    memory.apply_ops([
+        {"op": "ADD", "section": "progress", "text": "Flask authentication discussion covered route protection, login redirects, and session loading behavior in the existing application structure.", "provenance": [1, 2]},
+        {"op": "ADD", "section": "progress", "text": "Flask authentication discussion covered CSRF validation, secure cookie settings, and password-hash verification during login.", "provenance": [3, 4]},
+        {"op": "ADD", "section": "progress", "text": "Flask authentication discussion covered RBAC decorators, unauthorized responses, and tests for admin and user endpoints.", "provenance": [5, 6]},
+        {"op": "ADD", "section": "progress", "text": "Triangle geometry covered Heron's formula and medians.", "provenance": [7, 8]},
+    ])
+    plain_summary = (
+        "Flask authentication progressed through route and session integration, "
+        "CSRF and secure-cookie handling, password verification, RBAC decorators, "
+        "unauthorized behavior, and endpoint tests."
+    )
+    compactor = MemoryCompactor(
+        llm=ScriptedLLM(lambda *_: plain_summary),
+        sections=sections,
+        policy=policy,
+        enable_semantic_candidates=False,
+    )
+    candidate = CompactionCandidate(
+        "progress-rollup:P1,P2,P3",
+        (memory.entries["P1"], memory.entries["P2"], memory.entries["P3"]),
+        "progress-rollup",
+    )
+
+    applied, rejected = compactor.compact_candidates(memory, [candidate])
+
+    assert rejected == [] and len(applied) == 4
+    assert memory.entries["P4"].status == "active"
+    assert memory.entries["P5"].text == plain_summary
+    assert memory.entries["P5"].provenance == [1, 2, 3, 4, 5, 6]
+    assert set(memory.entries) == {"P4", "P5"}
 
 
 def test_compactor_accepts_string_noop_from_small_models():
