@@ -1,15 +1,15 @@
 import pytest
 
-from memory_agent.models.sections import (
+from memory_agent.core.sections import (
     AGENT_SECTIONS,
     CHAT_SECTIONS,
     EXACT_VALUES,
     PRACTICAL_SECTIONS,
 )
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.transcript import Turn
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.updater import MemoryUpdater, UpdateFailed
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.update.updater import MemoryUpdater, UpdateFailed
 from tests.fakes import ScriptedLLM
 
 
@@ -966,7 +966,7 @@ def test_conversational_frame_is_trimmed_but_values_and_cues_survive():
 
 
 def test_trailing_request_clause_with_a_value_is_never_trimmed():
-    from memory_agent.structured.heuristics import trim_conversational_frame
+    from memory_agent.update.heuristics import trim_conversational_frame
 
     text = (
         "The probate process was shortened, so can you tell me how the 12% rate "
@@ -985,20 +985,20 @@ def test_trailing_request_clause_with_a_value_is_never_trimmed():
     ],
 )
 def test_conversational_trimming_preserves_material_request_clauses(text):
-    from memory_agent.structured.heuristics import trim_conversational_frame
+    from memory_agent.update.heuristics import trim_conversational_frame
 
     assert trim_conversational_frame(text) == text
 
 
 def test_conversational_trimming_still_removes_non_material_request_clause():
-    from memory_agent.structured.heuristics import trim_conversational_frame
+    from memory_agent.update.heuristics import trim_conversational_frame
 
     text = "The release is ready, can you help me think through it?"
     assert trim_conversational_frame(text) == "The release is ready"
 
 
 def test_conversational_trimming_removes_emotion_and_question_around_durable_state():
-    from memory_agent.structured.heuristics import trim_conversational_frame
+    from memory_agent.update.heuristics import trim_conversational_frame
 
     text = "I'm feeling worried that Project Atlas is blocked, what should I do next?"
     assert trim_conversational_frame(text) == "Project Atlas is blocked"

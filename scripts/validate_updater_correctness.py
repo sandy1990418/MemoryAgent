@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import time
 
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.sections import AGENT_SECTIONS, PRACTICAL_SECTIONS
-from memory_agent.models.transcript import Turn
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.ops import UpdateFailed
-from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.core.sections import AGENT_SECTIONS, PRACTICAL_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.update.operations import UpdateFailed
+from memory_agent.update.updater import MemoryUpdater
 
 
 class RecordingLLM:

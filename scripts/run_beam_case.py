@@ -38,8 +38,9 @@ from memory_agent import (
     TokenLedger,
     get_memory_policy,
 )
-from memory_agent.models.policy import is_chat_policy
+from memory_agent.policies.structured import is_chat_policy
 from scripts.beam_models import (
+    ANSWER_MEMORY_SELECTION_MODES,
     DEFAULT_RESULTS_DIR,
     BeamChunk,
     BeamRunConfig,
@@ -53,15 +54,13 @@ from evaluation.beam.memory_snapshot import (
     write_memory_snapshot,
 )
 from evaluation.beam.routing import RoutingMode, build_oracle_memory_context
-from memory_agent.structured.answer_context import (
+from memory_agent.retrieval.context import (
     AnswerContext,
-    AnswerContextBudget,
-    AnswerContextConfig,
     build_answer_memory_context,
 )
 from memory_agent.models.config import ProductMemoryConfig, product_config_from_argv
-from memory_agent.structured.middleware import StructuredMemoryMiddleware
-from memory_agent.models.sections import sections_for_preset
+from memory_agent.adapters.langchain.structured_memory import StructuredMemoryMiddleware
+from memory_agent.core.sections import sections_for_preset
 
 STOPWORDS = {
     "about",
@@ -300,33 +299,6 @@ CONTEXT:
 
 QUESTION:
 {question}
-
-ANSWER REQUIREMENTS:
-- Be direct and concise.
-- Stored stable preferences and instructions apply automatically: satisfy them
-  inside the answer itself. Never ask whether to apply a stored preference.
-- When satisfying a stored instruction requires general world knowledge that is
-  not user history (explaining a term, describing a genre, naming an audiobook
-  narrator, common tool details), supply it: using general knowledge to follow
-  a stored instruction is not invention. Never invent user-specific history.
-- Within each memory section, higher entry numbers are more recent. When several
-  active entries give different values for the same subject, treat the entry
-  with the highest number as current and note that it was updated.
-- For latest/current values, use the latest active memory entry for that subject.
-- If the context contains directly conflicting user statements about the same
-  fact and no later statement clearly corrects or supersedes the earlier one,
-  do not silently pick a side: say the stored information is contradictory,
-  briefly restate both statements, and ask which one is correct.
-- If a durable instruction requires dependency versions, list only dependencies
-  whose versions are present in context; do not output unversioned dependencies.
-- When recommendations are constrained by a stored preference (for example,
-  lightweight/minimal tools), explicitly state how the answer follows that
-  preference and avoids conflicting alternatives.
-- For date or duration questions, identify the relevant dated events from context and calculate carefully.
-- Abstain only when no relevant memory entry or recent context contains the answer.
-- Only output the answer to the question without any explanation.
-
-RESPONSE:
 """
 
 
@@ -680,6 +652,7 @@ def build_answer_context_result(
     max_active_context_chars: int,
     structured_answer_tokens: int,
     query: str = "",
+    answer_memory_selection: str = "all",
 ) -> AnswerContext:
     if structured_middleware is None:
         selected_ids: tuple[str, ...] = ()
@@ -687,10 +660,24 @@ def build_answer_context_result(
         chronological = "(StructuredMemoryMiddleware was not used.)"
         working_tail = "(No structured working-context tail.)"
     else:
+        if answer_memory_selection == "all":
+            entries = [
+                entry
+                for entry in structured_middleware.memory.entries.values()
+                if entry.status == "active"
+            ]
+        elif answer_memory_selection == "selector":
+            entries = structured_middleware.memory_selector.select_for_answer(
+                memory=structured_middleware.memory,
+                query=query,
+                budget=structured_answer_tokens,
+            )
+        else:
+            choices = ", ".join(ANSWER_MEMORY_SELECTION_MODES)
+            raise ValueError(f"answer_memory_selection must be one of: {choices}")
         answer_context = build_answer_memory_context(
-            query=query, memory=structured_middleware.memory,
-            config=AnswerContextConfig(selector=structured_middleware.memory_selector),
-            budget=AnswerContextBudget(max_tokens=structured_answer_tokens),
+            memory=structured_middleware.memory,
+            entries=entries,
         )
         selected_ids = answer_context.selected_ids
         conversation_memory = answer_context.rendered_context or "(No relevant structured memory entries.)"
@@ -717,11 +704,12 @@ def build_answer_context(
     structured_middleware: StructuredMemoryMiddleware | None,
     active_messages: list[AnyMessage], hits: list[Any], max_hit_chars: int,
     max_active_context_chars: int, structured_answer_tokens: int, query: str = "",
+    answer_memory_selection: str = "all",
 ) -> str:
     """Compatibility prompt API backed by the typed production result."""
     return build_answer_context_result(
         structured_middleware, active_messages, hits, max_hit_chars,
-        max_active_context_chars, structured_answer_tokens, query,
+        max_active_context_chars, structured_answer_tokens, query, answer_memory_selection,
     ).rendered_context
 
 
@@ -1198,6 +1186,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
                     max_active_context_chars=args.max_active_context_chars,
                     structured_answer_tokens=args.structured_answer_tokens,
                     query=question,
+                    answer_memory_selection=args.answer_memory_selection,
                 )
                 selected_memory_ids = list(context_result.selected_ids)
                 answer_context = context_result.rendered_context
@@ -1477,6 +1466,15 @@ def parse_args() -> argparse.Namespace:
         "--structured-answer-tokens",
         type=int,
         default=defaults["structured_answer_tokens"],
+    )
+    parser.add_argument(
+        "--answer-memory-selection",
+        choices=ANSWER_MEMORY_SELECTION_MODES,
+        default=defaults["answer_memory_selection"],
+        help=(
+            "Answer-time structured-memory mode: all injects every active entry "
+            "without selector ranking; selector uses the production MemorySelector."
+        ),
     )
     parser.add_argument(
         "--structured-evict-fraction",

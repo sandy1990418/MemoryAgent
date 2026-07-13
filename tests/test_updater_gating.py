@@ -1,8 +1,8 @@
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.sections import CHAT_SECTIONS
-from memory_agent.models.transcript import Turn
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.update.updater import MemoryUpdater
 from tests.fakes import ScriptedLLM
 
 
@@ -62,4 +62,3 @@ def test_gate_does_not_confirm_assistant_only_proposal():
     assert calls == []
     assert memory.entries == {}
     assert updater.decision_reasons == {"skip:no_durable_assertion": 1}
-

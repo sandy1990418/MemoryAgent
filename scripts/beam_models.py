@@ -49,6 +49,7 @@ DEFAULT_BEAM_QUESTION_TYPES = (
     "abstention",
     "summarization",
 )
+ANSWER_MEMORY_SELECTION_MODES = ("all", "selector")
 DEFAULT_BEAM_CONFIG_PATH = Path(os.getenv("BEAM_CONFIG", "configs/beam.yaml"))
 
 
@@ -69,6 +70,7 @@ class BeamConfig:
     structured_max_tokens: int = 12000
     structured_max_memory_tokens: int = 3000
     structured_answer_tokens: int = 4000
+    answer_memory_selection: str = "all"
     structured_evict_fraction: float = 0.5
     structured_keep_messages: int = 2
     recursion_limit: int = 50
@@ -114,6 +116,17 @@ class BeamConfig:
         resolved_budgets = tuple(int(item) for item in budgets)
         if not resolved_budgets or any(item <= 0 for item in resolved_budgets) or len(set(resolved_budgets)) != len(resolved_budgets):
             raise ValueError("fixed_token_budgets must contain unique positive integers")
+        answer_memory_selection = str(
+            config_value(
+                data,
+                "answer_memory_selection",
+                "BEAM_ANSWER_MEMORY_SELECTION",
+                cls.answer_memory_selection,
+            )
+        )
+        if answer_memory_selection not in ANSWER_MEMORY_SELECTION_MODES:
+            choices = ", ".join(ANSWER_MEMORY_SELECTION_MODES)
+            raise ValueError(f"answer_memory_selection must be one of: {choices}")
 
         def _int_value(key: str, env: str, default: int, minimum: int) -> int:
             value = int(config_value(data, key, env, default))
@@ -162,6 +175,7 @@ class BeamConfig:
                 cls.structured_answer_tokens,
                 1,
             ),
+            answer_memory_selection=answer_memory_selection,
             structured_evict_fraction=evict_fraction,
             structured_keep_messages=_int_value(
                 "structured_keep_messages",
@@ -192,6 +206,7 @@ class BeamConfig:
             "structured_max_tokens": self.structured_max_tokens,
             "structured_max_memory_tokens": self.structured_max_memory_tokens,
             "structured_answer_tokens": self.structured_answer_tokens,
+            "answer_memory_selection": self.answer_memory_selection,
             "structured_evict_fraction": self.structured_evict_fraction,
             "structured_keep_messages": self.structured_keep_messages,
             "recursion_limit": self.recursion_limit,
@@ -250,6 +265,7 @@ class BeamRunConfig:
     structured_max_tokens: int = 12000
     structured_max_memory_tokens: int = 3000
     structured_answer_tokens: int = 4000
+    answer_memory_selection: str = "all"
     structured_evict_fraction: float = 0.5
     structured_keep_messages: int = 2
     structured_flush_final: bool = True

@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from memory_agent.evaluation.final_report import (
+from evaluation.memory.final_report import (
     build_final_report, build_paired_routing_result, validate_final_report,
 )
-from memory_agent.evaluation.manifest import build_frozen_manifest
+from evaluation.memory.manifest import build_frozen_manifest
 
 
 def test_manifest_freezes_source_content_splits_and_historical_provenance():

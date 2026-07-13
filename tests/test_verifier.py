@@ -1,7 +1,7 @@
-from memory_agent.models.sections import AGENT_SECTIONS
-from memory_agent.models.transcript import Turn
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.verifier import MemoryUpdateVerifier
+from memory_agent.core.sections import AGENT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.update.verifier import MemoryUpdateVerifier
 
 
 DENIAL_TURN = Turn(

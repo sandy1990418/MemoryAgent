@@ -4,14 +4,12 @@ import pytest
 
 from evaluation.beam import BeamChatCaseAdapter, compare_fixed_budget_runs
 from memory_agent.domain import EventSourceType
-from memory_agent.models.sections import CHAT_SECTIONS
-from memory_agent.structured.answer_context import (
-    AnswerContextBudget,
-    AnswerContextConfig,
+from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.retrieval.context import (
     build_answer_memory_context,
 )
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.selector import MemorySelector
+from memory_agent.retrieval.selector import MemorySelector
 from scripts.run_beam_case import build_answer_context, build_answer_context_result
 
 
@@ -49,22 +47,85 @@ def test_beam_production_and_middleware_service_are_byte_identical():
         {"op": "ADD", "section": "decisions", "text": "The team chose Postgres.", "provenance": [2]},
     ])
     selector = MemorySelector(pinned_sections=frozenset())
+    entries = selector.select_for_answer(
+        memory=memory,
+        query="Which database does the project use?",
+        budget=500,
+    )
     result = build_answer_memory_context(
-        query="Which database does the project use?", memory=memory,
-        config=AnswerContextConfig(selector=selector), budget=AnswerContextBudget(max_tokens=500),
+        memory=memory,
+        entries=entries,
     )
     middleware = type("Middleware", (), {"memory": memory, "memory_selector": selector})()
     beam = build_answer_context(
         middleware, [], [], 100, 100, 500, query="Which database does the project use?",
+        answer_memory_selection="selector",
     )
     typed_beam = build_answer_context_result(
         middleware, [], [], 100, 100, 500, query="Which database does the project use?",
+        answer_memory_selection="selector",
     )
     rendered = beam.split("Structured memory summary.\n", 1)[1].split("\n\n# Chronological Order", 1)[0]
     assert rendered == result.rendered_context
     assert result.selected_ids == ("D1", "F1")
     assert typed_beam.selected_ids == result.selected_ids
     assert typed_beam.rendered_context == beam
+
+
+def test_answer_memory_selection_all_bypasses_selector_budget():
+    memory = Memory(sections=CHAT_SECTIONS)
+    memory.apply_ops([
+        {
+            "op": "ADD",
+            "section": "facts",
+            "text": "The project implemented a Flask homepage route.",
+            "provenance": [1],
+        },
+        {
+            "op": "ADD",
+            "section": "facts",
+            "text": "The unrelated deployment guide contains extensive operational notes.",
+            "provenance": [2],
+        },
+    ])
+    middleware = type(
+        "Middleware",
+        (),
+        {
+            "memory": memory,
+            "memory_selector": MemorySelector(pinned_sections=frozenset()),
+        },
+    )()
+
+    full = build_answer_context_result(
+        middleware, [], [], 100, 100, 1,
+        query="Have I implemented a Flask route?",
+        answer_memory_selection="all",
+    )
+    selected = build_answer_context_result(
+        middleware, [], [], 100, 100, 1,
+        query="Have I implemented a Flask route?",
+        answer_memory_selection="selector",
+    )
+
+    assert full.selected_ids == ("F1", "F2")
+    assert selected.selected_ids == ()
+    assert "Flask homepage route" in full.rendered_context
+
+
+def test_answer_memory_selection_rejects_unknown_mode():
+    memory = Memory(sections=CHAT_SECTIONS)
+    middleware = type(
+        "Middleware",
+        (),
+        {"memory": memory, "memory_selector": MemorySelector()},
+    )()
+
+    with pytest.raises(ValueError, match="answer_memory_selection"):
+        build_answer_context_result(
+            middleware, [], [], 100, 100, 100,
+            answer_memory_selection="unknown",
+        )
 
 
 def test_root_unit_tests_do_not_import_beam_evaluation():

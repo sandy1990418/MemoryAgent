@@ -4,8 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+from memory_agent.core.transcript import Turn
 from memory_agent.models.config import ProductMemoryConfig
-from memory_agent.models.transcript import Turn
 from tests.fakes import ScriptedLLM
 
 
@@ -21,7 +21,7 @@ def _clear_forbidden_modules() -> None:
 
 def test_chat_facade_updates_practical_memory_without_agent_imports():
     _clear_forbidden_modules()
-    from memory_agent.chat import build_chat_memory
+    from memory_agent.application.chat import build_chat_memory
 
     chat = build_chat_memory(
         ScriptedLLM(
@@ -51,10 +51,10 @@ def test_chat_facade_updates_practical_memory_without_agent_imports():
     assert not any(name.startswith("memory_agent.clients.mem0") for name in sys.modules)
 
 
-def test_chat_module_import_has_no_forbidden_reverse_dependencies():
+def test_application_chat_module_import_has_no_forbidden_reverse_dependencies():
     _clear_forbidden_modules()
 
-    module = importlib.import_module("memory_agent.chat")
+    module = importlib.import_module("memory_agent.application.chat")
 
     assert hasattr(module, "build_chat_memory")
     assert not any(name.startswith("memory_agent.clients.mem0") for name in sys.modules)
@@ -62,7 +62,7 @@ def test_chat_module_import_has_no_forbidden_reverse_dependencies():
 
 
 def test_chat_source_has_no_forbidden_imports():
-    source = Path("memory_agent/chat.py").read_text(encoding="utf-8")
+    source = Path("memory_agent/application/chat.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     imported = {
         alias.name
@@ -100,7 +100,7 @@ def test_chat_compacts_only_above_configured_threshold():
             ]
         )
 
-    from memory_agent.chat import build_chat_memory
+    from memory_agent.application.chat import build_chat_memory
 
     chat = build_chat_memory(
         ScriptedLLM(responder),
@@ -112,7 +112,7 @@ def test_chat_compacts_only_above_configured_threshold():
 
 
 def test_chat_records_token_usage_per_role():
-    from memory_agent.chat import build_chat_memory
+    from memory_agent.application.chat import build_chat_memory
 
     chat = build_chat_memory(
         ScriptedLLM(
@@ -158,7 +158,7 @@ def test_chat_compacts_after_crossing_configured_threshold():
             )
         return '[{"op": "NOOP"}]'
 
-    from memory_agent.chat import build_chat_memory
+    from memory_agent.application.chat import build_chat_memory
 
     chat = build_chat_memory(
         ScriptedLLM(responder),

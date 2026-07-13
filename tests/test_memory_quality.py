@@ -1,9 +1,9 @@
-from memory_agent.models.memory import MemoryValue, SubjectIdentity
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.quality import memory_quality_report
-from memory_agent.structured.updater import MemoryUpdater
-from memory_agent.models.sections import PRACTICAL_SECTIONS
-from memory_agent.models.policy import get_memory_policy
+from memory_agent.core.models import MemoryValue, SubjectIdentity
+from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.retrieval.quality import memory_quality_report
+from memory_agent.update.updater import MemoryUpdater
 from tests.fakes import ScriptedLLM
 
 
@@ -22,7 +22,7 @@ def test_quality_report_labels_heuristics_and_exposes_requested_indicators():
 
 
 def test_canonical_validation_quarantines_sliced_or_incomplete_model_output():
-    from memory_agent.models.transcript import Turn
+    from memory_agent.core.transcript import Turn
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda *_: '[{"op":"ADD","section":"goal","text":"User asked to…","provenance":[1]}]'),
         sections=PRACTICAL_SECTIONS,
@@ -45,7 +45,7 @@ def test_raw_request_is_canonicalized_to_goal_without_character_slicing():
         max_retries=0,
     )
     memory = Memory(sections=PRACTICAL_SECTIONS)
-    from memory_agent.models.transcript import Turn
+    from memory_agent.core.transcript import Turn
     updater.update(memory, [Turn(1, "user", "I need to ship a complete production release")])
     assert [entry.text for entry in memory.entries.values()] == [
         "Goal: ship a complete production release with verified artifacts"
@@ -116,7 +116,7 @@ def test_lifecycle_value_history_survives_repeated_consolidation():
 
 
 def test_non_latin_typed_state_lifecycle_consolidates_like_english():
-    from memory_agent.models.transcript import Turn
+    from memory_agent.core.transcript import Turn
 
     updater = MemoryUpdater(
         llm=ScriptedLLM(
@@ -149,7 +149,7 @@ def test_non_latin_typed_state_lifecycle_consolidates_like_english():
 
 
 def test_state_pronoun_does_not_resolve_across_update_batches():
-    from memory_agent.models.transcript import Turn
+    from memory_agent.core.transcript import Turn
 
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
@@ -170,7 +170,7 @@ def test_state_pronoun_does_not_resolve_across_update_batches():
 
 
 def test_assistant_suggestion_cannot_become_user_decision():
-    from memory_agent.models.transcript import Turn
+    from memory_agent.core.transcript import Turn
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda *_: '[{"op":"ADD","section":"goal","text":"Assistant suggested choosing Redis","provenance":[1]}]'),
         sections=Memory().sections,

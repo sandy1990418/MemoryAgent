@@ -1,10 +1,10 @@
 import json
 
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.sections import PRACTICAL_SECTIONS
-from memory_agent.models.memory import MemoryValue, SubjectIdentity
-from memory_agent.structured.compactor import CompactionCandidate, MemoryCompactor
-from memory_agent.structured.memory import Memory
+from memory_agent.core.models import MemoryValue, SubjectIdentity
+from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.update.compactor import CompactionCandidate, MemoryCompactor
 from tests.fakes import ScriptedLLM
 from tests.practical_cases import SUBJECT_COMPACTION_CASE
 

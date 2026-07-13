@@ -5,9 +5,9 @@ from langchain_core.messages import HumanMessage
 
 from memory_agent.clients.llm import TokenLedger
 from scripts.beam_models import DEFAULT_BEAM_QUESTION_TYPES, BeamRunConfig
-from memory_agent.models.sections import CHAT_SECTIONS
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.selector import MemorySelector
+from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.retrieval.selector import MemorySelector
 from scripts.run_beam_case import (
     apply_score_ownership,
     answer_question,

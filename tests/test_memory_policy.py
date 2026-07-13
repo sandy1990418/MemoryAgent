@@ -4,12 +4,12 @@ import pytest
 
 from memory_agent.agents.structured import build_structured_middleware
 from memory_agent.models.config import StructuredAgentConfig
-from memory_agent.models.policy import get_memory_policy, is_chat_policy
-from memory_agent.models.sections import EVAL_SECTIONS, PRACTICAL_SECTIONS
-from memory_agent.models.transcript import Turn
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.updater import MemoryUpdater
-from memory_agent.structured.verifier import MemoryUpdateVerifier
+from memory_agent.core.sections import EVAL_SECTIONS, PRACTICAL_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.policies.structured import get_memory_policy, is_chat_policy
+from memory_agent.update.updater import MemoryUpdater
+from memory_agent.update.verifier import MemoryUpdateVerifier
 from tests.fakes import ScriptedLLM
 from tests.practical_cases import PRACTICAL_RETENTION_CASES
 
@@ -253,7 +253,7 @@ def test_latest_value_consolidation_keeps_distinct_latency_subjects():
 
 
 def test_latest_value_consolidation_keeps_conditional_preferences_separate():
-    from memory_agent.models.memory import MemoryValue, SubjectIdentity
+    from memory_agent.core.models import MemoryValue, SubjectIdentity
 
     policy = get_memory_policy("chat")
     memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)
@@ -275,7 +275,7 @@ def test_latest_value_consolidation_keeps_conditional_preferences_separate():
 
 
 def test_low_confidence_identity_never_mutates_latest_value():
-    from memory_agent.models.memory import MemoryValue, SubjectIdentity
+    from memory_agent.core.models import MemoryValue, SubjectIdentity
 
     policy = get_memory_policy("chat")
     memory = Memory(sections=PRACTICAL_SECTIONS, policy=policy)

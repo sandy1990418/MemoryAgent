@@ -47,7 +47,10 @@ from scripts.beam_models import (
     beam_config_from_argv,
 )
 from memory_agent.models.config import product_config_from_argv
-from memory_agent.structured.middleware import StructuredMemoryMiddleware, _content_to_text
+from memory_agent.adapters.langchain.structured_memory import (
+    StructuredMemoryMiddleware,
+    _content_to_text,
+)
 from scripts.run_beam_case import (
     BEAM_TOKEN_ROLES,
     DEFAULT_RESULTS_DIR,

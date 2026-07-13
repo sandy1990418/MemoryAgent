@@ -1,3 +1,8 @@
-from .memory_service import MemoryService
+from .event_memory_service import EventMemoryService
+from .structured_service import StructuredMemoryService, StructuredUpdateResult
 
-__all__ = ["MemoryService"]
+__all__ = [
+    "EventMemoryService",
+    "StructuredMemoryService",
+    "StructuredUpdateResult",
+]

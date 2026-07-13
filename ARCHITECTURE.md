@@ -21,18 +21,23 @@ References:
 
 ```text
 memory_agent/
-  domain/      Generic MemoryEvent, MemoryEntry, MemoryScope, and token budget.
-  application/ Public event-ingest, retrieval, and context-construction boundary.
-  profiles/    Workload-specific adapters and policies (chat now, agent extension).
-  evaluation/  Generic evaluator protocols; never dataset schemas.
-  chat.py        Standalone practical-memory facade for chat products.
-  structured/    Operation-based memory domain and runtime.
-  longterm/      Long-term vector recall integration.
-  agents/        Agent assembly for runnable demos.
+  core/          Framework-neutral structured models, store, transcript, window.
+  policies/      StructuredMemoryPolicy and EventMemoryPolicy implementations.
+  normalization/ Subject/value normalization strategies.
+  update/        Extraction, prompt, operation, verification, compaction pipeline.
+  retrieval/     Answer-time selection, rendering, and quality signals.
+  application/   Structured/event services, standalone chat, manual session.
+  adapters/      LangChain and chat/agent-event input adapters.
+  domain/        Generic MemoryEvent, event entry, scope, and token budget.
+  agents/        Dependency-injection assembly for runnable agents.
   clients/       External service protocols/adapters (LLM, mem0).
-  models/        Dataclasses, config models, constants.
+  models/        Remaining config, runtime, and integration DTOs.
 
 demos/           Runnable examples, summary baseline, and demo-only tools/config.
+
+evaluation/
+  memory/         Generic memory replay, metrics, manifests, and report schemas.
+  beam/           BEAM-specific adapters, routing, snapshots, and aggregation.
 
 scripts/         BEAM evaluation only. Nothing in memory_agent/ imports it.
   beam_models.py BEAM run/config models (BeamConfig, BeamRunConfig, ...).
@@ -40,31 +45,29 @@ scripts/         BEAM evaluation only. Nothing in memory_agent/ imports it.
   beam_tests/    Tests for the BEAM runners and BEAM config.
 ```
 
-Dataset-specific adapters live in `evaluation/beam/`. The supported direction
+Dataset-specific adapters live in `evaluation/beam/`; reusable memory-system
+evaluation harnesses live in `evaluation/memory/`. The supported direction
 is `BEAM JSON -> BeamChatCaseAdapter -> MemoryEvent -> common application/core`.
-Neither the common domain nor profile contracts depend on BEAM, LangGraph,
+Neither the common domain nor policy contracts depend on BEAM, LangGraph,
 DeepAgent, Claude Code, Codex, mem0, or fixed user/assistant JSON.
 
 The key distinction:
 
 ```text
-chat.py
-  The handoff surface for chat memory. Depends only on structured/ core,
-  models/, and clients/llm.py. Never imports agents/, mem0, or scripts/
+application/chat.py
+  The handoff surface for chat memory. Depends on core/, policies/, update/,
+  application services, and clients/llm.py. Never imports agents/, mem0, or scripts/
   (enforced by tests/test_chat_facade.py).
 
 demos/summary.py
   Uses LangChain SummarizationMiddleware as a comparison baseline.
   It is demo-only and does not produce structured memory entries.
 
-structured/
-  Owns Memory, Transcript, WorkingWindow, MemorySelector, MemoryUpdater,
-  MemoryCompactor, MemoryUpdateVerifier, and StructuredMemoryMiddleware.
-  Deterministic cue/value regexes live in structured/heuristics.py so the
-  policy-sensitive vocabulary is reviewable in one place.
-  LLM instruction construction lives in structured/prompts.py, while the
-  shared operation response parser lives in structured/ops.py.
-  It is not summary code. It stores auditable entries through operations.
+core/ + update/ + retrieval/
+  Core owns state and invariants. Update owns mutation proposals and validation.
+  Retrieval owns read-time selection and rendering. StructuredMemoryService in
+  application/ owns update/verify/commit and compaction orchestration. The
+  LangChain middleware in adapters/ only adapts agent messages and model calls.
 
 longterm/
   Owns LongTermMemoryMiddleware.
@@ -74,8 +77,36 @@ longterm/
 scripts/ (BEAM)
   Evaluation harness. The "beam" CLI profile is a runner-level alias that
   scripts normalize onto the core "eval" profile via normalize_beam_profile;
-  the memory_agent package only knows practical/agent/eval.
+  the memory_agent package knows chat/practical/agent/eval.
 ```
+
+## Structured Core and Agent-Event Evolution Boundary
+
+The current production path is the operation-based structured runtime. The
+event model is retained as the next ingestion boundary for agent traces, not as
+a second production storage engine:
+
+```mermaid
+flowchart LR
+    ChatMessages[Chat messages] --> Turns[Structured Turns]
+    Turns --> StructuredService[StructuredMemoryService]
+    StructuredService --> StructuredStore[Operation-based Memory]
+
+    AgentTrace[Future agent trace] --> AgentAdapter[AgentEventAdapter]
+    AgentAdapter --> Events[MemoryEvent]
+    Events --> EventPolicy[EventMemoryPolicy]
+    EventPolicy -. planned translation .-> StructuredService
+```
+
+Policy names are explicit at this boundary:
+
+- `StructuredMemoryPolicy` controls sections, extraction, operation caps, and
+  structured-runtime behavior.
+- `EventMemoryPolicy` controls generic event retention, classification,
+  importance, scope, and retrieval priority.
+
+The previous ambiguous `MemoryPolicy` aliases and compatibility packages have
+been removed.
 
 ## High-Level Component Graph
 
@@ -89,18 +120,16 @@ flowchart TD
     SummaryScript --> SummaryPkg[demos.summary]
     StructuredScript --> StructuredAgent[memory_agent.agents.structured]
     HybridScript --> HybridAgent[memory_agent.agents.hybrid]
-    PlainScript --> StructuredPkg[memory_agent.structured]
+    PlainScript --> Application[memory_agent.application]
 
     SummaryPkg --> LC1[LangChain create_agent]
     SummaryPkg --> LCSum[SummarizationMiddleware]
 
-    StructuredAgent --> StructuredPkg
-    StructuredPkg --> Store[Memory]
-    StructuredPkg --> Transcript[Transcript]
-    StructuredPkg --> Window[WorkingWindow]
-    StructuredPkg --> Selector[MemorySelector]
-    StructuredPkg --> Updater[MemoryUpdater]
-    StructuredPkg --> StructuredMW[StructuredMemoryMiddleware]
+    StructuredAgent --> StructuredMW[adapters.langchain.StructuredMemoryMiddleware]
+    StructuredMW --> Service[application.StructuredMemoryService]
+    Service --> Store[core.Memory]
+    Service --> Updater[update.MemoryUpdater]
+    StructuredMW --> Selector[retrieval.MemorySelector]
 
     HybridAgent --> StructuredAgent
     HybridAgent --> LongTermPkg[memory_agent.longterm]
@@ -112,22 +141,28 @@ flowchart TD
     LongTermMW --> LongTermProtocol[LongTermMemory protocol]
     LongTermProtocol --> Mem0[Mem0LongTermMemory adapter]
 
-    Store --> Models[memory_agent.models]
-    Transcript --> Models
-    Selector --> Models
+    Store --> CoreModels[core models and schema]
+    Selector --> Store
+
+    AgentEvents[AgentEventAdapter] --> EventDomain[memory_agent.domain]
+    EventDomain --> EventService[EventMemoryService]
+    EventPolicies[memory_agent.policies] --> EventService
 ```
 
 ## Dependency Direction
 
 ```mermaid
 flowchart LR
-    Models[models] --> Structured[structured]
-    Models --> LongTerm[longterm]
-    Models --> Agents[agents]
-    Clients[clients] --> Structured
-    Clients --> LongTerm
-    Structured --> Agents
-    LongTerm --> Agents
+    Core[core] --> Update[update]
+    Core --> Retrieval[retrieval]
+    Policies[policies] --> Update
+    Update --> Application[application]
+    Retrieval --> Application
+    Domain[domain events] --> Application
+    Application --> Adapters[adapters]
+    Clients[clients] --> Update
+    Adapters --> Agents[agents]
+    Application --> Agents
     Demos[demos] --> Agents
 ```
 
@@ -135,8 +170,11 @@ Rules:
 
 - `models/` has no LangChain, mem0, or OpenAI imports.
 - `clients/` is where external services are adapted behind small protocols.
-- `structured/` owns structured-memory behavior and may depend on
-  `LLMClient`, but not on a concrete OpenAI import except through injection.
+- `core/` has no LLM or framework dependency. `update/` may depend on the
+  `LLMClient` protocol, but never on a concrete OpenAI client.
+- `adapters/` owns LangChain-specific message and middleware integration.
+- Removed paths (`structured/`, `profiles/`, and moved `models/*`) must not be
+  imported; an architecture test enforces it.
 - `longterm/` owns LangChain long-term recall middleware; concrete mem0 details
   stay in `clients/mem0.py`.
 - `agents/` wires these pieces together for runnable apps.
@@ -180,9 +218,10 @@ Code locations:
 
 ```text
 memory_agent/agents/structured.py
-memory_agent/structured/middleware.py
-memory_agent/structured/updater.py
-memory_agent/structured/memory.py
+memory_agent/adapters/langchain/structured_memory.py
+memory_agent/application/structured_service.py
+memory_agent/update/updater.py
+memory_agent/core/store.py
 ```
 
 ```mermaid
@@ -190,6 +229,7 @@ sequenceDiagram
     participant U as User
     participant A as LangChain Agent
     participant SM as StructuredMemoryMiddleware
+    participant S as StructuredMemoryService
     participant T as Transcript
     participant Up as MemoryUpdater
     participant Mem as Memory
@@ -202,10 +242,11 @@ sequenceDiagram
     SM->>SM: check token budget
     alt over budget
         SM->>SM: choose safe cutoff without splitting tool pairs
-        SM->>Up: evicted turns + current memory
+        SM->>S: evicted turns
+        S->>Up: prepare update against trial memory
         Up->>L: request ADD/UPDATE/SUPERSEDE/NOOP JSON
         L-->>Up: ops JSON
-        Up->>Mem: validate and apply atomically
+        S->>Mem: verify and commit atomically
         alt success
             SM-->>A: remove evicted messages
         else failure or rejected ops
@@ -265,9 +306,9 @@ the product `StructuredMemoryMiddleware` path does not depend on it.
 Code locations:
 
 ```text
-memory_agent/structured/session.py
-memory_agent/structured/window.py
-memory_agent/structured/transcript.py
+memory_agent/application/session.py
+memory_agent/core/window.py
+memory_agent/core/transcript_store.py
 ```
 
 ```mermaid

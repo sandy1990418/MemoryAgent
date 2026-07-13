@@ -1,13 +1,13 @@
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.sections import CHAT_SECTIONS, PRACTICAL_SECTIONS
+from memory_agent.core.models import MemoryValue, SubjectIdentity
+from memory_agent.core.sections import CHAT_SECTIONS, PRACTICAL_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.normalization.chat import ChatSubjectNormalizer
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.update.selector import UpdateMemorySelector
+from memory_agent.update.updater import MemoryUpdater
 from memory_agent.models.config import ProductMemoryConfig
-from memory_agent.models.transcript import Turn
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.update_selector import UpdateMemorySelector
-from memory_agent.structured.updater import MemoryUpdater
 from tests.fakes import ScriptedLLM
-from memory_agent.models.memory import MemoryValue, SubjectIdentity
-from memory_agent.profiles.chat.subject_normalizer import ChatSubjectNormalizer
 
 
 def _memory() -> Memory:

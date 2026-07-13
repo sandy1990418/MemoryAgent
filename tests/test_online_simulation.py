@@ -1,15 +1,14 @@
-from memory_agent.evaluation.final_report import build_final_report
+from evaluation.memory.final_report import build_final_report
 import pytest
 
-from memory_agent.evaluation.online_simulation import (
+from evaluation.memory.online_simulation import (
     OnlineSimulation, SimulationMode, TranscriptExchange,
 )
-from memory_agent.models.policy import CHAT_POLICY
-from memory_agent.models.sections import CHAT_SECTIONS
-from memory_agent.structured.answer_context import AnswerContextConfig
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.selector import MemorySelector
-from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.policies.structured import CHAT_POLICY
+from memory_agent.retrieval.selector import MemorySelector
+from memory_agent.update.updater import MemoryUpdater
 
 
 class RecordingLLM:
@@ -30,7 +29,7 @@ def test_token_only_uses_recorded_assistant_and_cannot_read_self_or_future_memor
     updater = MemoryUpdater(updater_llm, CHAT_SECTIONS, policy=CHAT_POLICY, max_retries=0)
     runner = OnlineSimulation(
         memory=Memory(CHAT_SECTIONS, policy=CHAT_POLICY), updater=updater,
-        answer_context_config=AnswerContextConfig(MemorySelector(policy=CHAT_POLICY)),
+        answer_selector=MemorySelector(policy=CHAT_POLICY),
         answer_memory_budget=100, max_window_tokens=1,
         token_estimator=lambda text: len(text.split()) if text else 0,
     )
@@ -55,7 +54,7 @@ def test_live_mode_requires_explicit_answer_client_and_calls_it_once_per_turn():
     updater = MemoryUpdater(RecordingLLM([]), CHAT_SECTIONS, policy=CHAT_POLICY)
     common = dict(
         memory=Memory(CHAT_SECTIONS, policy=CHAT_POLICY), updater=updater,
-        answer_context_config=AnswerContextConfig(MemorySelector(policy=CHAT_POLICY)),
+        answer_selector=MemorySelector(policy=CHAT_POLICY),
         answer_memory_budget=100, max_window_tokens=1000, mode=SimulationMode.LIVE,
     )
     with pytest.raises(ValueError, match="explicit answer_llm"):
@@ -72,7 +71,7 @@ def test_simulation_reports_cumulative_distribution_and_updater_attribution():
     updater = MemoryUpdater(RecordingLLM([]), CHAT_SECTIONS, policy=CHAT_POLICY)
     runner = OnlineSimulation(
         memory=Memory(CHAT_SECTIONS, policy=CHAT_POLICY), updater=updater,
-        answer_context_config=AnswerContextConfig(MemorySelector(policy=CHAT_POLICY)),
+        answer_selector=MemorySelector(policy=CHAT_POLICY),
         answer_memory_budget=100, max_window_tokens=1000,
         token_estimator=lambda text: len(text) if text else 0,
     )
@@ -102,7 +101,7 @@ def test_long_replay_keeps_memory_injection_bounded_while_reporting_total_input_
     runner = OnlineSimulation(
         memory=memory,
         updater=MemoryUpdater(RecordingLLM([]), CHAT_SECTIONS, policy=CHAT_POLICY),
-        answer_context_config=AnswerContextConfig(MemorySelector(policy=CHAT_POLICY)),
+        answer_selector=MemorySelector(policy=CHAT_POLICY),
         answer_memory_budget=20, max_window_tokens=10_000,
         token_estimator=lambda text: len(text.split()) if text else 0,
     )

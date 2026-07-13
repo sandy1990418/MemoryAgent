@@ -22,8 +22,11 @@ max_active_context_chars: 12000
 structured_max_tokens: 12000
 structured_max_memory_tokens: 3000
 structured_answer_tokens: 4000
+# Diagnostic answer-time retrieval mode. "all" injects every active structured
+# entry; use "selector" to exercise the production MemorySelector path.
+answer_memory_selection: all
 structured_evict_fraction: 0.5
-structured_keep_messages: 2
+structured_keep_messages: 5
 recursion_limit: 50
 # Paired chat-profile comparisons must use the same total retrieved-context
 # budget for every variant. Override with BEAM_FIXED_TOKEN_BUDGETS=256,512,1024.

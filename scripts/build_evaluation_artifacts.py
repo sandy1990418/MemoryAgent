@@ -13,23 +13,22 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from memory_agent.evaluation.final_report import (  # noqa: E402
+from evaluation.memory.final_report import (  # noqa: E402
     build_final_report,
     build_paired_routing_result,
     unavailable,
 )
-from memory_agent.evaluation.online_simulation import OnlineSimulation, TranscriptExchange  # noqa: E402
-from memory_agent.evaluation.manifest import build_frozen_manifest, content_hash  # noqa: E402
-from memory_agent.evaluation.update_selection import update_selection_metrics  # noqa: E402
-from memory_agent.models.memory import MemoryEntry  # noqa: E402
-from memory_agent.models.policy import CHAT_POLICY  # noqa: E402
-from memory_agent.models.sections import CHAT_SECTIONS  # noqa: E402
-from memory_agent.models.transcript import Turn  # noqa: E402
-from memory_agent.structured.answer_context import AnswerContextConfig  # noqa: E402
-from memory_agent.structured.memory import Memory  # noqa: E402
-from memory_agent.structured.selector import MemorySelector  # noqa: E402
-from memory_agent.structured.update_selector import UpdateMemorySelector  # noqa: E402
-from memory_agent.structured.updater import MemoryUpdater  # noqa: E402
+from evaluation.memory.manifest import build_frozen_manifest, content_hash  # noqa: E402
+from evaluation.memory.online_simulation import OnlineSimulation, TranscriptExchange  # noqa: E402
+from evaluation.memory.update_selection import update_selection_metrics  # noqa: E402
+from memory_agent.core.models import MemoryEntry  # noqa: E402
+from memory_agent.core.sections import CHAT_SECTIONS  # noqa: E402
+from memory_agent.core.store import Memory  # noqa: E402
+from memory_agent.core.transcript import Turn  # noqa: E402
+from memory_agent.policies.structured import CHAT_POLICY  # noqa: E402
+from memory_agent.retrieval.selector import MemorySelector  # noqa: E402
+from memory_agent.update.selector import UpdateMemorySelector  # noqa: E402
+from memory_agent.update.updater import MemoryUpdater  # noqa: E402
 
 OUTPUT = ROOT / "evaluation" / "artifacts"
 LIVE_RESULTS = ROOT / "data" / "beam" / "results" / "100K" / "1"
@@ -95,7 +94,7 @@ def _online_injection_report() -> dict[str, Any]:
     report = OnlineSimulation(
         memory=memory,
         updater=MemoryUpdater(_NoCallLLM(), CHAT_SECTIONS, policy=CHAT_POLICY),
-        answer_context_config=AnswerContextConfig(MemorySelector(policy=CHAT_POLICY)),
+        answer_selector=MemorySelector(policy=CHAT_POLICY),
         answer_memory_budget=100, max_window_tokens=10_000,
     ).run(exchanges)
     metric = report["injection"]

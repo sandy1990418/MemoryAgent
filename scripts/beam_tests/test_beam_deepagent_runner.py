@@ -4,10 +4,10 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from memory_agent.clients.llm import LangChainTokenCallback, TokenLedger
-from memory_agent.models.sections import AGENT_SECTIONS
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.middleware import StructuredMemoryMiddleware
-from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.adapters.langchain.structured_memory import StructuredMemoryMiddleware
+from memory_agent.core.sections import AGENT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.update.updater import MemoryUpdater
 from scripts.run_beam_case_deepagent import (
     ask_agent,
     build_agent_system_prompt,

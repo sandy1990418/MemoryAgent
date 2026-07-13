@@ -1,8 +1,8 @@
-from memory_agent.evaluation.update_selection import update_selection_metrics
-from memory_agent.models.memory import MemoryEntry
-from memory_agent.models.transcript import Turn
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.update_selector import UpdateMemorySelector
+from evaluation.memory.update_selection import update_selection_metrics
+from memory_agent.core.models import MemoryEntry
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.update.selector import UpdateMemorySelector
 from scripts.build_evaluation_artifacts import _adversarial_report
 
 MATRIX = {
@@ -31,7 +31,7 @@ def test_frozen_dev_and_holdout_conflict_matrix_gates():
         assert report.missed_conflicts == 0
         assert report.adversarial_pass_rate == 1.0 and report.passed
         assert selection.visible_tokens > 0
-        assert UpdateMemorySelector.__module__ == "memory_agent.structured.update_selector"
+        assert UpdateMemorySelector.__module__ == "memory_agent.update.selector"
 
 
 def test_adversarial_counts_and_hash_are_derived_from_executed_named_cases():

@@ -1,6 +1,6 @@
-from memory_agent.models.sections import AGENT_SECTIONS, CHAT_SECTIONS
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.selector import MemorySelector
+from memory_agent.core.sections import AGENT_SECTIONS, CHAT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.retrieval.selector import MemorySelector
 
 
 def make_memory() -> Memory:

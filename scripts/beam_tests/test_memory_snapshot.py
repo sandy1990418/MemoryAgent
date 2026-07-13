@@ -10,9 +10,9 @@ from evaluation.beam.memory_snapshot import (
     restore_from_snapshot,
     write_memory_snapshot,
 )
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.sections import PRACTICAL_SECTIONS
-from memory_agent.structured.memory import Memory
+from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.policies.structured import get_memory_policy
 
 
 def _memory() -> Memory:

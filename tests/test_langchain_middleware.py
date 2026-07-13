@@ -5,11 +5,11 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from memory_agent.models.sections import CHAT_SECTIONS
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.middleware import StructuredMemoryMiddleware
-from memory_agent.structured.updater import MemoryUpdater
-from memory_agent.structured.verifier import MemoryUpdateVerification
+from memory_agent.adapters.langchain.structured_memory import StructuredMemoryMiddleware
+from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.update.updater import MemoryUpdater
+from memory_agent.update.verifier import MemoryUpdateVerification
 from tests.fakes import ScriptedLLM
 
 

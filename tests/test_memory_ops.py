@@ -1,5 +1,5 @@
-from memory_agent.models.sections import CHAT_SECTIONS, EXACT_VALUES
-from memory_agent.structured.memory import Memory
+from memory_agent.core.sections import CHAT_SECTIONS, EXACT_VALUES
+from memory_agent.core.store import Memory
 
 
 def make_memory() -> Memory:

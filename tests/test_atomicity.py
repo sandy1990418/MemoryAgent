@@ -1,6 +1,6 @@
-from memory_agent.models.sections import CHAT_SECTIONS
-from memory_agent.structured.session import MemorySession
-from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.application.session import MemorySession
+from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.update.updater import MemoryUpdater
 from tests.fakes import ScriptedLLM
 
 

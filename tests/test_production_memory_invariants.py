@@ -1,18 +1,14 @@
 """Production-style memory invariants with no BEAM adapter or LLM judge."""
 
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.sections import PRACTICAL_SECTIONS
-from memory_agent.models.transcript import Turn
-from memory_agent.structured.answer_context import (
-    AnswerContextBudget,
-    AnswerContextConfig,
-    build_answer_memory_context,
-)
-from memory_agent.structured.compactor import MemoryCompactor
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.selector import MemorySelector
-from memory_agent.structured.updater import MemoryUpdater
-from memory_agent.profiles.chat.subject_normalizer import ChatSubjectNormalizer
+from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.normalization.chat import ChatSubjectNormalizer
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.retrieval.context import build_answer_memory_context
+from memory_agent.retrieval.selector import MemorySelector
+from memory_agent.update.compactor import MemoryCompactor
+from memory_agent.update.updater import MemoryUpdater
 from tests.fakes import ScriptedLLM
 
 
@@ -61,11 +57,14 @@ def test_production_selection_is_invariant_to_benchmark_metadata():
 
     def production(metadata):
         del metadata
-        return build_answer_memory_context(
-            query="What is the API latency?",
+        entries = selector.select_for_answer(
             memory=memory,
-            config=AnswerContextConfig(selector),
-            budget=AnswerContextBudget(100),
+            query="What is the API latency?",
+            budget=100,
+        )
+        return build_answer_memory_context(
+            memory=memory,
+            entries=entries,
         ).selected_ids
 
     assert production({"question_type": "summarization", "case_id": "1"}) == production(
@@ -81,9 +80,14 @@ def test_irrelevant_query_does_not_force_unbounded_memory():
             "provenance": [index + 1],
         }])
     selector = MemorySelector(policy=policy, pinned_sections=frozenset())
+    entries = selector.select_for_answer(
+        memory=memory,
+        query="What music should I play?",
+        budget=20,
+    )
     context = build_answer_memory_context(
-        query="What music should I play?", memory=memory,
-        config=AnswerContextConfig(selector), budget=AnswerContextBudget(20),
+        memory=memory,
+        entries=entries,
     )
 
     assert selector.token_estimator(context.rendered_context) <= 20

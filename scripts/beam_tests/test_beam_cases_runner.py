@@ -50,6 +50,19 @@ def test_batch_cli_defaults_to_focused_memory_abilities(monkeypatch):
     args = parse_args()
 
     assert tuple(args.question_types) == DEFAULT_BEAM_QUESTION_TYPES
+    assert args.answer_memory_selection == "all"
+
+
+def test_batch_cli_can_enable_answer_selector(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_beam_cases.py", "--answer-memory-selection", "selector"],
+    )
+
+    args = parse_args()
+
+    assert args.answer_memory_selection == "selector"
 
 
 def test_batch_cli_can_select_all_question_types(monkeypatch):

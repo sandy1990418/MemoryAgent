@@ -1,12 +1,12 @@
 # Chat practical memory
 
-`memory_agent.chat` is the standalone practical-memory facade. It avoids agent,
+`memory_agent.application.chat` is the standalone practical-memory facade. It avoids agent,
 BEAM/evaluation, and mem0 imports so another engineer can copy or depend on the
 chat memory surface without understanding the evaluation runners.
 
 ```python
-from memory_agent.chat import build_chat_memory
-from memory_agent.models.transcript import Turn
+from memory_agent.application.chat import build_chat_memory
+from memory_agent.core.transcript import Turn
 
 chat_memory = build_chat_memory()  # Reads configs/product.yaml, then env overrides.
 chat_memory.update([Turn(id=1, role="user", content="Remember I prefer concise replies")])

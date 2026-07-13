@@ -2,16 +2,12 @@
 
 import pytest
 
-from memory_agent.models.memory import MemoryValue, SubjectIdentity
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.sections import PRACTICAL_SECTIONS
-from memory_agent.structured.answer_context import (
-    AnswerContextBudget,
-    AnswerContextConfig,
-    build_answer_memory_context,
-)
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.selector import MemorySelector
+from memory_agent.core.models import MemoryValue, SubjectIdentity
+from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.retrieval.context import build_answer_memory_context
+from memory_agent.retrieval.selector import MemorySelector
 
 
 def _populated_memory() -> Memory:
@@ -68,11 +64,14 @@ def test_state_round_trip_survives_json_and_preserves_selection():
     selector = MemorySelector(policy=policy, pinned_sections=frozenset())
 
     def selected_ids(target: Memory) -> tuple[str, ...]:
-        return build_answer_memory_context(
-            query="What database does the service use?",
+        entries = selector.select_for_answer(
             memory=target,
-            config=AnswerContextConfig(selector),
-            budget=AnswerContextBudget(200),
+            query="What database does the service use?",
+            budget=200,
+        )
+        return build_answer_memory_context(
+            memory=target,
+            entries=entries,
         ).selected_ids
 
     assert selected_ids(restored) == selected_ids(memory)

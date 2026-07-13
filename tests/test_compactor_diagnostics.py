@@ -1,9 +1,9 @@
-from memory_agent.models.policy import get_memory_policy
-from memory_agent.models.sections import CHAT_SECTIONS
-from memory_agent.structured.compactor import MemoryCompactor
-from memory_agent.structured.memory import Memory
-from memory_agent.structured.middleware import StructuredMemoryMiddleware
-from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.adapters.langchain.structured_memory import StructuredMemoryMiddleware
+from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.update.compactor import MemoryCompactor
+from memory_agent.update.updater import MemoryUpdater
 from tests.fakes import ScriptedLLM
 
 

@@ -10,7 +10,7 @@ tool observations, decisions, failures, artifacts, and reusable experience.
 BEAM results validate the current **chat profile only**; they do not establish
 complete agent-memory capability.
 
-1. `structured/`: this repo's operation-based structured memory system.
+1. `core/`, `update/`, and `retrieval/`: operation-based structured memory.
 2. `longterm/`: long-term recall integration for mem0-style vector memory.
 3. `agents/`: reusable LangChain agent assembly.
 4. `demos/`: runnable examples, baseline summary code, and demo tools.
@@ -24,23 +24,16 @@ For the detailed component graph and data flow, see
 memory_agent/
   __init__.py              public package exports
 
-  domain/                  framework-neutral events, entries, scopes, budgets
-  application/             generic ingest/retrieve/context service boundary
-  profiles/chat/           chat adapter and retention policy
-  profiles/agent/          agent trace adapter and policy extension point
-  evaluation/              framework-neutral evaluator interfaces
+  core/                    entries, schema, store, transcript, working window
+  policies/                structured and event-memory policy contracts
+  normalization/           injectable workload-aware normalization
+  update/                  extraction, prompts, validation, compaction
+  retrieval/               answer selection, rendering, quality signals
+  application/             chat/session and structured/event-memory services
+  adapters/events/         chat and agent-trace event adapters
+  adapters/langchain/      StructuredMemoryMiddleware framework adapter
 
-  structured/              operation-based memory domain/runtime
-    memory.py              Memory store and ADD/UPDATE/SUPERSEDE/NOOP ops
-    transcript.py          append-only transcript
-    window.py              framework-free sliding context window
-    selector.py            prompt memory selection
-    updater.py             LLM-driven memory operation generator
-    prompts.py             updater/compactor prompt construction
-    ops.py                 shared JSON operation parser and errors
-    heuristics.py          deterministic cue/value vocabulary
-    session.py             framework-free structured chat session
-    middleware.py          LangChain StructuredMemoryMiddleware
+  domain/                  generic event-memory data contracts
 
   longterm/                long-term recall integration
     middleware.py          LangChain LongTermMemoryMiddleware
@@ -54,14 +47,23 @@ memory_agent/
     llm.py                 LLMClient protocol, OpenAIClient adapter
     mem0.py                LongTermMemory protocol, Mem0 adapter
 
-  models/                  dataclasses, configs, constants
+  models/                  remaining integration/config/runtime DTOs
     config.py              .env-backed config models
-    sections.py            SectionConfig and default section lists
-    memory.py              MemoryEntry, SelectedMemory
-    transcript.py          Turn
     longterm.py            LongTermHit
     runtime.py             agent runtime containers
 ```
+
+Evaluation tooling stays outside the installable runtime package:
+
+```text
+evaluation/
+  memory/                  replay, metrics, manifests, report schemas
+  beam/                    BEAM-specific adapters, routing, snapshots, reports
+```
+
+Package code imports directly from `core`, `policies`, `update`, `retrieval`,
+`application`, or `adapters`; the previous `structured` and `profiles`
+packages have been removed.
 
 Demo-only code stays outside the importable product package:
 
@@ -191,6 +193,16 @@ durable conversational context while dropping ordinary Q&A; `practical` is a
 compatibility alias for the earlier chat behavior; `agent` is an extension
 profile for execution state; and `eval` (or runner-only `beam`) is a broad
 legacy evaluation profile.
+
+There are two deliberately named policy contracts during the agent-event
+transition:
+
+- `StructuredMemoryPolicy` configures the production operation-based runtime.
+- `EventMemoryPolicy` classifies generic `MemoryEvent` objects at the future
+  agent-event ingestion boundary.
+
+Only the explicit structured/event names are exposed; the ambiguous legacy
+policy and service aliases have been removed.
 
 Fixed-budget comparisons are implemented in
 `evaluation.beam.compare_fixed_budget_runs`. They require identical cases,

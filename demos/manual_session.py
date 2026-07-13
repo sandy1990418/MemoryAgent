@@ -7,9 +7,9 @@ import os
 from demos.config import SessionDemoConfig
 from memory_agent.clients.llm import OpenAIClient
 from memory_agent.models.config import load_project_env
-from memory_agent.models.sections import CHAT_SECTIONS
-from memory_agent.structured.session import MemorySession
-from memory_agent.structured.updater import MemoryUpdater
+from memory_agent.application.session import MemorySession
+from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.update.updater import MemoryUpdater
 
 PROMPTS = [
     "Hi, my name is Hannah.",
@@ -49,4 +49,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

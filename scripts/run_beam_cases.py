@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.beam_models import (
+    ANSWER_MEMORY_SELECTION_MODES,
     BeamDeepAgentRunConfig,
     BeamRunConfig,
     beam_config_from_argv,
@@ -98,6 +99,7 @@ def case_config(args: argparse.Namespace, case_dir: Path) -> BeamRunConfig:
         "structured_max_tokens": args.structured_max_tokens,
         "structured_max_memory_tokens": args.structured_max_memory_tokens,
         "structured_answer_tokens": args.structured_answer_tokens,
+        "answer_memory_selection": args.answer_memory_selection,
         "structured_evict_fraction": args.structured_evict_fraction,
         "structured_keep_messages": args.structured_keep_messages,
         "structured_flush_final": args.structured_flush_final,
@@ -356,6 +358,15 @@ def parse_args() -> argparse.Namespace:
         "--structured-answer-tokens",
         type=int,
         default=defaults["structured_answer_tokens"],
+    )
+    parser.add_argument(
+        "--answer-memory-selection",
+        choices=ANSWER_MEMORY_SELECTION_MODES,
+        default=defaults["answer_memory_selection"],
+        help=(
+            "Answer-time structured-memory mode: all injects every active entry; "
+            "selector uses the production MemorySelector."
+        ),
     )
     parser.add_argument(
         "--structured-evict-fraction",
