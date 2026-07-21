@@ -38,6 +38,41 @@ def test_chat_prompt_has_one_consistent_batch_limit():
     ]
 
 
+def test_chat_prompt_prioritizes_user_evidence_and_preserves_conflicts():
+    system, _messages = _updater()._build_prompt(
+        _memory(),
+        [
+            Turn(id=1, role="user", content="The service uses SQLite."),
+            Turn(id=2, role="assistant", content="You could use PostgreSQL instead."),
+            Turn(id=3, role="user", content="The service uses PostgreSQL."),
+        ],
+    )
+
+    assert "Evidence hierarchy" in system
+    assert "direct user assertions, corrections, explicit decisions, and reported outcomes" in system
+    assert "Assistant messages are context only" in system
+    assert "suggestions, examples, plans, generated implementation detail" in system
+    assert "use Status Changes (key status_changes) for a concise unresolved-uncertainty entry" in system
+    assert "preserves both claims" in system
+    assert "Keep it active; do not choose a winner, UPDATE, or SUPERSEDE either claim" in system
+    assert "An explicit user correction or replacement establishes the latest truth" in system
+    assert "Do not treat an assistant correction or suggestion as a user correction" in system
+    assert "Direct durable user state" in system
+    assert "never let assistant-derived progress crowd out direct user state" in system
+
+
+def test_chat_prompt_preserves_user_goal_lifecycle_across_topics():
+    system, _messages = _updater()._build_prompt(
+        _memory(),
+        [Turn(id=4, role="user", content="The unrelated topic is ready.")],
+    )
+
+    assert "Retain explicit user-stated goals as active across topic changes in Task Goal (key goal), never absorb them into Progress" in system
+    assert "UPDATE a goal when later user turns report progress toward that same goal" in system
+    assert "SUPERSEDE it only when the user explicitly completes, cancels, or replaces it" in system
+    assert "Assistant-proposed goals are not user goals unless the user explicitly accepts them" in system
+
+
 def test_updater_prompt_omits_code_payload_and_bounds_pathological_turns():
     content = "User completed login.\n```python\n" + ("print('noise')\n" * 3000) + "```\nFinal constraint."
     system, _messages = _updater()._build_prompt(
