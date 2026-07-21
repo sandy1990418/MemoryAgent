@@ -21,17 +21,6 @@ from memory_agent.models.config import (
 )
 
 
-def normalize_beam_profile(profile: str) -> str:
-    """Resolve every BEAM run to the production chat profile.
-
-    BEAM is an evaluation harness, not a second production-memory policy.
-    Dataset-specific profile switches are intentionally ignored so scores
-    measure the same public chat memory used by the product.
-    """
-    del profile
-    return "chat"
-
-
 DEFAULT_CHAT_PATH = Path("BEAM/chats/100K/1/chat.json")
 DEFAULT_PROBES_PATH = Path("BEAM/chats/100K/1/probing_questions/probing_questions.json")
 DEFAULT_TOPICS_PATH = Path("BEAM/chats/100K/1/topic.json")
@@ -42,7 +31,6 @@ DEFAULT_BEAM_MEMORY_MODEL = os.getenv(
     os.getenv("MEMORY_MODEL", DEFAULT_BEAM_MODEL),
 )
 DEFAULT_BEAM_JUDGE_MODEL = os.getenv("BEAM_JUDGE_MODEL", DEFAULT_BEAM_MODEL)
-DEFAULT_MEM0_LLM_MODEL = os.getenv("MEM0_LLM_MODEL", DEFAULT_BEAM_MODEL)
 DEFAULT_BEAM_QUESTION_TYPES = (
     "contradiction_resolution",
     "knowledge_update",
@@ -65,7 +53,6 @@ class BeamConfig:
     answer_model: str = "gpt-5.4-nano"
     memory_model: str = "gpt-5.4-nano"
     judge_model: str = "gpt-5.4-nano"
-    mem0_llm_model: str = "gpt-5.4-nano"
     top_k: int = 8
     max_hit_chars: int = 6000
     max_active_context_chars: int = 12000
@@ -146,9 +133,6 @@ class BeamConfig:
             judge_model=str(
                 config_value(data, "judge_model", "BEAM_JUDGE_MODEL", answer_model)
             ),
-            mem0_llm_model=str(
-                config_value(data, "mem0_llm_model", "MEM0_LLM_MODEL", answer_model)
-            ),
             top_k=_int_value("top_k", "BEAM_TOP_K", cls.top_k, 1),
             max_hit_chars=_int_value(
                 "max_hit_chars", "BEAM_MAX_HIT_CHARS", cls.max_hit_chars, 1
@@ -201,7 +185,6 @@ class BeamConfig:
             "judge_model": self.judge_model if self.judge else None,
             "answer_model": self.answer_model,
             "structured_model": self.memory_model,
-            "mem0_llm_model": self.mem0_llm_model,
             "top_k": self.top_k,
             "max_hit_chars": self.max_hit_chars,
             "max_active_context_chars": self.max_active_context_chars,
@@ -249,14 +232,10 @@ class BeamRunConfig:
     probes: Path = DEFAULT_PROBES_PATH
     topics: Path = DEFAULT_TOPICS_PATH
     results_dir: Path = DEFAULT_RESULTS_DIR
-    store_dir: Path | None = None
     output: Path | None = None
     answers_output: Path | None = None
     evaluation_output: Path | None = None
     env_file: Path = Path(".env")
-    user_id: str = "beam-100k-case-1"
-    memory_mode: str = "structured_only"
-    memory_profile: str = "chat"
     top_k: int = 8
     max_hit_chars: int = 6000
     max_active_context_chars: int = 12000
@@ -271,7 +250,6 @@ class BeamRunConfig:
     structured_evict_fraction: float = 0.5
     structured_keep_messages: int = 2
     structured_flush_final: bool = True
-    mem0_llm_model: str = DEFAULT_MEM0_LLM_MODEL
     judge_model: str | None = DEFAULT_BEAM_JUDGE_MODEL
     question_types: list[str] | tuple[str, ...] | None = DEFAULT_BEAM_QUESTION_TYPES
     max_questions_per_type: int | None = None
@@ -285,9 +263,7 @@ class BeamRunConfig:
 
 @dataclass(frozen=True)
 class BeamDeepAgentRunConfig(BeamRunConfig):
-    # The deepagent runner defaults to structured-memory-only answering;
-    # mem0-backed retrieval is opt-in via --memory-mode structured_mem0.
-    memory_mode: str = "structured_only"
+    """DeepAgent comparison configuration, isolated from the standard runner."""
     recursion_limit: int = 50
 
     @classmethod

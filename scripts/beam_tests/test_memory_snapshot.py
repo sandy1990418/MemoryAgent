@@ -10,13 +10,13 @@ from evaluation.beam.memory_snapshot import (
     restore_from_snapshot,
     write_memory_snapshot,
 )
-from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
-from memory_agent.policies.structured import get_memory_policy
+from memory_agent.policies.structured import CHAT_POLICY
 
 
 def _memory() -> Memory:
-    memory = Memory(PRACTICAL_SECTIONS, policy=get_memory_policy("practical"))
+    memory = Memory(CHAT_SECTIONS, policy=CHAT_POLICY)
     memory.apply_ops([
         {"op": "ADD", "section": "facts", "text": "API latency is 250ms.", "provenance": [1]},
         {"op": "ADD", "section": "preferences", "text": "User prefers short answers.", "provenance": [2]},
@@ -38,15 +38,15 @@ def test_snapshot_round_trip_restores_memory_and_working_tail(tmp_path):
         path,
         memory=memory,
         active_messages=_messages(),
-        memory_profile="practical",
+        memory_profile="chat",
         run_id="run-1",
         source_commit="abc123",
         chat="BEAM/chats/100K/1/chat.json",
     )
 
     payload = load_memory_snapshot(path)
-    restored = Memory(PRACTICAL_SECTIONS, policy=get_memory_policy("practical"))
-    messages = restore_from_snapshot(payload, memory=restored, expected_profile="practical")
+    restored = Memory(CHAT_SECTIONS, policy=CHAT_POLICY)
+    messages = restore_from_snapshot(payload, memory=restored, expected_profile="chat")
 
     assert restored.render() == memory.render()
     assert payload["run_id"] == "run-1" and payload["source_commit"] == "abc123"
@@ -66,11 +66,11 @@ def test_restore_rejects_memory_profile_mismatch(tmp_path):
         run_id="run-1",
         source_commit=None,
     )
-    restored = Memory(PRACTICAL_SECTIONS, policy=get_memory_policy("practical"))
+    restored = Memory(CHAT_SECTIONS, policy=CHAT_POLICY)
 
     with pytest.raises(ValueError, match="does not match"):
         restore_from_snapshot(
-            load_memory_snapshot(path), memory=restored, expected_profile="practical"
+            load_memory_snapshot(path), memory=restored, expected_profile="chat"
         )
 
 

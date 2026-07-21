@@ -76,7 +76,6 @@ def discover_case_dirs(
 def case_config(args: argparse.Namespace, case_dir: Path) -> BeamRunConfig:
     case_id = case_dir.name
     results_dir = args.results_root / case_id
-    store_dir = args.store_root / case_id if args.store_root else results_dir / "mem0_store"
     common: dict[str, Any] = {
         "beam_config": getattr(args, "beam_config", None),
         "product_config": getattr(args, "product_config", None),
@@ -84,11 +83,7 @@ def case_config(args: argparse.Namespace, case_dir: Path) -> BeamRunConfig:
         "probes": case_dir / "probing_questions" / "probing_questions.json",
         "topics": case_dir / "topic.json",
         "results_dir": results_dir,
-        "store_dir": store_dir,
         "env_file": args.env_file,
-        "user_id": f"beam-100k-case-{case_id}",
-        "memory_mode": args.memory_mode or "structured_only",
-        "memory_profile": args.memory_profile,
         "top_k": args.top_k,
         "max_hit_chars": args.max_hit_chars,
         "max_active_context_chars": args.max_active_context_chars,
@@ -103,7 +98,6 @@ def case_config(args: argparse.Namespace, case_dir: Path) -> BeamRunConfig:
         "structured_evict_fraction": args.structured_evict_fraction,
         "structured_keep_messages": args.structured_keep_messages,
         "structured_flush_final": args.structured_flush_final,
-        "mem0_llm_model": args.mem0_llm_model,
         "judge_model": args.judge_model,
         "question_types": args.question_types,
         "max_questions_per_type": args.max_questions_per_type,
@@ -166,8 +160,6 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("No BEAM cases selected.")
 
     args.results_root.mkdir(parents=True, exist_ok=True)
-    if args.store_root:
-        args.store_root.mkdir(parents=True, exist_ok=True)
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
     manifest: dict[str, Any] = {
@@ -269,14 +261,13 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     config_path, beam_config = beam_config_from_argv()
-    product_path, product_config = product_config_from_argv()
+    product_path, _ = product_config_from_argv()
     defaults = beam_config.to_run_defaults()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--beam-config", type=Path, default=config_path)
     parser.add_argument("--product-config", type=Path, default=product_path)
     parser.add_argument("--case-root", type=Path, default=beam_config.data_path.parent)
     parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT)
-    parser.add_argument("--store-root", type=Path)
     parser.add_argument("--case-ids", nargs="+")
     parser.add_argument("--start-case", type=int)
     parser.add_argument("--end-case", type=int)
@@ -297,18 +288,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--runner", choices=("standard", "deepagent"), default="standard")
-    parser.add_argument(
-        "--memory-mode",
-        choices=("structured_only", "structured_mem0", "raw_mem0"),
-        help=(
-            "Defaults to structured_only, which uses only summary memory and no mem0."
-        ),
-    )
-    parser.add_argument(
-        "--memory-profile",
-        choices=("chat", "practical", "agent", "eval", "beam"),
-        default=product_config.memory_profile,
-    )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--top-k", type=int, default=defaults["top_k"])
     parser.add_argument("--max-hit-chars", type=int, default=defaults["max_hit_chars"])
@@ -380,7 +359,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-structured-flush-final", dest="structured_flush_final", action="store_false")
     parser.set_defaults(structured_flush_final=True)
-    parser.add_argument("--mem0-llm-model", default=defaults["mem0_llm_model"])
     parser.add_argument("--recursion-limit", type=int, default=defaults["recursion_limit"])
     parser.add_argument(
         "--judge-model",

@@ -255,7 +255,7 @@ def test_beam_cli_routes_into_run_config(monkeypatch):
     assert config.routing_mode == "oracle"
 
 
-def test_answer_question_prompt_requires_supported_concise_answers():
+def test_answer_question_prompt_uses_chat_memory_context():
     llm = FakeAnswerLLM("ok")
 
     response = answer_question(
@@ -272,14 +272,7 @@ def test_answer_question_prompt_requires_supported_concise_answers():
     assert "MUST answer questions using ONLY the information provided" in user_prompt
     assert "Do NOT invent user history or project facts" in user_prompt
     assert "MUST be satisfied inside the answer itself" in user_prompt
-    assert "Never ask whether to apply a stored preference" in user_prompt
-    assert "do not output unversioned dependencies" in user_prompt
-    assert "explicitly state how the answer follows" in user_prompt
-    assert "ANSWER REQUIREMENTS" in user_prompt
-    assert "use the latest active memory entry" in user_prompt
-    assert "identify the relevant dated events" in user_prompt
-    assert "Abstain only when no relevant memory entry" in user_prompt
-    assert "Only output the answer to the question" in user_prompt
+    assert "include the required details" in user_prompt
     assert "Can you tell me about my previous projects?" in user_prompt
     assert "Topic metadata" not in user_prompt
     assert "Question type" not in user_prompt
@@ -422,10 +415,9 @@ def test_beam_cli_loads_env_file_before_resolving_defaults(tmp_path, monkeypatch
     assert args.judge_model is None
 
 
-def test_beam_middleware_uses_one_profile_section_set_and_compactor():
+def test_beam_runner_uses_public_chat_memory_api():
     ledger = TokenLedger()
     args = SimpleNamespace(
-        memory_profile="practical",
         structured_model="fake-model",
         structured_max_tokens=100,
         structured_evict_fraction=0.5,
@@ -436,23 +428,20 @@ def test_beam_middleware_uses_one_profile_section_set_and_compactor():
     middleware = build_structured_beam_middleware(args, ledger)
 
     memory_sections = {section.key for section in middleware.memory.sections}
-    updater_sections = {section.key for section in middleware.updater.sections}
-    compactor_sections = {section.key for section in middleware.compactor.sections}
-    assert middleware.memory.policy is middleware.policy
-    assert middleware.updater.policy is middleware.policy
-    assert middleware.compactor.policy is middleware.policy
-    assert memory_sections == updater_sections == compactor_sections
+    assert middleware.memory.policy.name == "chat"
+    assert memory_sections == {section.key for section in CHAT_SECTIONS}
+    assert middleware.service is not None
+    assert middleware.compactor is not None
 
 
 def test_beam_middleware_uses_product_compaction_threshold(tmp_path):
     product_path = tmp_path / "product.yaml"
     product_path.write_text(
-        "memory_profile: practical\nsections: practical\ncompaction_threshold: 7\n",
+        "memory_profile: chat\nsections: chat\ncompaction_threshold: 7\n",
         encoding="utf-8",
     )
     args = SimpleNamespace(
         product_config=product_path,
-        memory_profile="practical",
         structured_model="fake-model",
         structured_max_tokens=100,
         structured_evict_fraction=0.5,
@@ -462,7 +451,8 @@ def test_beam_middleware_uses_product_compaction_threshold(tmp_path):
 
     middleware = build_structured_beam_middleware(args)
 
-    assert middleware.compact_min_active_entries == 7
+    assert middleware.service is not None
+    assert middleware.service.compact_min_active_entries == 7
 
 
 def test_beam_config_snapshot_is_json_serializable():
@@ -470,7 +460,7 @@ def test_beam_config_snapshot_is_json_serializable():
 
     assert isinstance(snapshot["chat"], str)
     assert isinstance(snapshot["question_types"], list)
-    assert snapshot["memory_profile"] == "chat"
+    assert "memory_profile" not in snapshot
 
 
 def test_score_ownership_separates_primary_from_oracle_diagnostic():

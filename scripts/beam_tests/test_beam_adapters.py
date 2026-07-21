@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from evaluation.beam import BeamChatCaseAdapter, compare_fixed_budget_runs
-from memory_agent.domain import EventSourceType
 from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.retrieval.context import (
@@ -13,10 +12,13 @@ from memory_agent.retrieval.selector import MemorySelector
 from scripts.run_beam_case import build_answer_context, build_answer_context_result
 
 
-def test_beam_chat_adapter_outputs_generic_events_and_keeps_metadata_at_boundary():
-    events = BeamChatCaseAdapter().adapt_messages([{"id": 7, "role": "user", "content": "hello"}], case_id="2")
-    assert events[0].source_type == EventSourceType.CHAT_MESSAGE
-    assert events[0].metadata["case_id"] == "2"
+def test_beam_chat_adapter_outputs_public_chat_turns():
+    turns = BeamChatCaseAdapter().adapt_messages(
+        [{"id": 7, "role": "user", "content": "hello"}], case_id="2"
+    )
+    assert turns[0].role == "user"
+    assert turns[0].content == "hello"
+    assert turns[0].id == 1
 
 
 def test_fixed_budget_comparison_separates_production_and_judge_costs():

@@ -99,18 +99,6 @@ def test_batch_cli_reads_yaml_defaults(tmp_path, monkeypatch):
     assert args.judge_model is None
 
 
-def test_batch_cli_accepts_memory_profile(monkeypatch):
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["run_beam_cases.py", "--memory-profile", "eval"],
-    )
-
-    args = parse_args()
-
-    assert args.memory_profile == "eval"
-
-
 def test_batch_cli_accepts_frozen_split_repeats_and_baseline(monkeypatch):
     monkeypatch.setattr(
         sys,
