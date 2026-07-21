@@ -178,15 +178,75 @@ def build_structured_beam_middleware(
     return build_chat_memory(config=product, compact=True, config_path=config_path)
 
 
-def update_chat_memory(chat_memory: ChatMemory, batch: list[AnyMessage], batch_index: int) -> None:
-    """Translate evaluation-edge messages into framework-free chat turns."""
-    turns = [
-        Turn(id=batch_index * 1000 + index, role="user" if isinstance(message, HumanMessage) else "assistant", content=str(message.content))
-        for index, message in enumerate(batch)
-        if isinstance(message, (HumanMessage, AIMessage)) and str(message.content).strip()
-    ]
-    if turns:
-        chat_memory.update(turns)
+def update_chat_memory(
+    chat_memory: ChatMemory,
+    batch: list[AnyMessage],
+    batch_index: int,
+    *,
+    turn_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    """Ingest one evaluation batch through the public chat API.
+
+    The returned report distinguishes submitted turns from committed turns so
+    callers do not mistake a partial transaction for successful ingestion.
+    ``turn_ids`` is supplied when a deferred suffix is retried; keeping those
+    ids stable preserves ChatMemory's idempotence contract.
+    """
+    if turn_ids is not None and len(turn_ids) != len(batch):
+        raise ValueError("turn_ids must align one-to-one with batch messages")
+    turns: list[Turn] = []
+    source_turn_ids: list[int] = []
+    for index, message in enumerate(batch):
+        if not isinstance(message, (HumanMessage, AIMessage)) or not str(message.content).strip():
+            continue
+        turn_id = turn_ids[index] if turn_ids is not None else batch_index * 1000 + index
+        turns.append(
+            Turn(
+                id=turn_id,
+                role="user" if isinstance(message, HumanMessage) else "assistant",
+                content=str(message.content),
+            )
+        )
+        source_turn_ids.append(turn_id)
+
+    if not turns:
+        return {
+            "batch_index": batch_index,
+            "submitted_turn_ids": [],
+            "committed_turn_ids": [],
+            "deferred_turn_ids": [],
+            "dropped_turn_ids": [],
+            "status": "empty",
+            "applied_op_count": 0,
+            "rejected_op_count": 0,
+        }
+
+    applied, rejected = chat_memory.update(turns)
+    diagnostics_fn = getattr(chat_memory, "update_diagnostics", None)
+    diagnostics = diagnostics_fn() if callable(diagnostics_fn) else {}
+    # Keep this fallback for older integration doubles. Production runners use
+    # ChatMemory.update_diagnostics(), never service/private state.
+    if not diagnostics:
+        service = getattr(chat_memory, "service", None)
+        service_diagnostics_fn = getattr(service, "update_diagnostics", None)
+        if callable(service_diagnostics_fn):
+            diagnostics = service_diagnostics_fn()
+    committed_ids = [int(value) for value in diagnostics.get("committed_turn_ids", [])]
+    deferred_ids = [int(value) for value in diagnostics.get("deferred_turn_ids", [])]
+    dropped_ids = [int(value) for value in diagnostics.get("dropped_turn_ids", [])]
+    submitted_ids = [int(value) for value in diagnostics.get("submitted_turn_ids", source_turn_ids)]
+    return {
+        "batch_index": batch_index,
+        "submitted_turn_ids": submitted_ids,
+        "committed_turn_ids": committed_ids,
+        "deferred_turn_ids": deferred_ids,
+        "dropped_turn_ids": dropped_ids,
+        "status": diagnostics.get(
+            "status", "committed" if not rejected and len(committed_ids) == len(submitted_ids) else "deferred"
+        ),
+        "applied_op_count": len(applied),
+        "rejected_op_count": len(rejected),
+    }
 
 
 def chat_batch_chars(batch: list[AnyMessage]) -> int:
@@ -927,6 +987,8 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
 
     structured_middleware: ChatMemory | None = None
     active_messages: list[AnyMessage] = []
+    pending_turn_ids: list[int] = []
+    ingestion_reports: list[dict[str, Any]] = []
     token_ledger: TokenLedger | None = None
     structured_started = time.perf_counter()
 
@@ -963,28 +1025,98 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         for index, batch in enumerate(message_batches, start=1):
             active_messages.extend(batch)
             pending_messages.extend(batch)
+            pending_turn_ids.extend(
+                index * 1000 + message_index
+                for message_index in range(len(batch))
+            )
             pending_chars += chat_batch_chars(batch)
             active_messages = active_messages[-args.structured_keep_messages:] if args.structured_keep_messages else []
             should_update = pending_chars >= update_threshold_chars or index == len(message_batches)
             if should_update:
-                update_chat_memory(structured_middleware, pending_messages, index)
-                pending_messages = []
-                pending_chars = 0
+                report = update_chat_memory(
+                    structured_middleware,
+                    pending_messages,
+                    index,
+                    turn_ids=pending_turn_ids,
+                )
+                ingestion_reports.append(report)
+                committed_ids = set(report["committed_turn_ids"])
+                # Remove only the committed prefix/turns. Any deferred suffix
+                # remains in the queue and is retried with the same ids on the
+                # next threshold or final flush.
+                retained = [
+                    (message, turn_id)
+                    for message, turn_id in zip(pending_messages, pending_turn_ids)
+                    if turn_id not in committed_ids
+                ]
+                pending_messages = [message for message, _ in retained]
+                pending_turn_ids = [turn_id for _, turn_id in retained]
+                pending_chars = sum(chat_batch_chars([message]) for message in pending_messages)
                 print(
                     f"  structured processed {index}/{len(message_batches)}; "
                     f"active_messages={len(active_messages)}; "
-                    f"entries={len(structured_middleware.memory.entries)}",
+                    f"entries={len(structured_middleware.memory.entries)}; "
+                    f"committed_turns={len(report['committed_turn_ids'])}; "
+                    f"deferred_turns={len(report['deferred_turn_ids'])}",
                     flush=True,
                 )
 
-        if args.structured_flush_final and active_messages:
+        if args.structured_flush_final and pending_messages:
+            # Give one bounded retry to a deferred suffix without claiming it
+            # was ingested when the retry still cannot be committed.
+            report = update_chat_memory(
+                structured_middleware,
+                pending_messages,
+                len(message_batches),
+                turn_ids=pending_turn_ids,
+            )
+            ingestion_reports.append(report)
+            committed_ids = set(report["committed_turn_ids"])
+            retained = [
+                (message, turn_id)
+                for message, turn_id in zip(pending_messages, pending_turn_ids)
+                if turn_id not in committed_ids
+            ]
+            pending_messages = [message for message, _ in retained]
+            pending_turn_ids = [turn_id for _, turn_id in retained]
             print(
                 "  structured final flush; "
                 f"active_messages={len(active_messages)}; "
-                f"entries={len(structured_middleware.memory.entries)}",
+                f"entries={len(structured_middleware.memory.entries)}; "
+                f"committed_turns={len(report['committed_turn_ids'])}; "
+                f"deferred_turns={len(report['deferred_turn_ids'])}",
                 flush=True,
             )
     structured_elapsed_seconds = round(time.perf_counter() - structured_started, 6)
+    ingested_turn_ids: list[int] = []
+    submitted_turn_ids: list[int] = []
+    dropped_turn_ids: list[int] = []
+    for report in ingestion_reports:
+        for key, target in (
+            ("committed_turn_ids", ingested_turn_ids),
+            ("submitted_turn_ids", submitted_turn_ids),
+            ("dropped_turn_ids", dropped_turn_ids),
+        ):
+            for turn_id in report.get(key, []):
+                if turn_id not in target:
+                    target.append(turn_id)
+    committed_chunk_ids = sorted({turn_id // 1000 for turn_id in ingested_turn_ids})
+    submitted_chunk_ids = sorted({turn_id // 1000 for turn_id in submitted_turn_ids})
+    structured_ingestion = {
+        "batches_attempted": len(ingestion_reports),
+        "chunks_submitted": len(submitted_chunk_ids),
+        "chunks_committed": len(committed_chunk_ids),
+        "turns_submitted": len(submitted_turn_ids),
+        "turns_committed": len(ingested_turn_ids),
+        "committed_chunk_ids": committed_chunk_ids,
+        "committed_turn_ids": ingested_turn_ids,
+        "deferred_turn_ids": list(pending_turn_ids),
+        "dropped_turn_ids": dropped_turn_ids,
+        "pending_turn_count": len(pending_turn_ids),
+        "all_submitted_turns_committed": bool(submitted_turn_ids)
+        and not pending_turn_ids
+        and not dropped_turn_ids,
+    }
 
     memory_snapshot_path: Path | None = None
     if structured_middleware is not None and replay_snapshot is None:
@@ -1066,6 +1198,7 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             len(active_messages) if structured_middleware is not None else None
         ),
         "structured_active_messages": len(active_messages) if structured_middleware is not None else None,
+        "structured_ingestion": structured_ingestion,
         "results": {},
         "summary": {},
         "token_usage": {},
@@ -1223,7 +1356,14 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
 
     output["summary"]["overall"] = {
         "chunks_available": len(chunks),
-        "chunks_ingested": 0,
+        # This field historically reported zero despite successful public
+        # ChatMemory updates. Count committed source chunks only; deferred
+        # suffixes do not qualify as ingested until a later retry commits them.
+        "chunks_ingested": structured_ingestion["chunks_committed"],
+        "structured_turns_submitted": structured_ingestion["turns_submitted"],
+        "structured_turns_committed": structured_ingestion["turns_committed"],
+        "structured_turns_deferred": structured_ingestion["pending_turn_count"],
+        "structured_ingestion": structured_ingestion,
         "structured_entries": (
             len(structured_middleware.memory.entries) if structured_middleware is not None else 0
         ),

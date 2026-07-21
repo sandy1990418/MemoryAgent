@@ -10,6 +10,8 @@ from memory_agent.retrieval.context import (
 )
 from memory_agent.retrieval.selector import MemorySelector
 from scripts.run_beam_case import build_answer_context, build_answer_context_result
+from scripts.run_beam_case import update_chat_memory
+from langchain_core.messages import AIMessage, HumanMessage
 
 
 def test_beam_chat_adapter_outputs_public_chat_turns():
@@ -137,3 +139,56 @@ def test_root_unit_tests_do_not_import_beam_evaluation():
         if "evaluation.beam" in text or "scripts.run_beam" in text:
             offenders.append(path)
     assert offenders == []
+
+
+def test_update_chat_memory_reports_only_committed_turns_and_preserves_ids():
+    class FakeChatMemory:
+        def __init__(self):
+            self.calls = []
+            self.diagnostics = {
+                "submitted_turn_ids": [],
+                "committed_turn_ids": [],
+                "deferred_turn_ids": [],
+                "dropped_turn_ids": [],
+                "status": "idle",
+            }
+
+        def update(self, turns):
+            self.calls.append([turn.id for turn in turns])
+            self.diagnostics = {
+                "submitted_turn_ids": [turn.id for turn in turns],
+                "committed_turn_ids": [turns[0].id],
+                "deferred_turn_ids": [turn.id for turn in turns[1:]],
+                "dropped_turn_ids": [],
+                "status": "partial",
+            }
+            return ([{"op": "ADD"}], [])
+
+        def update_diagnostics(self):
+            return self.diagnostics.copy()
+
+    chat = FakeChatMemory()
+    batch = [HumanMessage(content="old"), AIMessage(content="new")]
+
+    report = update_chat_memory(chat, batch, batch_index=3, turn_ids=[301, 302])
+
+    assert chat.calls == [[301, 302]]
+    assert report["submitted_turn_ids"] == [301, 302]
+    assert report["committed_turn_ids"] == [301]
+    assert report["deferred_turn_ids"] == [302]
+    assert report["dropped_turn_ids"] == []
+
+
+def test_update_chat_memory_ignores_empty_and_unsupported_messages():
+    class FakeChatMemory:
+        def update(self, turns):
+            raise AssertionError("empty batches must not invoke ChatMemory")
+
+    report = update_chat_memory(
+        FakeChatMemory(),
+        [HumanMessage(content=" ")],
+        batch_index=1,
+    )
+
+    assert report["status"] == "empty"
+    assert report["submitted_turn_ids"] == []

@@ -107,3 +107,61 @@ def test_selector_scores_are_structural_active_and_recency_indicators():
     assert [item.entry.id for item in scored] == ["F3", "F2"]
     assert scored[0].reasons == ("active", "recency")
     assert scored[0].score == 1.003
+
+
+def test_selector_balances_populated_sections_within_budget():
+    memory = Memory(sections=CHAT_SECTIONS)
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "Newest fact.",
+                "provenance": [9],
+            },
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "Older fact.",
+                "provenance": [8],
+            },
+            {
+                "op": "ADD",
+                "section": "preferences",
+                "text": "User prefers concise answers.",
+                "provenance": [1],
+            },
+        ]
+    )
+
+    selector = MemorySelector(token_estimator=_entry_tokens)
+    selected = selector.select(memory, max_tokens=2)
+
+    assert [entry.id for entry in selected] == ["U1", "F1"]
+    assert {entry.section for entry in selected} == {"preferences", "facts"}
+
+
+def test_selector_round_robin_keeps_newest_entry_per_section_first():
+    memory = Memory(sections=CHAT_SECTIONS)
+    memory.apply_ops(
+        [
+            {"op": "ADD", "section": "facts", "text": "fact one", "provenance": [1]},
+            {"op": "ADD", "section": "facts", "text": "fact two", "provenance": [5]},
+            {
+                "op": "ADD",
+                "section": "decisions",
+                "text": "decision one",
+                "provenance": [2],
+            },
+            {
+                "op": "ADD",
+                "section": "decisions",
+                "text": "decision two",
+                "provenance": [4],
+            },
+        ]
+    )
+
+    selected = MemorySelector(token_estimator=_entry_tokens).select(memory, max_tokens=4)
+
+    assert [entry.id for entry in selected] == ["D2", "F2", "D1", "F1"]
