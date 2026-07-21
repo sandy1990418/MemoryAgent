@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from statistics import mean, median
 from typing import Callable
 
@@ -82,12 +82,23 @@ class TurnGroup:
 
 
 @dataclass
+class PreparedBatch:
+    """One staged updater batch and the turns it is responsible for."""
+
+    turns: tuple[Turn, ...]
+    applied_ops: list[dict] = field(default_factory=list)
+    rejected_ops: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class PreparedUpdate:
     trial_memory: Memory
     applied_ops: list[dict]
     rejected_ops: list[dict]
     base_revision: int
     _committed: bool = False
+    batches: list[PreparedBatch] = field(default_factory=list)
+    diagnostics: dict[str, object] = field(default_factory=dict)
 
     def commit(self, live_memory: Memory) -> None:
         if self.rejected_ops:
@@ -132,6 +143,14 @@ class MemoryUpdater:
         self.decision_reasons: Counter[str] = Counter()
         self.evicted_user_assistant_pairs = 0
         self.turn_selection_reports: list[dict] = []
+        self._last_update_diagnostics: dict[str, object] = {
+            "planned_turn_ids": [],
+            "planned_batch_turn_ids": [],
+            "committed_turn_ids": [],
+            "deferred_turn_ids": [],
+            "dropped_turn_ids": [],
+            "status": "idle",
+        }
         # Fail fast on section mismatches instead of silently running
         # with retention behavior the caller did not intend.
         validate_policy_sections(self.policy, sections)
@@ -179,6 +198,9 @@ class MemoryUpdater:
             "dropped_turn_count": sum(
                 len(report["dropped_turn_ids"]) for report in self.turn_selection_reports
             ),
+            "deferred_turn_count": sum(
+                len(report.get("deferred_turn_ids", [])) for report in self.turn_selection_reports
+            ),
             "non_contiguous_selection_count": sum(
                 not report["selection_is_contiguous"] for report in self.turn_selection_reports
             ),
@@ -192,9 +214,17 @@ class MemoryUpdater:
                  "input_tokens": report.input_tokens}
                 for report in self.token_reports
             ],
+            "last_update_diagnostics": self.update_diagnostics(),
         }
 
     def _turns_within_budget(self, turns: list[Turn]) -> list[Turn]:
+        """Return the historical newest bounded view for diagnostics callers.
+
+        Production updates no longer call this compatibility helper; they use
+        :meth:`_plan_turn_batches` and stage every turn. Retaining this direct
+        helper avoids breaking offline callers that used it only to inspect a
+        single bounded prompt view.
+        """
         groups = self._turn_groups(turns)
         prompt_turns_by_group = {
             id(group): self._prompt_turns_for_group(group) for group in groups
@@ -205,8 +235,6 @@ class MemoryUpdater:
         if budget is None:
             selected = groups
         else:
-            # The newest group is mandatory: in particular this preserves a
-            # latest unresolved user or its complete request/response exchange.
             for group in reversed(groups):
                 tokens = sum(
                     self.token_estimator(turn.content)
@@ -216,8 +244,6 @@ class MemoryUpdater:
                     selected.append(group)
                     used += tokens
                 else:
-                    # Once a group is dropped, older groups are not backfilled:
-                    # updater context remains a contiguous suffix.
                     break
             selected.reverse()
         selected_ids = {
@@ -241,12 +267,108 @@ class MemoryUpdater:
             "oversized_mandatory_group": overflow > 0,
             "selection_is_contiguous": not dropped or not selected or max(t.id for t in dropped) < min(selected_ids),
             "groups": [
-                {"type": group.group_type, "turn_ids": [turn.id for turn in group.turns],
-                 "mandatory": group.mandatory}
+                {
+                    "type": group.group_type,
+                    "turn_ids": [turn.id for turn in group.turns],
+                    "mandatory": group.mandatory,
+                }
                 for group in groups
             ],
         })
         return [turn for turn in turns if turn.id in selected_ids]
+
+    def _plan_turn_batches(self, turns: list[Turn]) -> list[list[Turn]]:
+        """Plan oldest-first, contiguous, complete conversational batches.
+
+        A budget limits each LLM prompt, not the set of turns eligible for a
+        committed update. An oversized exchange remains intact as one batch;
+        the prompt builder provides the existing content-level bounding.
+        """
+        groups = self._turn_groups(turns)
+        budget = self.evicted_turn_token_budget
+        batches: list[list[Turn]] = []
+        current: list[Turn] = []
+        used = 0
+        for group in groups:
+            group_turns = list(self._prompt_turns_for_group(group))
+            group_tokens = sum(self.token_estimator(turn.content) for turn in group_turns)
+            if current and budget is not None and used + group_tokens > budget:
+                batches.append(current)
+                current = []
+                used = 0
+            current.extend(group_turns)
+            used += group_tokens
+        if current:
+            batches.append(current)
+
+        planned_ids = [turn.id for turn in turns]
+        planned_batch_ids = [[turn.id for turn in batch] for batch in batches]
+        oversized_overflow = 0
+        if budget is not None:
+            oversized_overflow = sum(
+                max(
+                    0,
+                    sum(self.token_estimator(turn.content) for turn in group.turns) - budget,
+                )
+                for group in groups
+            )
+        self.turn_selection_reports.append({
+            "selected_turn_ids": planned_ids,
+            "planned_turn_ids": planned_ids,
+            "planned_batch_turn_ids": planned_batch_ids,
+            "dropped_turn_ids": [],
+            "deferred_turn_ids": [],
+            "selected_group_count": len(groups),
+            "dropped_group_count": 0,
+            "selected_turn_tokens": sum(self.token_estimator(turn.content) for turn in turns),
+            "dropped_turn_tokens": 0,
+            "mandatory_overflow_tokens": oversized_overflow,
+            "oversized_mandatory_group": oversized_overflow > 0,
+            "selection_is_contiguous": True,
+            "groups": [
+                {
+                    "type": group.group_type,
+                    "turn_ids": [turn.id for turn in group.turns],
+                    "mandatory": group.mandatory,
+                }
+                for group in groups
+            ],
+        })
+        return batches
+
+    def update_diagnostics(self) -> dict[str, object]:
+        """Return diagnostics for the most recent atomic update attempt."""
+        return {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in self._last_update_diagnostics.items()
+        }
+
+    def _set_update_diagnostics(
+        self,
+        *,
+        turns: list[Turn],
+        batches: list[PreparedBatch] | list[list[Turn]],
+        status: str,
+        committed: bool = False,
+    ) -> dict[str, object]:
+        batch_turn_ids = [
+            [turn.id for turn in batch.turns] if isinstance(batch, PreparedBatch)
+            else [turn.id for turn in batch]
+            for batch in batches
+        ]
+        planned_ids = [turn.id for turn in turns]
+        committed_ids = planned_ids if committed else []
+        deferred_ids = [] if committed else planned_ids
+        diagnostics: dict[str, object] = {
+            "planned_turn_ids": planned_ids,
+            "planned_batch_turn_ids": batch_turn_ids,
+            "committed_turn_ids": committed_ids,
+            "deferred_turn_ids": deferred_ids,
+            "dropped_turn_ids": [],
+            "status": status,
+        }
+        self._last_update_diagnostics = diagnostics
+        return diagnostics
 
     @staticmethod
     def _prompt_turns_for_group(group: TurnGroup) -> tuple[Turn, ...]:
@@ -340,12 +462,70 @@ class MemoryUpdater:
         result = self.prepare_update(memory, evicted_turns)
         if not result.rejected_ops:
             result.commit(memory)
+            self._mark_update_committed(result)
         return result.applied_ops, result.rejected_ops
 
     def prepare_update(self, memory: Memory, evicted_turns: list[Turn]) -> PreparedUpdate:
+        turns = list(evicted_turns)
+        if not turns:
+            self.decision_reasons["skip:empty_batch"] += 1
+        batches = self._plan_turn_batches(turns)
         trial, base_revision = memory.transaction_snapshot()
-        applied, rejected = self._update_trial(trial, evicted_turns)
-        return PreparedUpdate(trial, applied, rejected, base_revision)
+        staged_batches: list[PreparedBatch] = []
+        all_applied: list[dict] = []
+        try:
+            for batch in batches:
+                applied, rejected = self._update_trial(trial, batch)
+                prepared_batch = PreparedBatch(tuple(batch), applied, rejected)
+                staged_batches.append(prepared_batch)
+                if rejected:
+                    diagnostics = self._set_update_diagnostics(
+                        turns=turns,
+                        batches=batches,
+                        status="rejected",
+                    )
+                    return PreparedUpdate(
+                        trial,
+                        [],
+                        rejected,
+                        base_revision,
+                        batches=staged_batches,
+                        diagnostics=diagnostics,
+                    )
+                all_applied.extend(applied)
+        except Exception:
+            self._set_update_diagnostics(
+                turns=turns,
+                batches=batches,
+                status="failed",
+            )
+            raise
+
+        diagnostics = self._set_update_diagnostics(
+            turns=turns,
+            batches=staged_batches,
+            status="prepared",
+        )
+        return PreparedUpdate(
+            trial,
+            all_applied,
+            [],
+            base_revision,
+            batches=staged_batches,
+            diagnostics=diagnostics,
+        )
+
+    def _mark_update_committed(self, prepared: PreparedUpdate) -> None:
+        """Finalize diagnostics after the outer live-memory commit."""
+        turns = [turn for batch in prepared.batches for turn in batch.turns]
+        diagnostics = self._set_update_diagnostics(
+            turns=turns,
+            batches=prepared.batches,
+            status="committed",
+            committed=True,
+        )
+        prepared.diagnostics.clear()
+        prepared.diagnostics.update(diagnostics)
 
     def _update_trial(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[list[dict], list[dict]]:
         """Run one bounded LLM extraction and atomically validate its ops.
@@ -363,7 +543,11 @@ class MemoryUpdater:
 
         decision_reason = "call:llm_chat_update"
         self.decision_reasons[decision_reason] += 1
-        prompt_turns = self._turns_within_budget(evicted_turns)
+        # ``prepare_update`` has already partitioned all turns into complete,
+        # oldest-first batches. Never apply a second suffix selection here:
+        # doing so would silently omit turns that the adapter is about to
+        # remove from its history.
+        prompt_turns = list(evicted_turns)
         selection = UpdateMemorySelector(
             memory,
             self.token_estimator,

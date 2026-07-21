@@ -67,10 +67,10 @@ def test_update_token_report_separates_prompt_components():
     assert usage["average_tokens_per_call"] == usage["total_tokens"]
 
 
-def test_evicted_turn_budget_keeps_only_complete_newest_turns():
-    captured = {}
+def test_evicted_turn_budget_processes_all_complete_batches_oldest_first():
+    captured = []
     updater = MemoryUpdater(
-        llm=ScriptedLLM(lambda system, _messages: captured.setdefault("system", system) and '[{"op":"NOOP"}]'),
+        llm=ScriptedLLM(lambda system, _messages: captured.append(system) or '[{"op":"NOOP"}]'),
         sections=CHAT_SECTIONS,
         max_retries=0,
         evicted_turn_token_budget=2,
@@ -81,9 +81,13 @@ def test_evicted_turn_budget_keeps_only_complete_newest_turns():
         Turn(id=4, role="user", content="newer turn"),
         Turn(id=5, role="user", content="newest turn"),
     ])
-    assert "older turn" not in captured["system"]
-    assert "newer turn" in captured["system"]
-    assert "newest turn" in captured["system"]
+    # A bounded prompt is now a micro-batch, not a reason to silently drop
+    # older turns. The updater stages two oldest-first batches and commits
+    # the outer transaction only after both succeed.
+    assert len(captured) == 2
+    assert "older turn" in captured[0]
+    assert "newer turn" in captured[0]
+    assert "newest turn" in captured[1]
 
 
 def test_product_config_loads_separate_memory_budgets(tmp_path, monkeypatch):
