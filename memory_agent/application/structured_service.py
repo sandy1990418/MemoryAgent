@@ -121,7 +121,7 @@ class StructuredMemoryService:
         total = len(self.memory.entries)
         diagnostic: dict[str, object] = {
             "compactor_enabled": self.compactor is not None,
-            "memory_profile": self.policy.name,
+            "policy": self.policy.name,
             "active_entries_at_check": active,
             "total_entries_at_check": total,
             "threshold": self.compact_min_active_entries,
@@ -130,7 +130,7 @@ class StructuredMemoryService:
             "attempted_calls": 0,
         }
         if self.compactor is None:
-            diagnostic["skip_reason"] = "disabled_profile"
+            diagnostic["skip_reason"] = "disabled"
             self._compaction_checks.append(diagnostic)
             return
         candidates = self.compactor.detect_candidates(self.memory)
@@ -202,7 +202,7 @@ class StructuredMemoryService:
         )
         return {
             "compactor_enabled": self.compactor is not None,
-            "memory_profile": self.policy.name,
+            "policy": self.policy.name,
             "threshold": self.compact_min_active_entries,
             "checks": list(self._compaction_checks),
             "skip_reasons": dict(reasons),

@@ -8,7 +8,7 @@ from .models import (
     SubjectIdentity,
     SubjectNormalizer,
 )
-from .sections import SectionConfig, sections_for_preset
+from .sections import CHAT_SECTIONS, SectionConfig
 from .store import Memory
 from .transcript import Turn
 from .transcript_store import Transcript
@@ -19,6 +19,7 @@ __all__ = [
     "MemoryEntry",
     "MemoryPolicyRef",
     "MemoryValue",
+    "CHAT_SECTIONS",
     "SectionConfig",
     "SelectedMemory",
     "SubjectIdentity",
@@ -26,5 +27,4 @@ __all__ = [
     "Transcript",
     "Turn",
     "WorkingWindow",
-    "sections_for_preset",
 ]

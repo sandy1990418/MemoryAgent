@@ -40,17 +40,6 @@ FACTS = SectionConfig(
     ),
 )
 
-EXACT_VALUES = SectionConfig(
-    key="exact_values",
-    prefix="V",
-    title="Exact Values",
-    description=(
-        "Optional legacy exact-value inventory for numbers, dates, versions, "
-        "identifiers, file paths, and URLs. Not included in default memory "
-        "sections; prefer embedding important values in concise subject entries."
-    ),
-)
-
 OPEN_QUESTIONS = SectionConfig(
     key="open_questions",
     prefix="Q",
@@ -80,18 +69,6 @@ STATUS_CHANGES = SectionConfig(
     ),
 )
 
-TIMELINE = SectionConfig(
-    key="timeline",
-    prefix="M",
-    title="Timeline",
-    description=(
-        "Explicitly stated dated milestones or phase plans (e.g., 'Phase 2: "
-        "Nov 16 - Dec 15'). Do not use this section to record which topic the "
-        "user raised first - that ordering is derived automatically from each "
-        "entry's turn provenance and needs no separate entry here."
-    ),
-)
-
 PROGRESS = SectionConfig(
     key="progress",
     prefix="P",
@@ -102,13 +79,6 @@ PROGRESS = SectionConfig(
     ),
 )
 
-TOOL_FACTS = SectionConfig(
-    key="tool_facts",
-    prefix="T",
-    title="Tool Facts",
-    description="Key facts learned from tool calls",
-)
-
 FAILED_ATTEMPTS = SectionConfig(
     key="failed_attempts",
     prefix="X",
@@ -117,17 +87,7 @@ FAILED_ATTEMPTS = SectionConfig(
 )
 
 
-PRACTICAL_SECTIONS: list[SectionConfig] = [
-    DECISIONS,
-    PREFERENCES,
-    STATUS_CHANGES,
-    GOAL,
-    FACTS,
-    OPEN_QUESTIONS,
-    FAILED_ATTEMPTS,
-]
-
-# Product chat extends the practical current-state schema with one bounded
+# Product chat uses one bounded
 # chronological rollup. Related progress entries are compacted into a new
 # canonical summary rather than retained as an ever-growing event log.
 CHAT_SECTIONS: list[SectionConfig] = [
@@ -140,36 +100,3 @@ CHAT_SECTIONS: list[SectionConfig] = [
     OPEN_QUESTIONS,
     FAILED_ATTEMPTS,
 ]
-
-AGENT_SECTIONS: list[SectionConfig] = [
-    DECISIONS,
-    PREFERENCES,
-    STATUS_CHANGES,
-    TIMELINE,
-    GOAL,
-    PROGRESS,
-    FACTS,
-    TOOL_FACTS,
-    OPEN_QUESTIONS,
-    FAILED_ATTEMPTS,
-]
-
-EVAL_SECTIONS: list[SectionConfig] = [
-    *AGENT_SECTIONS,
-    EXACT_VALUES,
-]
-
-
-def sections_for_preset(name: str) -> list[SectionConfig]:
-    """Return a fresh section list for a policy section preset."""
-    presets = {
-        "chat": CHAT_SECTIONS,
-        "practical": PRACTICAL_SECTIONS,
-        "agent": AGENT_SECTIONS,
-        "eval": EVAL_SECTIONS,
-    }
-    try:
-        return list(presets[name])
-    except KeyError as exc:
-        choices = ", ".join(sorted(presets))
-        raise ValueError(f"section preset must be one of: {choices}") from exc

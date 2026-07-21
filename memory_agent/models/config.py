@@ -11,11 +11,6 @@ from dotenv import load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# Product configuration is intentionally chat-only.  Evaluation runners own
-# any comparison labels in ``scripts/beam_models.py`` and choose the chat
-# policy explicitly; they do not widen production retention semantics.
-MEMORY_PROFILES = frozenset({"chat"})
-MEMORY_SECTION_PRESETS = frozenset({"chat"})
 DEFAULT_PRODUCT_CONFIG_PATH = Path(
     os.getenv("PRODUCT_MEMORY_CONFIG", "configs/product.yaml")
 )
@@ -97,8 +92,6 @@ def config_value(data: dict[str, object], key: str, env: str, default):
 
 @dataclass(frozen=True)
 class ProductMemoryConfig:
-    memory_profile: str = "chat"
-    sections: str = "chat"
     compaction_threshold: int = 30
     memory_model: str = "openai:gpt-5.4-nano"
     answer_memory_token_budget: int = 600
@@ -108,23 +101,9 @@ class ProductMemoryConfig:
     updater_max_legacy_candidate_entries: int = 4
     updater_enable_llm_gate: bool = True
 
-    def __post_init__(self) -> None:
-        if self.memory_profile != "chat":
-            raise ValueError("ProductMemoryConfig.memory_profile must be 'chat'")
-        if self.sections != "chat":
-            raise ValueError("ProductMemoryConfig.sections must be 'chat'")
-
     @classmethod
     def from_yaml_env(cls, path: str | Path = "configs/product.yaml") -> "ProductMemoryConfig":
         data = load_simple_yaml(path) if Path(path).exists() else {}
-        profile = str(config_value(data, "memory_profile", "MEMORY_PROFILE", cls.memory_profile))
-        if profile not in MEMORY_PROFILES:
-            choices = ", ".join(sorted(MEMORY_PROFILES))
-            raise ValueError(f"memory_profile must be one of: {choices}")
-        sections = str(config_value(data, "sections", "MEMORY_SECTIONS", profile))
-        if sections not in MEMORY_SECTION_PRESETS:
-            choices = ", ".join(sorted(MEMORY_SECTION_PRESETS))
-            raise ValueError(f"sections must be one of: {choices}")
         compaction_threshold = int(
             config_value(
                 data,
@@ -150,8 +129,6 @@ class ProductMemoryConfig:
         )
 
         return cls(
-            memory_profile=profile,
-            sections=sections,
             compaction_threshold=compaction_threshold,
             memory_model=str(config_value(data, "memory_model", "MEMORY_MODEL", cls.memory_model)),
             answer_memory_token_budget=int(config_value(data, "answer_memory_token_budget", "ANSWER_MEMORY_TOKEN_BUDGET", cls.answer_memory_token_budget)),
