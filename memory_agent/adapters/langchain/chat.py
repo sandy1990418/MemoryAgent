@@ -194,6 +194,7 @@ class LangChainChatAdapter:
             "dropped_message_ids": [],
         }
         self._eviction_diagnostic_records: list[dict[str, list[Any]]] = []
+        self._last_update_diagnostics: dict[str, Any] | None = None
 
     @property
     def messages(self) -> list[AnyMessage]:
@@ -389,6 +390,47 @@ class LangChainChatAdapter:
         diagnostics["eviction_records"] = [copy_record(record) for record in self._eviction_diagnostic_records]
         return diagnostics
 
+    @staticmethod
+    def _copy_diagnostics(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        return {
+            key: (
+                [*item]
+                if isinstance(item, list)
+                else dict(item)
+                if isinstance(item, dict)
+                else item
+            )
+            for key, item in value.items()
+        }
+
+    def _capture_update_diagnostics(self, update_result: Any = None) -> None:
+        """Capture service diagnostics without coupling to one result shape."""
+        diagnostics = self._copy_diagnostics(
+            getattr(update_result, "diagnostics", None)
+        )
+        if diagnostics is None:
+            provider = getattr(self.service, "update_diagnostics", None)
+            if callable(provider):
+                try:
+                    diagnostics = self._copy_diagnostics(provider())
+                except Exception:  # pragma: no cover - diagnostics are best effort
+                    logger.debug("Could not read structured update diagnostics", exc_info=True)
+        if diagnostics is not None:
+            self._last_update_diagnostics = diagnostics
+
+    def update_diagnostics(self) -> dict[str, Any]:
+        """Return latest service update diagnostics with adapter fallback.
+
+        The service owns authoritative batch-level IDs.  Until a service
+        implementation provides them, the adapter's own lifecycle record is
+        returned so callers still observe the no-drop retry contract.
+        """
+        if self._last_update_diagnostics is not None:
+            return self._copy_diagnostics(self._last_update_diagnostics) or {}
+        return self.eviction_diagnostics()
+
     def _pending_prefix(self) -> tuple[int, list[AnyMessage], list[Turn]] | None:
         if not self._pending_message_ids:
             return None
@@ -441,8 +483,10 @@ class LangChainChatAdapter:
         try:
             self.service.update_verifier = self.update_verifier
             update_result = self.service.update(evicted_turns)
+            self._capture_update_diagnostics(update_result)
         except Exception as exc:  # failure-safe: retain pending history
             logger.warning("LangChain chat memory update failed; retrying: %s", exc)
+            self._capture_update_diagnostics()
             self._pending_message_ids = tuple(_message_ids(evicted))
             self._pending_turns = tuple(evicted_turns)
             self._record_eviction_diagnostics(
