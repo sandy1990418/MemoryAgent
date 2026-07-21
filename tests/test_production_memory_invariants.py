@@ -37,6 +37,112 @@ def test_unaccepted_assistant_proposal_is_not_written():
     assert applied == [] and rejected == []
 
 
+def test_conflicting_user_assertions_remain_unresolved_active_claims():
+    updater = _updater(
+        lambda *_: (
+            '[{"op":"ADD","section":"status_changes",'
+            '"text":"Unresolved: user claims the service uses SQLite and PostgreSQL.",'
+            '"provenance":[1,2]}]'
+        )
+    )
+    memory = _memory()
+
+    applied, rejected = updater.update(
+        memory,
+        [
+            Turn(1, "user", "The service uses SQLite."),
+            Turn(2, "user", "The service uses PostgreSQL."),
+        ],
+    )
+
+    assert rejected == []
+    assert [op["op"] for op in applied] == ["ADD"]
+    active = [entry for entry in memory.entries.values() if entry.status == "active"]
+    assert len(active) == 1
+    assert active[0].section == "status_changes"
+    assert "SQLite" in active[0].text and "PostgreSQL" in active[0].text
+    assert "Unresolved" in active[0].text
+
+
+def test_user_goal_is_updated_by_later_progress_after_topic_change():
+    memory = _memory()
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "goal",
+                "text": "Ship the release by Friday.",
+                "provenance": [1],
+            }
+        ]
+    )
+    updater = _updater(
+        lambda *_: (
+            '[{"op":"UPDATE","id":"G1",'
+            '"text":"Ship the release by Friday; authentication is complete.",'
+            '"provenance":[3]}]'
+        )
+    )
+
+    applied, rejected = updater.update(
+        memory,
+        [Turn(3, "user", "The unrelated API topic is ready; authentication is complete.")],
+    )
+
+    assert rejected == []
+    assert [op["op"] for op in applied] == ["UPDATE"]
+    assert memory.entries["G1"].status == "active"
+    assert "authentication is complete" in memory.entries["G1"].text
+    assert memory.entries["G1"].provenance == [1, 3]
+
+
+def test_assistant_proposed_goal_is_not_written_as_user_goal():
+    updater = _updater(lambda *_: '[{"op":"NOOP"}]')
+
+    applied, rejected = updater.update(
+        _memory(),
+        [
+            Turn(7, "user", "What should we work on next?"),
+            Turn(8, "assistant", "Your goal should be to rewrite the entire service."),
+        ],
+    )
+
+    assert applied == [] and rejected == []
+
+
+def test_explicit_user_goal_replacement_supersedes_old_goal_and_adds_latest():
+    memory = _memory()
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "goal",
+                "text": "Ship the release by Friday.",
+                "provenance": [1],
+            }
+        ]
+    )
+    updater = _updater(
+        lambda *_: (
+            '[{"op":"SUPERSEDE","id":"G1",'
+            '"reason":"User explicitly replaced the goal."},'
+            '{"op":"ADD","section":"goal",'
+            '"text":"Stabilize the release before shipping.","provenance":[5]}]'
+        )
+    )
+
+    applied, rejected = updater.update(
+        memory,
+        [Turn(5, "user", "I am replacing that goal: stabilize the release before shipping.")],
+    )
+
+    assert rejected == []
+    assert [op["op"] for op in applied] == ["SUPERSEDE", "ADD"]
+    assert memory.entries["G1"].status == "superseded"
+    assert memory.entries["G2"].status == "active"
+    assert memory.entries["G2"].text == "Stabilize the release before shipping."
+
+
 def test_substantive_exchange_can_be_saved_as_one_progress_rollup():
     memory = _memory()
     updater = _updater(
