@@ -1,12 +1,8 @@
-"""Run one BEAM chat case answered by a deepagents agent with agentic retrieval.
+"""Run one BEAM chat case answered by an optional DeepAgent baseline.
 
-This is the `create_deep_agent` variant of `scripts/run_beam_case.py`. The
-ingestion and StructuredMemoryMiddleware stages are identical, but the
-answering stage differs: instead of one `OpenAIClient.complete` call with
-pre-retrieved mem0 top-k context injected into the prompt, each probing
-question is handed to a deepagents agent that must perform its own retrieval
-by calling a `search_long_term_memory` tool (possibly several times with
-different queries) before answering.
+This is the `create_deep_agent` comparison variant of
+`scripts/run_beam_case.py`. It uses the same public chat-memory snapshot and
+exposes a selector-backed search tool to the optional DeepAgent dependency.
 
 Requires Python >= 3.11 (a `deepagents` constraint). The project's main
 `.venv` is Python 3.10, so run this script with the dedicated interpreter:
@@ -36,26 +32,23 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage
 
-from memory_agent.clients.mem0 import Mem0LongTermMemory
 from memory_agent.clients.llm import OpenAIClient, TokenLedger
 from memory_agent.clients.llm import LangChainTokenCallback
+from memory_agent.application.chat import ChatMemory
 from scripts.beam_models import (
     BeamDeepAgentRunConfig,
     beam_config_from_argv,
 )
 from memory_agent.models.config import product_config_from_argv
-from memory_agent.adapters.langchain.structured_memory import (
-    StructuredMemoryMiddleware,
-    _content_to_text,
-)
+from memory_agent.adapters.langchain.structured_memory import _content_to_text
 from scripts.run_beam_case import (
-    BEAM_TOKEN_ROLES,
     DEFAULT_RESULTS_DIR,
-    apply_message_update,
     beam_answers_from_results,
     beam_evaluation_from_results,
     build_structured_beam_middleware,
-    build_context,
+    update_chat_memory,
+    chat_batch_chars,
+    memory_selector_for,
     default_answers_output_path,
     default_evaluation_output_path,
     beam_config_snapshot,
@@ -102,13 +95,12 @@ def collect_tool_trace(
 
 
 def make_search_tool(
-    memory: Mem0LongTermMemory,
-    user_id: str,
+    memory: Any,
     default_limit: int,
     max_hit_chars: int,
 ):
     def search_long_term_memory(query: str, limit: int = 8) -> str:
-        """Search the long-term memory store of the BEAM conversation.
+        """Search the public chat-memory store of the BEAM conversation.
 
         Returns the most relevant stored transcript excerpts for `query`,
         formatted as text blocks tagged with their source chat ids. Call this
@@ -116,22 +108,24 @@ def make_search_tool(
         queries if the first results do not cover the question.
         """
         use_limit = limit if limit > 0 else default_limit
-        hits = memory.search(query, user_id=user_id, limit=use_limit)
-        return build_context(hits, max_hit_chars=max_hit_chars)
+        selector = memory_selector_for(memory)
+        entries = selector.select(memory=memory.memory, query=query, max_tokens=max(1, use_limit * 100))
+        rendered = memory.memory.render(entries=entries) or "No matching chat memory."
+        return rendered[:max_hit_chars] if max_hit_chars > 0 else rendered
 
     return search_long_term_memory
 
 
 def build_agent_system_prompt(
-    structured_middleware: StructuredMemoryMiddleware | None,
+    structured_middleware: ChatMemory | Any | None,
     active_messages: list[AnyMessage],
     structured_answer_tokens: int,
     max_active_context_chars: int,
     retrieval_enabled: bool = True,
 ) -> str:
     if structured_middleware is None:
-        conversation_memory = "(StructuredMemoryMiddleware was not used.)"
-        working_tail = "(No structured working-context tail.)"
+        conversation_memory = "(ChatMemory was not used.)"
+        working_tail = "(No chat working-context tail.)"
     else:
         conversation_memory = structured_middleware.memory.render(
             max_tokens=structured_answer_tokens,
@@ -191,18 +185,18 @@ def ask_agent(
     question_type: str,
     question: str,
     recursion_limit: int,
-    structured_middleware: StructuredMemoryMiddleware | None = None,
+    structured_middleware: ChatMemory | Any | None = None,
     structured_answer_tokens: int = 4000,
     retrieval_enabled: bool = True,
     token_ledger: TokenLedger | None = None,
 ) -> tuple[str, list[dict[str, Any]], int]:
     topic_text = json.dumps(topic, ensure_ascii=False)
     if structured_middleware is None:
-        relevant_memory = "(StructuredMemoryMiddleware was not used.)"
-        chronological = "(StructuredMemoryMiddleware was not used.)"
-        denials = "(StructuredMemoryMiddleware was not used.)"
+        relevant_memory = "(ChatMemory was not used.)"
+        chronological = "(ChatMemory was not used.)"
+        denials = "(ChatMemory was not used.)"
     else:
-        selected_entries = structured_middleware.memory_selector.select(
+        selected_entries = memory_selector_for(structured_middleware).select(
             memory=structured_middleware.memory,
             query=question,
             max_tokens=structured_answer_tokens,
@@ -279,10 +273,8 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set; add it to .env or the environment.")
 
-    use_mem0 = args.memory_mode in ("structured_mem0", "raw_mem0")
-    use_structured = args.memory_mode in ("structured_mem0", "structured_only")
-
-    memory_mode = f"{args.memory_mode}_deepagent"
+    use_structured = True
+    memory_mode = "chat_deepagent"
     run_id = time.strftime("%Y%m%d-%H%M%S")
     results_dir = args.results_dir
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -303,53 +295,33 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
     chunks = flatten_chunks(chat)
     message_batches = flatten_message_batches(chat)
 
-    memory = None
-    store_dir = None
-    if use_mem0:
-        store_dir = args.store_dir or results_dir / f"mem0_store_{run_id}"
-        os.environ.setdefault("MEM0_DIR", str(store_dir))
-        os.environ.setdefault("MEM0_TELEMETRY", "False")
-
-        memory = Mem0LongTermMemory.from_local(
-            data_dir=str(store_dir),
-            collection_name="beam_100k_case_1",
-            llm_model=args.mem0_llm_model,
-            infer=False,
-        )
-
-        if args.skip_ingest:
-            print(f"Skipping ingestion and reusing {store_dir}", flush=True)
-        else:
-            print(f"Ingesting {len(chunks)} raw BEAM chunks into {store_dir}", flush=True)
-            for index, chunk in enumerate(chunks, start=1):
-                memory.add(
-                    [{"role": "user", "content": chunk.text}],
-                    user_id=args.user_id,
-                    metadata=chunk.metadata,
-                )
-                if index % 25 == 0 or index == len(chunks):
-                    print(f"  ingested {index}/{len(chunks)}", flush=True)
-    else:
-        print("mem0 disabled (structured_only): skipping store and ingestion", flush=True)
-
-    structured_middleware: StructuredMemoryMiddleware | None = None
+    structured_middleware: ChatMemory | None = None
     active_messages: list[AnyMessage] = []
-    token_ledger = TokenLedger()
-    token_ledger.ensure_roles(*BEAM_TOKEN_ROLES)
+    token_ledger: TokenLedger | None = None
 
     if use_structured:
-        structured_middleware = build_structured_beam_middleware(args, token_ledger)
+        structured_middleware = build_structured_beam_middleware(args)
+        token_ledger = structured_middleware.token_ledger or TokenLedger()
+        token_ledger.ensure_roles("agent", "judge")
 
         print(
-            "Processing BEAM transcript with StructuredMemoryMiddleware "
+            "Processing BEAM transcript with public ChatMemory "
             f"({len(message_batches)} user/assistant pair batches)",
             flush=True,
         )
+        pending_messages: list[AnyMessage] = []
+        pending_chars = 0
+        update_threshold_chars = max(4000, args.structured_max_tokens * 4)
         for index, batch in enumerate(message_batches, start=1):
             active_messages.extend(batch)
-            update = structured_middleware.before_model({"messages": active_messages}, None)
-            active_messages = apply_message_update(active_messages, update)
-            if index % 25 == 0 or index == len(message_batches):
+            pending_messages.extend(batch)
+            pending_chars += chat_batch_chars(batch)
+            active_messages = active_messages[-args.structured_keep_messages:] if args.structured_keep_messages else []
+            should_update = pending_chars >= update_threshold_chars or index == len(message_batches)
+            if should_update:
+                update_chat_memory(structured_middleware, pending_messages, index)
+                pending_messages = []
+                pending_chars = 0
                 print(
                     f"  structured processed {index}/{len(message_batches)}; "
                     f"active_messages={len(active_messages)}; "
@@ -358,11 +330,6 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
                 )
 
         if args.structured_flush_final and active_messages:
-            old_max_tokens = structured_middleware.max_tokens
-            structured_middleware.max_tokens = 1
-            update = structured_middleware.before_model({"messages": active_messages}, None)
-            active_messages = apply_message_update(active_messages, update)
-            structured_middleware.max_tokens = old_max_tokens
             print(
                 "  structured final flush; "
                 f"active_messages={len(active_messages)}; "
@@ -370,16 +337,12 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
                 flush=True,
             )
 
-    search_tool = (
-        make_search_tool(
-            memory=memory,
-            user_id=args.user_id,
-            default_limit=args.top_k,
-            max_hit_chars=args.max_hit_chars,
-        )
-        if use_mem0
-        else None
+    search_tool = make_search_tool(
+        memory=structured_middleware,
+        default_limit=args.top_k,
+        max_hit_chars=args.max_hit_chars,
     )
+    assert token_ledger is not None
     agent = build_answer_agent(
         model=args.answer_model,
         search_tool=search_tool,
@@ -388,7 +351,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
             active_messages=active_messages,
             structured_answer_tokens=args.structured_answer_tokens,
             max_active_context_chars=args.max_active_context_chars,
-            retrieval_enabled=use_mem0,
+            retrieval_enabled=True,
         ),
     )
     judge_llm = (
@@ -403,11 +366,10 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
         "source_state": current_source_state(),
         "config": beam_config_snapshot(args),
         "memory_mode": memory_mode,
-        "memory_profile": args.memory_profile,
+        "memory_profile": "chat",
         "chat": str(args.chat),
         "probes": str(args.probes),
         "topics": str(args.topics),
-        "store_dir": str(store_dir) if store_dir is not None else None,
         "output": str(output_path),
         "answers_output": str(answers_output_path),
         "evaluation_output": str(evaluation_output_path) if args.judge_model else None,
@@ -423,7 +385,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
             else None
         ),
         "structured_transcript_length": (
-            len(structured_middleware.transcript) if structured_middleware is not None else None
+            len(active_messages) if structured_middleware is not None else None
         ),
         "structured_active_messages": len(active_messages) if structured_middleware is not None else None,
         "results": {},
@@ -458,7 +420,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
                 recursion_limit=args.recursion_limit,
                 structured_middleware=structured_middleware,
                 structured_answer_tokens=args.structured_answer_tokens,
-                retrieval_enabled=use_mem0,
+                retrieval_enabled=True,
                 token_ledger=token_ledger,
             )
             total_tool_calls += len(tool_trace)
@@ -551,12 +513,12 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
 
     output["summary"]["overall"] = {
         "chunks_available": len(chunks),
-        "chunks_ingested": len(chunks) if use_mem0 and not args.skip_ingest else 0,
+        "chunks_ingested": 0,
         "structured_entries": (
             len(structured_middleware.memory.entries) if structured_middleware is not None else 0
         ),
         "structured_transcript_length": (
-            len(structured_middleware.transcript) if structured_middleware is not None else 0
+            len(active_messages) if structured_middleware is not None else 0
         ),
         "structured_active_messages": len(active_messages) if structured_middleware is not None else 0,
         "questions_answered": sum(len(items) for items in probes.values()),
@@ -612,7 +574,7 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     config_path, beam_config = beam_config_from_argv()
-    product_path, product_config = product_config_from_argv()
+    product_path, _ = product_config_from_argv()
     defaults = beam_config.to_run_defaults()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--beam-config", type=Path, default=config_path)
@@ -621,7 +583,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--probes", type=Path, default=defaults["probes"])
     parser.add_argument("--topics", type=Path, default=defaults["topics"])
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
-    parser.add_argument("--store-dir", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--answers-output",
@@ -634,27 +595,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional BEAM-style judge evaluation JSON path; used when judge is enabled.",
     )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
-    parser.add_argument("--user-id", default="beam-100k-case-1")
-    parser.add_argument(
-        "--memory-mode",
-        choices=("structured_only", "structured_mem0", "raw_mem0"),
-        default="structured_only",
-        help=(
-            "structured_only (default) answers from StructuredMemoryMiddleware "
-            "alone, with no mem0 store, ingestion, or search tool; "
-            "structured_mem0 adds mem0-backed agentic retrieval; raw_mem0 "
-            "relies on the agent's tool searches only."
-        ),
-    )
-    parser.add_argument(
-        "--memory-profile",
-        choices=("chat", "practical", "agent", "eval", "beam"),
-        default=product_config.memory_profile,
-        help=(
-            "Structured memory profile for BEAM ingestion. Defaults to MEMORY_PROFILE "
-            "or practical; eval/beam reproduces the legacy broad-section behavior."
-        ),
-    )
     parser.add_argument("--top-k", type=int, default=defaults["top_k"])
     parser.add_argument("--max-hit-chars", type=int, default=defaults["max_hit_chars"])
     parser.add_argument(
@@ -713,7 +653,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-structured-flush-final", dest="structured_flush_final", action="store_false")
     parser.set_defaults(structured_flush_final=True)
-    parser.add_argument("--mem0-llm-model", default=defaults["mem0_llm_model"])
     parser.add_argument("--recursion-limit", type=int, default=defaults["recursion_limit"])
     parser.add_argument(
         "--judge-model",

@@ -1,6 +1,6 @@
 import pytest
 
-from scripts.beam_models import BeamConfig, normalize_beam_profile
+from scripts.beam_models import BeamConfig
 
 
 def test_beam_yaml_env_overrides(tmp_path, monkeypatch):
@@ -33,7 +33,6 @@ def test_beam_yaml_controls_models_and_runner_knobs(tmp_path, monkeypatch):
     assert config.answer_model == "answer-x"
     assert config.memory_model == "answer-x"  # falls back to answer_model
     assert config.judge_model == "judge-x"
-    assert config.mem0_llm_model == "answer-x"
     assert config.top_k == 5  # env beats yaml
     assert config.structured_max_tokens == 9000
     assert config.structured_evict_fraction == 0.25
@@ -66,13 +65,6 @@ def test_beam_config_rejects_invalid_evict_fraction(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="structured_evict_fraction"):
         BeamConfig.from_yaml_env(path)
-
-
-def test_normalize_beam_profile_maps_cli_alias_onto_eval():
-    assert normalize_beam_profile("beam") == "eval"
-    assert normalize_beam_profile("practical") == "practical"
-    assert normalize_beam_profile("agent") == "agent"
-    assert normalize_beam_profile("eval") == "eval"
 
 
 def test_fixed_token_budgets_support_yaml_and_env(tmp_path, monkeypatch):
