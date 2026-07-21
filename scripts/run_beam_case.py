@@ -224,13 +224,6 @@ def update_chat_memory(
     applied, rejected = chat_memory.update(turns)
     diagnostics_fn = getattr(chat_memory, "update_diagnostics", None)
     diagnostics = diagnostics_fn() if callable(diagnostics_fn) else {}
-    # Keep this fallback for older integration doubles. Production runners use
-    # ChatMemory.update_diagnostics(), never service/private state.
-    if not diagnostics:
-        service = getattr(chat_memory, "service", None)
-        service_diagnostics_fn = getattr(service, "update_diagnostics", None)
-        if callable(service_diagnostics_fn):
-            diagnostics = service_diagnostics_fn()
     committed_ids = [int(value) for value in diagnostics.get("committed_turn_ids", [])]
     deferred_ids = [int(value) for value in diagnostics.get("deferred_turn_ids", [])]
     dropped_ids = [int(value) for value in diagnostics.get("dropped_turn_ids", [])]
