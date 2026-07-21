@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import json
 import subprocess
 import sys
@@ -101,12 +102,28 @@ def test_failed_update_retains_exact_pending_messages_for_retry():
     first_ids = [message.id for message in first]
     assert [message.id for message in adapter.messages] == first_ids
     assert adapter.memory.entries == {}
+    diagnostics = adapter.eviction_diagnostics()
+    assert diagnostics["planned_turn_ids"] == [1]
+    assert diagnostics["planned_batch_turn_ids"] == [[1]]
+    assert diagnostics["committed_turn_ids"] == []
+    assert diagnostics["deferred_turn_ids"] == [1]
+    assert diagnostics["dropped_turn_ids"] == []
+    assert diagnostics["status"] == "deferred"
+    assert diagnostics["eviction_records"][-1]["deferred_turn_ids"] == [1]
 
     failing["enabled"] = False
     second = adapter.before_model(messages)
     assert len(second) == 2
     assert adapter.memory.entries
     assert [message.id for message in second] == [message.id for message in messages[-2:]]
+    diagnostics = adapter.eviction_diagnostics()
+    assert diagnostics["planned_turn_ids"] == [1]
+    assert diagnostics["planned_batch_turn_ids"] == [[1]]
+    assert diagnostics["committed_turn_ids"] == [1]
+    assert diagnostics["deferred_turn_ids"] == []
+    assert diagnostics["dropped_turn_ids"] == []
+    assert diagnostics["status"] == "committed"
+    assert diagnostics["eviction_records"][-1]["committed_turn_ids"] == [1]
 
 
 def test_tool_messages_are_not_durable_but_pair_cutoff_is_safe():
@@ -129,6 +146,28 @@ def test_tool_messages_are_not_durable_but_pair_cutoff_is_safe():
     retained = adapter.before_model(messages)
     assert retained[0].type != "tool"
     assert not any(turn.role == "tool" for turn in adapter.transcript.all())
+    diagnostics = adapter.eviction_diagnostics()
+    assert diagnostics["dropped_turn_ids"] == []
+    assert diagnostics["deferred_turn_ids"] == []
+
+
+def test_ainvoke_uses_async_model_and_retains_reply():
+    class FakeAsyncChatModel:
+        def __init__(self):
+            self.calls = []
+
+        async def ainvoke(self, messages, **kwargs):
+            self.calls.append(messages)
+            return AIMessage(content="async reply")
+
+    model = FakeAsyncChatModel()
+    adapter = _adapter(response=lambda *_: "[]", chat_model=model, max_tokens=100)
+
+    response = asyncio.run(adapter.ainvoke("hello"))
+
+    assert response.content == "async reply"
+    assert len(model.calls) == 1
+    assert adapter.messages[-1].content == "async reply"
 
 
 def test_invoke_injects_memory_at_answer_time_and_keeps_reply():
