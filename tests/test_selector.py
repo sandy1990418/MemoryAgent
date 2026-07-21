@@ -1,223 +1,109 @@
-from memory_agent.core.sections import AGENT_SECTIONS, CHAT_SECTIONS
+"""Structural chat answer-memory selection contracts."""
+
+from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.retrieval.selector import MemorySelector
 
 
-def make_memory() -> Memory:
+def _memory() -> Memory:
     memory = Memory(sections=CHAT_SECTIONS)
     applied, rejected = memory.apply_ops(
         [
             {
                 "op": "ADD",
-                "section": "preferences",
-                "text": "prefers detailed paragraph answers",
+                "section": "facts",
+                "text": "First durable fact.",
                 "provenance": [1],
             },
             {
                 "op": "ADD",
-                "section": "decisions",
-                "text": "use file storage for the cache layer",
+                "section": "facts",
+                "text": "Second durable fact.",
                 "provenance": [2],
             },
             {
                 "op": "ADD",
                 "section": "facts",
-                "text": "favorite color is green",
+                "text": "Newest durable fact.",
                 "provenance": [3],
-            },
-            {
-                "op": "ADD",
-                "section": "open_questions",
-                "text": "choose a production database",
-                "provenance": [4],
             },
         ]
     )
     assert rejected == []
-    assert len(applied) == 4
+    assert len(applied) == 3
     return memory
 
 
-def count_entries(text: str) -> int:
+def _entry_tokens(text: str) -> int:
     return text.count("- [")
 
 
-def test_selector_prefers_relevant_and_high_priority_entries_within_budget():
-    memory = make_memory()
-    selector = MemorySelector(token_estimator=count_entries)
+def test_selector_returns_newest_active_entries_within_hard_budget():
+    memory = _memory()
+    selector = MemorySelector(token_estimator=_entry_tokens)
 
     selected = selector.select(
         memory=memory,
-        query="What did we decide about storage for the cache?",
+        query="an unrelated question does not change bounded selection",
         max_tokens=2,
     )
 
-    selected_ids = [entry.id for entry in selected]
-    assert selected_ids == ["D1", "U1"]
+    assert [entry.id for entry in selected] == ["F3", "F2"]
+    assert selector.token_estimator(memory.render(entries=selected)) <= 2
 
 
-def test_selector_excludes_superseded_entries():
-    memory = make_memory()
-    memory.apply_ops([{"op": "SUPERSEDE", "id": "D1", "reason": "changed storage plan"}])
-    selector = MemorySelector(token_estimator=count_entries)
+def test_selector_does_not_use_query_or_benchmark_metadata_for_ordering():
+    memory = _memory()
+    selector = MemorySelector(token_estimator=_entry_tokens)
 
-    selected = selector.select(memory=memory, query="storage cache", max_tokens=10)
+    first = selector.select(memory, query="first fact", max_tokens=2)
+    second = selector.select(memory, query="database migration", max_tokens=2)
+    third = selector.select(memory, query="", max_tokens=2, pinned_sections=frozenset())
 
-    assert "D1" not in [entry.id for entry in selected]
-
-
-def test_selector_can_include_superseded_entries_for_conflict_history():
-    memory = make_memory()
-    memory.apply_ops([{"op": "SUPERSEDE", "id": "D1", "reason": "conflict"}])
-    selector = MemorySelector(token_estimator=count_entries)
-    selected = selector.select(
-        memory=memory,
-        query="storage cache",
-        max_tokens=10,
-        include_superseded=True,
-    )
-    assert "D1" in [entry.id for entry in selected]
+    assert [entry.id for entry in first] == ["F3", "F2"]
+    assert [entry.id for entry in second] == ["F3", "F2"]
+    assert [entry.id for entry in third] == ["F3", "F2"]
 
 
-def test_render_can_render_only_selected_entries():
-    memory = make_memory()
-    selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())
+def test_selector_excludes_superseded_entries_by_default():
+    memory = _memory()
+    memory.apply_ops([{"op": "SUPERSEDE", "id": "F2", "reason": "corrected"}])
 
-    selected = selector.select(memory=memory, query="favorite color green is", max_tokens=1)
-    rendered = memory.render(entries=selected)
-
-    assert "favorite color is green" in rendered
-    assert "use file storage" not in rendered
-
-
-def test_pinned_preferences_win_budget_over_relevant_fact():
-    memory = make_memory()
-    selector = MemorySelector(token_estimator=count_entries)
-
-    selected = selector.select(memory=memory, query="favorite color green is", max_tokens=1)
-
-    selected_ids = [entry.id for entry in selected]
-    assert "U1" in selected_ids
-    assert "F1" not in selected_ids
-
-
-def test_empty_pinned_sections_restores_pure_budget_behavior():
-    memory = make_memory()
-    selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())
-
-    selected = selector.select(
-        memory=memory,
-        query="What did we decide about storage for the cache?",
-        max_tokens=1,
+    selected = MemorySelector(token_estimator=_entry_tokens).select(
+        memory, query="anything", max_tokens=10
     )
 
-    assert [entry.id for entry in selected] == ["D1"]
+    assert [entry.id for entry in selected] == ["F3", "F1"]
 
 
-def test_pinned_entry_cannot_exceed_hard_budget_alone():
+def test_selector_can_include_superseded_entries_for_history():
+    memory = _memory()
+    memory.apply_ops([{"op": "SUPERSEDE", "id": "F2", "reason": "corrected"}])
+
+    selected = MemorySelector(token_estimator=_entry_tokens).select(
+        memory, query="anything", max_tokens=10, include_superseded=True
+    )
+
+    # Active entries are always emitted before superseded history.
+    assert [entry.id for entry in selected] == ["F3", "F1", "F2"]
+
+
+def test_selector_skips_an_oversized_entry_without_slicing():
     memory = Memory(sections=CHAT_SECTIONS)
-    applied, rejected = memory.apply_ops(
-        [
-            {
-                "op": "ADD",
-                "section": "preferences",
-                "text": "prefers a very detailed explanation with all relevant tradeoffs",
-                "provenance": [1],
-            }
-        ]
+    memory.apply_ops(
+        [{"op": "ADD", "section": "facts", "text": "A very long fact.", "provenance": [1]}]
     )
-    assert rejected == []
-    assert len(applied) == 1
-    selector = MemorySelector(token_estimator=count_entries)
+    selector = MemorySelector(token_estimator=lambda _text: 10)
 
-    selected = selector.select(memory=memory, query="anything", max_tokens=0)
-
-    assert selected == []
+    assert selector.select(memory, query="anything", max_tokens=2) == []
 
 
-def test_multiple_pinned_entries_are_prioritized_but_still_bounded():
-    memory = make_memory()
-    memory.apply_ops([{
-        "op": "ADD", "section": "preferences",
-        "text": "prefers short examples", "provenance": [5],
-    }])
-    selector = MemorySelector(token_estimator=count_entries)
+def test_selector_scores_are_structural_active_and_recency_indicators():
+    memory = _memory()
+    selector = MemorySelector(token_estimator=_entry_tokens)
 
-    selected = selector.select(memory=memory, query="favorite color green", max_tokens=1)
+    scored = selector.select_with_scores(memory, query="irrelevant", max_tokens=2)
 
-    assert len(selected) == 1
-    assert selected[0].section == "preferences"
-
-
-def test_call_site_can_disable_default_pinned_sections():
-    memory = make_memory()
-    selector = MemorySelector(token_estimator=count_entries)
-    selected = selector.select(
-        memory=memory,
-        query="favorite color is green",
-        max_tokens=1,
-        pinned_sections=frozenset(),
-    )
-    assert [entry.id for entry in selected] == ["F1"]
-
-
-def test_temporal_query_boosts_timeline_entries():
-    memory = Memory(sections=AGENT_SECTIONS)
-    applied, rejected = memory.apply_ops(
-        [
-            {
-                "op": "ADD",
-                "section": "facts",
-                "text": "OpenWeather API key is configured for the weather app.",
-                "provenance": [1],
-            },
-            {
-                "op": "ADD",
-                "section": "timeline",
-                "text": "OpenWeather API key obtained on March 10, 2024.",
-                "provenance": [2],
-            },
-        ]
-    )
-    assert rejected == []
-    assert len(applied) == 2
-    selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())
-
-    selected = selector.select(
-        memory=memory,
-        query="How many days passed after the API key date?",
-        max_tokens=1,
-    )
-
-    assert [entry.id for entry in selected] == ["M1"]
-
-
-def test_latest_value_query_boosts_status_changes():
-    memory = Memory(sections=AGENT_SECTIONS)
-    applied, rejected = memory.apply_ops(
-        [
-            {
-                "op": "ADD",
-                "section": "facts",
-                "text": "OpenWeather API key has a daily call quota.",
-                "provenance": [1],
-            },
-            {
-                "op": "ADD",
-                "section": "status_changes",
-                "text": "API daily quota updated to 1,200 calls/day.",
-                "provenance": [2],
-            },
-        ]
-    )
-    assert rejected == []
-    assert len(applied) == 2
-    selector = MemorySelector(token_estimator=count_entries, pinned_sections=frozenset())
-
-    selected = selector.select(
-        memory=memory,
-        query="What is the updated daily quota?",
-        max_tokens=1,
-    )
-
-    assert [entry.id for entry in selected] == ["C1"]
+    assert [item.entry.id for item in scored] == ["F3", "F2"]
+    assert scored[0].reasons == ("active", "recency")
+    assert scored[0].score == 1.003

@@ -1,505 +1,145 @@
-# MemoryAgent Architecture
+# MemoryAgent architecture
 
-This repo follows two practical rules:
+MemoryAgent has one supported production workload: chat memory. The runtime
+is framework-neutral and bounded by a single policy (`CHAT_POLICY`) and one
+section schema (`CHAT_SECTIONS`). Optional integrations adapt to this public
+surface; they do not add production profiles, storage engines, or section
+presets.
 
-- Put importable package code in clear packages with explicit responsibility.
-  This follows the direction of the Python Packaging User Guide's package
-  layout guidance: import packages should be obvious and separated from repo
-  tooling/files.
-- Treat LangChain middleware as composable context-management units. LangChain
-  documents middleware as the mechanism for prompt/context transformation,
-  retries, guardrails, and other agent-loop hooks, so summary, structured
-  memory, and long-term recall should be separate middleware concerns.
-
-References:
-
-- Python Packaging User Guide: https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/
-- LangChain middleware overview: https://docs.langchain.com/oss/python/langchain/middleware
-- LangChain agents/context management: https://docs.langchain.com/oss/python/langchain/agents
-
-## Package Map
+## Package map
 
 ```text
 memory_agent/
-  core/          Framework-neutral structured models, store, transcript, window.
-  policies/      StructuredMemoryPolicy and EventMemoryPolicy implementations.
-  normalization/ Subject/value normalization strategies.
-  update/        Extraction, prompt, operation, verification, compaction pipeline.
-  retrieval/     Answer-time selection, rendering, and quality signals.
-  application/   Structured/event services, standalone chat, manual session.
-  adapters/      LangChain and chat/agent-event input adapters.
-  domain/        Generic MemoryEvent, event entry, scope, and token budget.
-  agents/        Dependency-injection assembly for runnable agents.
-  clients/       External service protocols/adapters (LLM, mem0).
-  models/        Remaining config, runtime, and integration DTOs.
-
-demos/           Runnable examples, summary baseline, and demo-only tools/config.
-
-evaluation/
-  memory/         Generic memory replay, metrics, manifests, and report schemas.
-  beam/           BEAM-specific adapters, routing, snapshots, and aggregation.
-
-scripts/         BEAM evaluation only. Nothing in memory_agent/ imports it.
-  beam_models.py BEAM run/config models (BeamConfig, BeamRunConfig, ...).
-  run_beam_case*.py, run_beam_cases.py  BEAM runners.
-  beam_tests/    Tests for the BEAM runners and BEAM config.
+  core/
+    models.py             memory entries, values, and identities
+    sections.py           SectionConfig and CHAT_SECTIONS
+    store.py              in-memory state and atomic operation commits
+    transcript.py         immutable conversation turns
+    transcript_store.py   transcript collection
+    window.py             token-bounded working window
+  policies/
+    structured.py         CHAT_POLICY and section validation
+  normalization/
+    chat.py               chat subject/value normalization
+  update/
+    operations.py         operation parsing and structural validation
+    prompts.py            chat extraction prompts
+    updater.py            proposal, verification, and atomic commit pipeline
+    compactor.py          bounded active-entry compaction
+    selector.py           update candidate selection
+    verifier.py           post-update invariants
+  retrieval/
+    selector.py           bounded active-entry selection
+    context.py            bounded prompt context rendering
+    quality.py             diagnostics
+  application/
+    chat.py               canonical build_chat_memory facade
+    session.py            framework-free send loop
+    structured_service.py update/verify/commit orchestration
+  clients/
+    llm.py                small LLM protocol and provider adapter
+  adapters/langchain/
+    chat.py               optional framework adapter
 ```
 
-Dataset-specific adapters live in `evaluation/beam/`; reusable memory-system
-evaluation harnesses live in `evaluation/memory/`. The supported direction
-is `BEAM JSON -> BeamChatCaseAdapter -> MemoryEvent -> common application/core`.
-Neither the common domain nor policy contracts depend on BEAM, LangGraph,
-DeepAgent, Claude Code, Codex, mem0, or fixed user/assistant JSON.
+The application facade imports only core runtime components. It never imports
+optional frameworks, external memory services, scripts, or evaluation code.
+The optional LangChain adapter is a one-way boundary: it turns framework
+messages into `Turn` values and delegates memory operations to the same core.
 
-The key distinction:
-
-```text
-application/chat.py
-  The handoff surface for chat memory. Depends on core/, policies/, update/,
-  application services, and clients/llm.py. Never imports agents/, mem0, or scripts/
-  (enforced by tests/test_chat_facade.py).
-
-demos/summary.py
-  Uses LangChain SummarizationMiddleware as a comparison baseline.
-  It is demo-only and does not produce structured memory entries.
-
-core/ + update/ + retrieval/
-  Core owns state and invariants. Update owns mutation proposals and validation.
-  Retrieval owns read-time selection and rendering. StructuredMemoryService in
-  application/ owns update/verify/commit and compaction orchestration. The
-  LangChain middleware in adapters/ only adapts agent messages and model calls.
-
-longterm/
-  Owns LongTermMemoryMiddleware.
-  It integrates long-term recall with the agent loop.
-  The concrete mem0 adapter lives in clients/mem0.py.
-
-scripts/ (BEAM)
-  Evaluation harness. The "beam" CLI profile is a runner-level alias that
-  scripts normalize onto the core "eval" profile via normalize_beam_profile;
-  the memory_agent package knows chat/practical/agent/eval.
-```
-
-## Structured Core and Agent-Event Evolution Boundary
-
-The current production path is the operation-based structured runtime. The
-event model is retained as the next ingestion boundary for agent traces, not as
-a second production storage engine:
+## Component graph
 
 ```mermaid
 flowchart LR
-    ChatMessages[Chat messages] --> Turns[Structured Turns]
-    Turns --> StructuredService[StructuredMemoryService]
-    StructuredService --> StructuredStore[Operation-based Memory]
-
-    AgentTrace[Future agent trace] --> AgentAdapter[AgentEventAdapter]
-    AgentAdapter --> Events[MemoryEvent]
-    Events --> EventPolicy[EventMemoryPolicy]
-    EventPolicy -. planned translation .-> StructuredService
+  Caller[Chat caller] --> Facade[application.chat]
+  Facade --> Policy[CHAT_POLICY]
+  Facade --> Sections[CHAT_SECTIONS]
+  Facade --> Service[StructuredMemoryService]
+  Service --> Updater[MemoryUpdater]
+  Service --> Compactor[MemoryCompactor]
+  Service --> Store[core.Memory]
+  Updater --> LLM[LLMClient]
+  Store --> Selector[MemorySelector]
+  Selector --> Context[Bounded answer context]
+  LangChain[Optional LangChain adapter] --> Facade
 ```
 
-Policy names are explicit at this boundary:
-
-- `StructuredMemoryPolicy` controls sections, extraction, operation caps, and
-  structured-runtime behavior.
-- `EventMemoryPolicy` controls generic event retention, classification,
-  importance, scope, and retrieval priority.
-
-The previous ambiguous `MemoryPolicy` aliases and compatibility packages have
-been removed.
-
-## High-Level Component Graph
-
-```mermaid
-flowchart TD
-    Entry[demos package] --> SummaryScript[demos.summary_agent]
-    Entry --> StructuredScript[demos.structured_agent]
-    Entry --> HybridScript[demos.hybrid_agent]
-    Entry --> PlainScript[demos.manual_session]
-
-    SummaryScript --> SummaryPkg[demos.summary]
-    StructuredScript --> StructuredAgent[memory_agent.agents.structured]
-    HybridScript --> HybridAgent[memory_agent.agents.hybrid]
-    PlainScript --> Application[memory_agent.application]
-
-    SummaryPkg --> LC1[LangChain create_agent]
-    SummaryPkg --> LCSum[SummarizationMiddleware]
-
-    StructuredAgent --> StructuredMW[adapters.langchain.StructuredMemoryMiddleware]
-    StructuredMW --> Service[application.StructuredMemoryService]
-    Service --> Store[core.Memory]
-    Service --> Updater[update.MemoryUpdater]
-    StructuredMW --> Selector[retrieval.MemorySelector]
-
-    HybridAgent --> StructuredAgent
-    HybridAgent --> LongTermPkg[memory_agent.longterm]
-    LongTermPkg --> LongTermMW[LongTermMemoryMiddleware]
-
-    Updater --> LLMProtocol[LLMClient protocol]
-    LLMProtocol --> OpenAI[OpenAIClient adapter]
-
-    LongTermMW --> LongTermProtocol[LongTermMemory protocol]
-    LongTermProtocol --> Mem0[Mem0LongTermMemory adapter]
-
-    Store --> CoreModels[core models and schema]
-    Selector --> Store
-
-    AgentEvents[AgentEventAdapter] --> EventDomain[memory_agent.domain]
-    EventDomain --> EventService[EventMemoryService]
-    EventPolicies[memory_agent.policies] --> EventService
-```
-
-## Dependency Direction
-
-```mermaid
-flowchart LR
-    Core[core] --> Update[update]
-    Core --> Retrieval[retrieval]
-    Policies[policies] --> Update
-    Update --> Application[application]
-    Retrieval --> Application
-    Domain[domain events] --> Application
-    Application --> Adapters[adapters]
-    Clients[clients] --> Update
-    Adapters --> Agents[agents]
-    Application --> Agents
-    Demos[demos] --> Agents
-```
-
-Rules:
-
-- `models/` has no LangChain, mem0, or OpenAI imports.
-- `clients/` is where external services are adapted behind small protocols.
-- `core/` has no LLM or framework dependency. `update/` may depend on the
-  `LLMClient` protocol, but never on a concrete OpenAI client.
-- `adapters/` owns LangChain-specific message and middleware integration.
-- Removed paths (`structured/`, `profiles/`, and moved `models/*`) must not be
-  imported; an architecture test enforces it.
-- `longterm/` owns LangChain long-term recall middleware; concrete mem0 details
-  stay in `clients/mem0.py`.
-- `agents/` wires these pieces together for runnable apps.
-- `demos/` owns example config, tools, entry points, and the summary baseline;
-  product package modules never import it.
-
-## Runtime Path 1: Summary Baseline
-
-Entry point: `python -m demos.summary_agent`
-
-Code location:
-
-```text
-demos/summary.py
-```
+## Chat update flow
 
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant A as LangChain Agent
-    participant S as SummarizationMiddleware
-    participant C as InMemorySaver
-    participant M as Model
+  participant C as Caller
+  participant F as ChatMemory
+  participant S as StructuredMemoryService
+  participant U as MemoryUpdater
+  participant L as LLMClient
+  participant M as Memory
 
-    U->>A: user message
-    A->>S: middleware hook
-    S->>C: compact old messages when triggered
-    A->>M: model/tool loop
-    M-->>A: assistant response
-    A-->>U: response
+  C->>F: update(evicted Turns)
+  F->>S: update(Turns)
+  S->>U: propose operations
+  U->>L: chat extraction prompt
+  L-->>U: JSON operation list
+  U->>U: parse, normalize, verify
+  U->>M: commit trial state atomically
+  M-->>S: applied/rejected operations
+  S-->>F: update result
+  F-->>C: applied and rejected lists
 ```
 
-This comparison baseline is intentionally outside `memory_agent/`. If you are
-looking for summary behavior, start at `demos.summary`.
+`ADD`, `UPDATE`, `SUPERSEDE`, and `NOOP` are the only supported operation
+kinds. Provenance must point to supplied turns. A rejected or failed update
+does not discard source turns, allowing the caller to retry. Retrieval selects
+active entries within a caller-supplied token budget and renders a bounded
+`# Conversation Memory` block.
 
-## Runtime Path 2: Structured Memory With LangChain
+## Policy and schema
 
-Entry point: `python -m demos.structured_agent`
-
-Code locations:
+`CHAT_POLICY` is the sole production policy. It uses durable chat retention,
+allows a bounded operation batch, and rejects non-chat inventories such as
+exact-value, timeline, and tool-observation sections. `CHAT_SECTIONS` contains:
 
 ```text
-memory_agent/agents/structured.py
-memory_agent/adapters/langchain/structured_memory.py
-memory_agent/application/structured_service.py
-memory_agent/update/updater.py
-memory_agent/core/store.py
+decisions, preferences, status_changes, goal,
+facts, progress, open_questions, failed_attempts
 ```
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant A as LangChain Agent
-    participant SM as StructuredMemoryMiddleware
-    participant S as StructuredMemoryService
-    participant T as Transcript
-    participant Up as MemoryUpdater
-    participant Mem as Memory
-    participant Sel as MemorySelector
-    participant L as LLMClient
+There is no profile registry, preset resolver, or compatibility alias that can
+silently widen retention. Product configuration controls model and token
+limits only; it cannot select another policy or section list.
 
-    U->>A: user message
-    A->>SM: before_model(state)
-    SM->>T: mirror unseen messages to Turns
-    SM->>SM: check token budget
-    alt over budget
-        SM->>SM: choose safe cutoff without splitting tool pairs
-        SM->>S: evicted turns
-        S->>Up: prepare update against trial memory
-        Up->>L: request ADD/UPDATE/SUPERSEDE/NOOP JSON
-        L-->>Up: ops JSON
-        S->>Mem: verify and commit atomically
-        alt success
-            SM-->>A: remove evicted messages
-        else failure or rejected ops
-            SM-->>A: keep all messages for retry
-        end
-    else within budget
-        SM-->>A: no state update
-    end
-    A->>SM: wrap_model_call(request)
-    SM->>Sel: select active memory for latest query
-    Sel->>Mem: read active entries
-    SM->>A: request with # Conversation Memory
-```
-
-This path is not summary-based. It converts evicted turns into addressable
-memory entries and preserves superseded state.
-
-## Runtime Path 3: Structured Memory + Long-Term mem0
-
-Entry point: `python -m demos.hybrid_agent`
-
-Code locations:
-
-```text
-memory_agent/agents/hybrid.py
-memory_agent/longterm/middleware.py
-memory_agent/clients/mem0.py
-```
+## Dependency boundaries
 
 ```mermaid
 flowchart TD
-    A[User message] --> B[StructuredMemoryMiddleware]
-    B --> C[# Conversation Memory]
-    B --> D[Old messages evicted after successful update]
-    D --> E[LongTermMemoryMiddleware tracks disappeared message IDs]
-    E --> F[LongTermMemory.add]
-    F --> G{MEM0_BACKEND}
-    G -->|local| H[Mem0 OSS local store at MEM0_DATA_DIR]
-    G -->|platform| I[Hosted/custom mem0 through MEM0_API_KEY]
-    G -->|disabled| J[Skip long-term recall]
-    E --> K[LongTermMemory.search latest user query]
-    K --> L[# Long-Term Memory]
-    C --> M[Model call]
-    L --> M
+  Core[core] --> Update[update]
+  Core --> Retrieval[retrieval]
+  Policies[policies] --> Update
+  Update --> Service[application]
+  Retrieval --> Service
+  Clients[clients/llm] --> Update
+  Service --> Facade[application/chat]
+  Facade --> Caller[Product caller]
+  Optional[adapters/langchain] --> Facade
 ```
 
-`# Conversation Memory` is current structured state. `# Long-Term Memory` is
-supporting recall from older stored content.
+- `core` has no LLM, provider, or framework imports.
+- `update` depends on the `LLMClient` protocol, not a provider implementation.
+- `retrieval` only reads active core state and enforces token budgets.
+- `application/chat` is the public import boundary.
+- Optional adapters depend on the public facade; the facade never imports
+  them back.
+- `demos/`, scripts, and test utilities are outside the installable runtime.
 
-## Runtime Path 4: Framework-Free Structured Session
+## Verification
 
-Entry point: `python -m demos.manual_session`
+Run the complete suite with:
 
-This is the retained legacy/manual loop used for framework-free comparison;
-the product `StructuredMemoryMiddleware` path does not depend on it.
-
-Code locations:
-
-```text
-memory_agent/application/session.py
-memory_agent/core/window.py
-memory_agent/core/transcript_store.py
+```bash
+python -m pytest -q
 ```
 
-```mermaid
-flowchart TD
-    A[User text] --> B[Transcript.append user Turn]
-    B --> C[WorkingWindow.add]
-    C --> D{Prompt would exceed budget?}
-    D -->|yes| E[WorkingWindow.eviction_batch]
-    E --> F[MemoryUpdater.update]
-    F --> G{Ops accepted?}
-    G -->|yes| H[Memory.apply_ops_atomically]
-    H --> I[WorkingWindow.remove evicted Turns]
-    G -->|no| J[Keep Turns for retry]
-    D -->|no| K[Build prompt]
-    I --> K
-    J --> K
-    K --> L[MemorySelector.select]
-    L --> M[Memory.render]
-    M --> N[LLMClient.complete]
-    N --> O[Transcript.append assistant Turn]
-    O --> P[WorkingWindow.add assistant Turn]
-```
-
-## Data Model Relationships
-
-```mermaid
-classDiagram
-    class SectionConfig {
-      key: str
-      prefix: str
-      title: str
-      description: str
-    }
-
-    class Turn {
-      id: int
-      role: str
-      content: str
-    }
-
-    class MemoryEntry {
-      id: str
-      section: str
-      text: str
-      provenance: list[int]
-      status: active|superseded
-      note: str
-    }
-
-    class SelectedMemory {
-      entry: MemoryEntry
-      score: float
-      reasons: tuple[str]
-    }
-
-    class LongTermHit {
-      text: str
-      score: float?
-      metadata: dict?
-    }
-
-    class Memory {
-      entries: dict[str, MemoryEntry]
-      narrative: str
-      apply_ops()
-      apply_ops_atomically()
-      render()
-    }
-
-    class Transcript {
-      append()
-      get()
-      all()
-    }
-
-    class MemorySelector {
-      select()
-      select_with_scores()
-    }
-
-    SectionConfig --> Memory
-    Turn --> Transcript
-    MemoryEntry --> Memory
-    MemoryEntry --> SelectedMemory
-    Memory --> MemorySelector
-    LongTermHit --> LongTermMemoryMiddleware
-```
-
-## Memory Update Contract
-
-```mermaid
-flowchart TD
-    A[Evicted Turns] --> B[Build updater prompt]
-    C[Current Memory including superseded entries] --> B
-    D[SectionConfig list] --> B
-    B --> E[LLMClient.complete]
-    E --> F{Parse JSON array?}
-    F -->|no| G[UpdateFailed]
-    F -->|yes| H[Normalize common mistakes]
-    H --> I{Provenance valid?}
-    I -->|no| J[Reject batch]
-    I -->|yes| K{Apply on copy?}
-    K -->|any op invalid| J
-    K -->|all valid| L[Commit candidate Memory]
-    G --> M[Caller keeps source messages]
-    J --> M
-    L --> N[Caller may evict source messages]
-```
-
-Supported operations:
-
-- `ADD`: create a new active entry.
-- `UPDATE`: refine an active entry that remains true.
-- `SUPERSEDE`: mark an active entry inactive when contradicted.
-- `NOOP`: save nothing from the batch.
-
-The Python layer validates shape, IDs, sections, and provenance. The LLM still
-owns the semantic choice.
-
-Memory quality policy:
-
-- Entries should be concise but aggregated around durable subjects such as the
-  current stack, deployment status, testing progress, security posture, active
-  blockers, and user preferences.
-- Important dates, versions, counts, durations, percentages, endpoints,
-  table/column names, file names, error messages, library names, and deployment
-  targets should be embedded in the smallest relevant summary entry. They are
-  not split into a standalone exact-value inventory by default.
-- Generic assistant advice and example code should not become memory unless the
-  user accepts, decides, implements, observes, or reports it.
-- `open_questions` is only for unresolved blockers or decisions that remain
-  important after the turn. Ordinary one-off help requests should usually be
-  `NOOP` or become concise `facts`/`progress` only when they contain durable
-  state.
-- `status_changes` captures contradictions, corrections, reversals, denials,
-  and latest-vs-previous truths. This section is intentionally rendered before
-  generic facts so contradiction-resolution questions can see it.
-- `timeline` captures ordered milestones and event sequences. This section is
-  intentionally rendered before generic facts/open questions so chronology
-  questions can see it.
-
-BEAM answering uses question-specific structured-memory selection before
-building the answer context. This prevents generic facts and open questions
-from crowding out status-change or timeline entries that are relevant to a
-specific probing question.
-
-## Configuration Flow
-
-```mermaid
-flowchart LR
-    A[.env] --> B[load_project_env]
-    B --> C[models/config.py]
-    C --> D[summary/agent.py]
-    C --> E[agents/structured.py]
-    C --> F[agents/hybrid.py]
-    F --> G{MEM0_BACKEND}
-    G -->|local| H[Mem0LongTermMemory.from_local]
-    G -->|platform| I[Mem0LongTermMemory.from_platform]
-    G -->|disabled| J[No LongTermMemoryMiddleware]
-```
-
-Important mem0 settings:
-
-```text
-MEM0_BACKEND=local
-  Uses MEM0_DATA_DIR, default .mem0.
-  Good for local testing and repeatable demos.
-
-MEM0_BACKEND=platform
-  Uses MEM0_API_KEY and MEM0_USER_ID.
-  Does not require or use MEM0_DATA_DIR.
-  Use this for your own hosted/custom mem0 content.
-
-MEM0_BACKEND=disabled
-  Skips long-term vector memory.
-  Structured in-session memory still runs.
-```
-
-`build_hybrid_agent(..., long_term_memory=...)` accepts an injected
-`LongTermMemory` implementation for tests or custom adapters.
-
-## LLM Boundary
-
-```mermaid
-flowchart TD
-    A[MemoryUpdater / MemorySession] --> B[LLMClient protocol]
-    B --> C[OpenAIClient]
-    B --> D[Test fake]
-    B --> E[Future provider adapter]
-```
-
-`LLMClient` exists so core code can depend on a tiny behavior contract. It is
-why tests can use deterministic fakes without importing LangChain OpenAI.
-`OpenAIClient` is the production adapter that satisfies that protocol.
+`tests/test_architecture_boundaries.py` checks the one-policy/one-schema
+contract, removed module paths, optional-dependency isolation, and core import
+direction. `tests/test_chat_facade.py` verifies that importing and using the
+public facade does not load optional integration modules.

@@ -108,7 +108,10 @@ def test_chat_compacts_only_above_configured_threshold():
     )
     chat.update([Turn(id=1, role="user", content="I prefer concise replies")])
 
+    # The active-entry threshold is not crossed by this one-entry update.
     assert len(calls) == 1
+    assert chat.compactor is not None
+    assert chat.compactor.metrics.attempted_calls == 0
 
 
 def test_chat_records_token_usage_per_role():
@@ -185,6 +188,8 @@ def test_chat_compacts_after_crossing_configured_threshold():
 
     chat.update([Turn(id=1, role="user", content="I prefer concise replies")])
 
-    assert len(calls) == 1
+    # The first call extracts the durable update and the second is the
+    # bounded compactor review triggered by the active-entry threshold.
+    assert len(calls) == 2
     assert chat.compactor is not None
-    assert chat.compactor.metrics.attempted_calls == 0
+    assert chat.compactor.metrics.attempted_calls == 1
