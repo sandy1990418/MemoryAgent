@@ -1,5 +1,5 @@
 # Extra dependencies for scripts/run_beam_case_deepagent.py.
 # deepagents requires Python >= 3.11; install into a separate venv
 # (e.g. .venv-deepagents) instead of the main Python 3.10 .venv.
--r requirements.txt
+-r requirements-evaluation.txt
 deepagents>=0.6

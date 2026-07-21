@@ -22,12 +22,14 @@ from memory_agent.models.config import (
 
 
 def normalize_beam_profile(profile: str) -> str:
-    """Map the legacy CLI alias "beam" onto the core "eval" profile.
+    """Resolve every BEAM run to the production chat profile.
 
-    The memory_agent package only knows practical/agent/eval; "beam" is a
-    runner-level alias kept for CLI compatibility.
+    BEAM is an evaluation harness, not a second production-memory policy.
+    Dataset-specific profile switches are intentionally ignored so scores
+    measure the same public chat memory used by the product.
     """
-    return "eval" if profile == "beam" else profile
+    del profile
+    return "chat"
 
 
 DEFAULT_CHAT_PATH = Path("BEAM/chats/100K/1/chat.json")
@@ -254,7 +256,7 @@ class BeamRunConfig:
     env_file: Path = Path(".env")
     user_id: str = "beam-100k-case-1"
     memory_mode: str = "structured_only"
-    memory_profile: str = os.getenv("MEMORY_PROFILE", "chat")
+    memory_profile: str = "chat"
     top_k: int = 8
     max_hit_chars: int = 6000
     max_active_context_chars: int = 12000

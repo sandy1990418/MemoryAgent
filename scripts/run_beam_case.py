@@ -29,15 +29,13 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from memory_agent import (
-    Mem0LongTermMemory,
-    Memory,
-    MemoryCompactor,
-    MemoryUpdater,
-    OpenAIClient,
-    TokenLedger,
-    get_memory_policy,
-)
+from memory_agent.clients.llm import OpenAIClient, TokenLedger
+from memory_agent.clients.mem0 import Mem0LongTermMemory
+from memory_agent.core.store import Memory
+from memory_agent.models.config import ProductMemoryConfig, product_config_from_argv
+from memory_agent.policies.structured import get_memory_policy
+from memory_agent.update.compactor import MemoryCompactor
+from memory_agent.update.updater import MemoryUpdater
 from memory_agent.policies.structured import is_chat_policy
 from scripts.beam_models import (
     ANSWER_MEMORY_SELECTION_MODES,
@@ -47,7 +45,6 @@ from scripts.beam_models import (
     beam_config_from_argv,
     normalize_beam_profile,
 )
-from evaluation.beam.chat_case_adapter import BeamChatCaseAdapter
 from evaluation.beam.memory_snapshot import (
     load_memory_snapshot,
     restore_from_snapshot,
@@ -58,7 +55,6 @@ from memory_agent.retrieval.context import (
     AnswerContext,
     build_answer_memory_context,
 )
-from memory_agent.models.config import ProductMemoryConfig, product_config_from_argv
 from memory_agent.adapters.langchain.structured_memory import StructuredMemoryMiddleware
 from memory_agent.core.sections import sections_for_preset
 
@@ -175,16 +171,13 @@ def build_structured_beam_middleware(
 ) -> StructuredMemoryMiddleware:
     """Build one policy-consistent structured-memory stack for BEAM."""
     ledger = token_ledger or TokenLedger()
-    memory_policy = get_memory_policy(normalize_beam_profile(args.memory_profile))
+    # BEAM evaluates the public chat profile only; it must not select an
+    # evaluation/agent policy or preserve dataset-specific heuristics.
+    memory_policy = get_memory_policy("chat")
     product = ProductMemoryConfig.from_yaml_env(
         getattr(args, "product_config", None) or "configs/product.yaml"
     )
-    product_policy = get_memory_policy(product.memory_profile)
-    section_preset = (
-        product.sections
-        if product_policy.name == memory_policy.name
-        else memory_policy.section_preset
-    )
+    section_preset = memory_policy.section_preset
     sections = sections_for_preset(section_preset)
     updater = MemoryUpdater(
         llm=OpenAIClient(
@@ -524,7 +517,6 @@ def flatten_chunks(chat: list[dict[str, Any]]) -> list[BeamChunk]:
 
 
 def flatten_message_batches(chat: list[dict[str, Any]], case_id: str = "1") -> list[list[AnyMessage]]:
-    adapter = BeamChatCaseAdapter()
     batches: list[list[AnyMessage]] = []
     for batch_index, batch in enumerate(chat, start=1):
         batch_number = batch.get("batch_number", batch_index)
@@ -532,19 +524,23 @@ def flatten_message_batches(chat: list[dict[str, Any]], case_id: str = "1") -> l
             for pair_index in range(0, len(turn), 2):
                 pair = turn[pair_index : pair_index + 2]
                 messages: list[AnyMessage] = []
-                for event in adapter.adapt_messages(pair, case_id=case_id):
-                    role = event.actor
-                    content = event.content.strip()
+                # Keep BEAM's JSON metadata at this evaluation boundary while
+                # constructing ordinary chat messages for the optional
+                # LangChain adapter.  Production memory only sees user and
+                # assistant turns, never generic MemoryEvent instances.
+                for message in pair:
+                    role = str(message.get("role", "unknown"))
+                    content = str(message.get("content", "")).strip()
                     if not content:
                         continue
-                    message_id = event.metadata.get("beam_chat_id")
-                    stable_id = event.event_id
+                    message_id = message.get("id")
+                    stable_id = f"beam-{case_id}-{message_id or len(messages) + 1}"
                     metadata = {
                         "beam_batch_number": batch_number,
                         "beam_turn_group": turn_index,
                         "beam_pair_number": pair_index // 2 + 1,
                         "beam_chat_id": message_id,
-                        "beam_index": event.metadata.get("beam_index"),
+                        "beam_index": message.get("index"),
                     }
                     if role == "user":
                         messages.append(

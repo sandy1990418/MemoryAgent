@@ -13,10 +13,10 @@ from pathlib import Path
 from memory_agent.clients.llm import LLMClient, OpenAIClient, TokenLedger
 from memory_agent.models.config import ProductMemoryConfig
 from memory_agent.application.structured_service import StructuredMemoryService
-from memory_agent.core.sections import sections_for_preset
+from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.core.transcript import Turn
-from memory_agent.policies.structured import get_memory_policy
+from memory_agent.policies.structured import CHAT_POLICY
 from memory_agent.update.compactor import MemoryCompactor
 from memory_agent.update.updater import MemoryUpdater
 
@@ -102,8 +102,11 @@ def build_chat_memory(
     else:
         updater_llm = _RoleRecordingLLM(llm, ledger, "updater")
         compactor_llm = _RoleRecordingLLM(llm, ledger, "compactor")
-    policy = get_memory_policy(product.memory_profile)
-    sections = sections_for_preset(product.sections)
+    # Product configuration may still contain legacy runner keys while
+    # callers migrate.  The production facade is deliberately chat-only:
+    # BEAM/evaluation profiles must never alter durable product semantics.
+    policy = CHAT_POLICY
+    sections = list(CHAT_SECTIONS)
     memory = Memory(sections=sections, policy=policy)
     updater = MemoryUpdater(
         llm=updater_llm,

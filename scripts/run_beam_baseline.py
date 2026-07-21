@@ -22,7 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
 
-from memory_agent import OpenAIClient, TokenLedger
+from memory_agent.clients.llm import OpenAIClient, TokenLedger
 from evaluation.beam.regression_report import aggregate_runs
 from scripts.beam_models import beam_config_from_argv
 from scripts.run_beam_case import (

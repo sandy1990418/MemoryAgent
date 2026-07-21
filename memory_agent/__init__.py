@@ -1,43 +1,17 @@
-"""Structured conversational memory and LangChain-facing memory adapters.
+"""The canonical, framework-free chat-memory API.
 
-The package root uses lazy public exports so standalone chat imports do not
-eagerly pull agent or mem0 dependencies.
+Optional framework and evaluation integrations intentionally live below
+``memory_agent.adapters`` and ``evaluation``.  Keeping the package root to
+three names makes the supported product surface unambiguous and prevents
+optional dependencies from leaking into a plain chat import.
 """
 
 from __future__ import annotations
 
 _EXPORTS = {
-    "LLMClient": ("memory_agent.clients.llm", "LLMClient"),
-    "OpenAIClient": ("memory_agent.clients.llm", "OpenAIClient"),
-    "TokenLedger": ("memory_agent.clients.llm", "TokenLedger"),
-    "TokenUsage": ("memory_agent.clients.llm", "TokenUsage"),
-    "LongTermMemory": ("memory_agent.clients.mem0", "LongTermMemory"),
-    "Mem0LongTermMemory": ("memory_agent.clients.mem0", "Mem0LongTermMemory"),
-    "HybridAgentConfig": ("memory_agent.models.config", "HybridAgentConfig"),
-    "StructuredAgentConfig": ("memory_agent.models.config", "StructuredAgentConfig"),
-    "ProductMemoryConfig": ("memory_agent.models.config", "ProductMemoryConfig"),
-    "LongTermHit": ("memory_agent.models.longterm", "LongTermHit"),
-    "MemoryEntry": ("memory_agent.core.models", "MemoryEntry"),
-    "SelectedMemory": ("memory_agent.core.models", "SelectedMemory"),
-    "StructuredMemoryPolicy": ("memory_agent.policies.structured", "StructuredMemoryPolicy"),
-    "get_memory_policy": ("memory_agent.policies.structured", "get_memory_policy"),
-    "StructuredAgentRuntime": ("memory_agent.models.runtime", "StructuredAgentRuntime"),
-    "HybridAgentRuntime": ("memory_agent.models.runtime", "HybridAgentRuntime"),
-    "AGENT_SECTIONS": ("memory_agent.core.sections", "AGENT_SECTIONS"),
-    "CHAT_SECTIONS": ("memory_agent.core.sections", "CHAT_SECTIONS"),
-    "EVAL_SECTIONS": ("memory_agent.core.sections", "EVAL_SECTIONS"),
-    "PRACTICAL_SECTIONS": ("memory_agent.core.sections", "PRACTICAL_SECTIONS"),
-    "SectionConfig": ("memory_agent.core.sections", "SectionConfig"),
-    "MemoryCompactor": ("memory_agent.update.compactor", "MemoryCompactor"),
-    "Memory": ("memory_agent.core.store", "Memory"),
-    "MemorySelector": ("memory_agent.retrieval.selector", "MemorySelector"),
-    "MemorySession": ("memory_agent.application.session", "MemorySession"),
-    "StructuredMemoryService": ("memory_agent.application.structured_service", "StructuredMemoryService"),
-    "Transcript": ("memory_agent.core.transcript_store", "Transcript"),
-    "MemoryUpdater": ("memory_agent.update.updater", "MemoryUpdater"),
-    "UpdateFailed": ("memory_agent.update.updater", "UpdateFailed"),
+    "build_chat_memory": ("memory_agent.application.chat", "build_chat_memory"),
+    "ChatMemory": ("memory_agent.application.chat", "ChatMemory"),
     "Turn": ("memory_agent.core.transcript", "Turn"),
-    "WorkingWindow": ("memory_agent.core.window", "WorkingWindow"),
 }
 
 __all__ = sorted(_EXPORTS)

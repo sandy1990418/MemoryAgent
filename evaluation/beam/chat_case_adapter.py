@@ -1,25 +1,43 @@
+"""BEAM JSON to public chat-turn conversion.
+
+BEAM metadata remains an evaluation concern and is never represented as a
+production ``MemoryEvent``.  The adapter emits the same ``Turn`` objects used
+by :func:`memory_agent.build_chat_memory`; callers can keep dataset metadata
+alongside the returned turns when they need it for reports.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from memory_agent.domain import MemoryEvent
-from memory_agent.adapters.events.chat import ChatEventAdapter
+from memory_agent.core.transcript import Turn
 
 
 class BeamChatCaseAdapter:
-    """Keeps BEAM schema and metadata outside the production domain."""
+    """Normalize one BEAM message batch to public chat turns."""
 
-    def __init__(self) -> None:
-        self._chat = ChatEventAdapter()
-
-    def adapt_messages(self, messages: Iterable[Mapping[str, Any]], *, case_id: str, session_id: str | None = None) -> list[MemoryEvent]:
-        normalized = []
-        for message in messages:
-            normalized.append({
-                "id": f"beam-{case_id}-{message.get('id', len(normalized) + 1)}",
-                "role": message.get("role"),
-                "content": message.get("content", ""),
-                "metadata": {"dataset": "BEAM", "case_id": case_id, "beam_chat_id": message.get("id"), "beam_index": message.get("index")},
-            })
-        return self._chat.adapt(normalized, session_id=session_id or f"beam-{case_id}")
+    def adapt_messages(
+        self,
+        messages: Iterable[Mapping[str, Any]],
+        *,
+        case_id: str,
+        session_id: str | None = None,
+    ) -> list[Turn]:
+        del session_id  # retained only as a report-level caller hint
+        turns: list[Turn] = []
+        for index, message in enumerate(messages, start=1):
+            role = str(message.get("role", "unknown"))
+            if role not in {"user", "assistant"}:
+                continue
+            # Turn ids are local to this adapted batch.  BEAM's opaque ids are
+            # retained by metadata at the evaluation edge, not persisted in
+            # production memory state.
+            turns.append(
+                Turn(
+                    id=index,
+                    role=role,
+                    content=str(message.get("content", "")),
+                )
+            )
+        return turns

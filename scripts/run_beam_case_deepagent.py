@@ -36,11 +36,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage
 
-from memory_agent import (
-    Mem0LongTermMemory,
-    OpenAIClient,
-    TokenLedger,
-)
+from memory_agent.clients.mem0 import Mem0LongTermMemory
+from memory_agent.clients.llm import OpenAIClient, TokenLedger
 from memory_agent.clients.llm import LangChainTokenCallback
 from scripts.beam_models import (
     BeamDeepAgentRunConfig,

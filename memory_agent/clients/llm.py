@@ -5,9 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
-from langchain_core.callbacks import BaseCallbackHandler
-
-
 @dataclass
 class TokenUsage:
     input_tokens: int = 0
@@ -46,41 +43,20 @@ class TokenLedger:
         }
 
 
-class LangChainTokenCallback(BaseCallbackHandler):
-    """Record each provider-reported LangChain model call by role."""
+def __getattr__(name: str) -> Any:
+    """Load framework callbacks only when a caller explicitly requests one.
 
-    def __init__(self, token_ledger: TokenLedger, role: str) -> None:
-        self.token_ledger = token_ledger
-        self.role = role
-        self.recorded_calls = 0
+    The core LLM client and token ledger are intentionally usable in a plain
+    Python environment.  LangChain callback support lives behind this lazy
+    attribute so importing ``memory_agent.application.chat`` never imports
+    LangChain (even when it happens to be installed).
+    """
+    if name == "LangChainTokenCallback":
+        from memory_agent.adapters.langchain.callbacks import LangChainTokenCallback
 
-    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        input_tokens = 0
-        output_tokens = 0
-        found_usage = False
-        llm_output = getattr(response, "llm_output", None) or {}
-        usage = llm_output.get("token_usage") or llm_output.get("usage_metadata")
-        if isinstance(usage, dict):
-            input_tokens += int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-            output_tokens += int(
-                usage.get("output_tokens") or usage.get("completion_tokens") or 0
-            )
-            found_usage = input_tokens > 0 or output_tokens > 0
-
-        if not found_usage:
-            for generation_list in getattr(response, "generations", []) or []:
-                for generation in generation_list:
-                    message = getattr(generation, "message", None)
-                    metadata = getattr(message, "usage_metadata", None)
-                    if not isinstance(metadata, dict):
-                        continue
-                    input_tokens += int(metadata.get("input_tokens") or 0)
-                    output_tokens += int(metadata.get("output_tokens") or 0)
-                    found_usage = True
-
-        if found_usage:
-            self.token_ledger.record(self.role, input_tokens, output_tokens)
-            self.recorded_calls += 1
+        globals()[name] = LangChainTokenCallback
+        return LangChainTokenCallback
+    raise AttributeError(name)
 
 
 def estimate_tokens(text: str) -> int:
