@@ -239,3 +239,49 @@ def test_chat_update_failure_is_reported_without_mutating_memory():
     assert applied == []
     assert rejected and "updater_failed" in rejected[0]["reason"]
     assert chat.memory.to_state() == before
+
+
+def test_chat_update_retries_only_deferred_suffix_and_is_idempotent():
+    from memory_agent.application.chat import build_chat_memory
+
+    responses = iter(
+        [
+            '[{"op":"ADD","section":"facts","text":"saved prefix",'
+            '"provenance":[1]}]',
+            '[{"op":"UPDATE","id":"F999","text":"invalid",'
+            '"provenance":[3]}]',
+            '[{"op":"ADD","section":"facts","text":"saved suffix",'
+            '"provenance":[3]}]',
+        ]
+    )
+    calls = {"count": 0}
+
+    def responder(*_):
+        calls["count"] += 1
+        return next(responses)
+
+    chat = build_chat_memory(
+        ScriptedLLM(responder),
+        config=ProductMemoryConfig(evicted_turn_token_budget=2),
+        compact=False,
+    )
+    chat.updater.max_retries = 0
+    chat.updater.token_estimator = lambda _text: 1
+    turns = [
+        Turn(1, "user", "oldest"),
+        Turn(2, "user", "middle"),
+        Turn(3, "user", "newest"),
+    ]
+
+    applied, rejected = chat.update(turns)
+
+    assert rejected == []
+    assert [op["text"] for op in applied] == ["saved prefix", "saved suffix"]
+    assert [entry.text for entry in chat.memory.entries.values()] == [
+        "saved prefix",
+        "saved suffix",
+    ]
+    assert calls["count"] == 3
+
+    assert chat.update(turns) == ([], [])
+    assert calls["count"] == 3

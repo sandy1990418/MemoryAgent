@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from memory_agent.clients.llm import LLMClient, OpenAIClient, TokenLedger
@@ -50,6 +50,7 @@ class ChatMemory:
     token_ledger: TokenLedger | None = None
     service: StructuredMemoryService | None = None
     memory_selector: MemorySelector | None = None
+    _committed_turn_ids: set[int] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.service is None:
@@ -68,21 +69,33 @@ class ChatMemory:
         return self.token_ledger.to_dict() if self.token_ledger else {}
 
     def update(self, turns: list[Turn]) -> tuple[list[dict], list[dict]]:
+        """Update every uncommitted turn, retrying only a deferred suffix.
+
+        Turn ids make the public facade idempotent: callers may safely retry
+        the same list after a partial failure without duplicating entries that
+        were already committed by an earlier leading micro-batch.
+        """
         assert self.service is not None
-        result = self.service.update(turns)
-        if result.committed:
+        pending = [turn for turn in turns if turn.id not in self._committed_turn_ids]
+        applied: list[dict] = []
+        while pending:
+            result = self.service.update(pending)
+            committed_ids = set(result.diagnostics.get("committed_turn_ids", []))
+            new_committed_ids = committed_ids - self._committed_turn_ids
+            if new_committed_ids:
+                self._committed_turn_ids.update(new_committed_ids)
+                applied.extend(result.applied_ops)
+                pending = [turn for turn in pending if turn.id not in new_committed_ids]
+                # Retry only the deferred suffix. Every loop that continues
+                # strictly reduces pending, so persistent failures terminate.
+                continue
             if result.rejected_ops:
-                return result.applied_ops, result.rejected_ops
-            if result.failure_reason:
-                errors = result.verification.errors if result.verification else []
-                return result.applied_ops, [
-                    {"op": None, "reason": result.failure_reason, "errors": errors}
-                ]
-            return result.applied_ops, []
-        if result.rejected_ops:
-            return [], result.rejected_ops
-        errors = result.verification.errors if result.verification else []
-        return [], [{"op": None, "reason": result.failure_reason, "errors": errors}]
+                return applied, result.rejected_ops
+            errors = result.verification.errors if result.verification else []
+            return applied, [
+                {"op": None, "reason": result.failure_reason, "errors": errors}
+            ]
+        return applied, []
 
     def render(self, *, include_superseded: bool = False) -> str:
         assert self.memory_selector is not None
