@@ -128,3 +128,52 @@ def test_compactor_prompt_is_chat_only():
     assert "SUPERSEDE every replaced active entry" in system
     assert "EVAL PROFILE" not in system
     assert "timeline" not in system.lower()
+
+
+def test_compactor_prompt_exposes_canonical_candidate_metadata():
+    memory = _memory()
+    memory.apply_ops(
+        [
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "First fact.",
+                "provenance": [7, 9],
+            },
+            {
+                "op": "ADD",
+                "section": "facts",
+                "text": "Second fact.",
+                "provenance": [11],
+            },
+        ]
+    )
+    candidate = _compactor().detect_candidates(memory)[0]
+
+    system, _ = _compactor()._build_prompt(memory, candidate)
+
+    assert "Canonical candidate entries (copy these source fields exactly):" in system
+    assert '"id": "F1"' in system
+    assert '"section": "facts"' in system
+    assert '"provenance": [\n      7,\n      9' in system
+
+
+def test_compactor_rejects_noncanonical_add_aliases_atomically():
+    memory = _memory()
+    memory.apply_ops(
+        [
+            {"op": "ADD", "section": "facts", "text": "First fact.", "provenance": [1]},
+            {"op": "ADD", "section": "facts", "text": "Second fact.", "provenance": [2]},
+        ]
+    )
+    compactor = _compactor(
+        '[{"op":"SUPERSEDE","id":"F1","reason":"Merged."},'
+        '{"op":"SUPERSEDE","id":"F2","reason":"Merged."},'
+        '{"op":"ADD","key":"facts","entry":"Merged facts.","provenance":[1,2]}]'
+    )
+
+    applied, rejected = compactor.compact(memory)
+
+    assert applied == []
+    assert rejected
+    assert all(entry.status == "active" for entry in memory.entries.values())

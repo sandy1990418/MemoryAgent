@@ -78,6 +78,19 @@ def test_chat_prompt_preserves_user_goal_lifecycle_across_topics():
     assert "Assistant-proposed goals are not user goals unless the user explicitly accepts them" in system
 
 
+def test_chat_prompt_prevents_semantic_duplicate_active_entries():
+    system, _messages = _updater()._build_prompt(
+        _memory(),
+        [Turn(id=4, role="user", content="The project now uses SQLite.")],
+    )
+
+    assert "Before ADD, inspect the active entries for the same semantic subject" in system
+    assert "already represented, use NOOP" in system
+    assert "UPDATE the exact active entry" in system
+    assert "Never create a second active entry merely because equivalent information uses different wording" in system
+    assert "prefer NOOP over a near-duplicate ADD" in system
+
+
 def test_updater_prompt_omits_code_payload_and_bounds_pathological_turns():
     content = "User completed login.\n```python\n" + ("print('noise')\n" * 3000) + "```\nFinal constraint."
     system, _messages = _updater()._build_prompt(
@@ -114,4 +127,8 @@ def test_compactor_prompt_preserves_history_and_canonical_entry_rules():
     assert "SUPERSEDE every replaced active entry" in system
     assert "Canonical ADD provenance must be the union" in system
     assert "Never operate on or re-activate a superseded entry" in system
+    assert 'SUPERSEDE: {"op":"SUPERSEDE","id":"F1"' in system
+    assert 'ADD: {"op":"ADD","section":"facts"' in system
+    assert '"provenance":[1,2]' in system
+    assert "Do not emit UPDATE during compaction" in system
     assert messages[0]["content"].startswith("Return subject-based compaction")

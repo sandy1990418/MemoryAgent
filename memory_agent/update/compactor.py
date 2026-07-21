@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -81,10 +82,38 @@ class MemoryCompactor:
         self, memory: Memory, candidate: CompactionCandidate | None = None
     ) -> tuple[str, list[dict]]:
         entries = list(candidate.entries) if candidate is not None else []
-        rendered = memory.render(entries=entries) or "(No candidate entries.)"
+        rendered = self._render_candidate(memory, entries)
         return build_compactor_prompt(
             sections=self.sections,
             current_memory=rendered,
+        )
+
+    @staticmethod
+    def _render_candidate(memory: Memory, entries: list[MemoryEntry]) -> str:
+        """Render candidate text together with the canonical source fields.
+
+        The normal memory renderer intentionally omits provenance from user
+        context. Compaction needs those structural ids to produce a canonical
+        replacement, so expose them in a bounded, machine-readable block next
+        to the human-readable entry text. Keeping this at the compactor
+        boundary avoids changing the public memory-rendering contract.
+        """
+        rendered = memory.render(entries=entries) or "(No candidate entries.)"
+        if not entries:
+            return rendered
+        metadata = [
+            {
+                "id": entry.id,
+                "section": entry.section,
+                "text": entry.text,
+                "provenance": list(entry.provenance),
+            }
+            for entry in entries
+        ]
+        return (
+            f"{rendered}\n\n"
+            "Canonical candidate entries (copy these source fields exactly):\n"
+            f"{json.dumps(metadata, ensure_ascii=False, indent=2)}"
         )
 
     def detect_candidates(self, memory: Memory) -> list[CompactionCandidate]:
@@ -145,7 +174,7 @@ class MemoryCompactor:
         visible_ids = {entry.id for entry in candidate.entries}
         if len(candidate.entries) > self.max_candidate_entries:
             return self._reject(candidate, "budget")
-        rendered = memory.render(entries=list(candidate.entries))
+        rendered = self._render_candidate(memory, list(candidate.entries))
         tokens = self.token_estimator(rendered)
         candidate_token_limit = self.max_candidate_tokens
         if tokens > candidate_token_limit:

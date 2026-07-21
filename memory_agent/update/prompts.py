@@ -67,6 +67,8 @@ def _chat_updater_system(
         "- Do not save a bare question, greeting, short answer, generic recommendation, or unaccepted proposal as progress. Do not copy snippets turn-by-turn.\n"
         "- Do not save generic assistant advice as a user or project fact.\n"
         "- Keep semantic entries normally under 25 words. A progress entry may use up to 60 words when needed to preserve concrete chronology for later compaction. Prefer one consolidated entry per topic per batch. Do not infer missing details.\n"
+        "- Before ADD, inspect the active entries for the same semantic subject. If the turns are already represented, use NOOP; if they add material detail to that subject, UPDATE the exact active entry and consolidate the latest text instead of creating another entry.\n"
+        "- Never create a second active entry merely because equivalent information uses different wording. When the subject match is uncertain or no exact visible id is available, prefer NOOP over a near-duplicate ADD. Keep genuinely distinct claims separate.\n"
         "- A batch may produce at most three concise ADD or UPDATE operations.\n"
         "- For a reversal, MUST SUPERSEDE the old active entry, then ADD a new replacement entry. Never use UPDATE for that case.\n"
         "- UPDATE/SUPERSEDE ids must appear in Current memory. Never use a turn_id as an entry id; if no exact id exists, ADD or NOOP.\n"
@@ -121,6 +123,11 @@ def build_compactor_prompt(
         "Return a JSON array containing only SUPERSEDE, ADD, or NOOP.\n\n"
         "Available sections:\n"
         f"{sections_block}\n\n"
+        "Output schema (use these keys exactly; do not invent aliases):\n"
+        '- SUPERSEDE: {"op":"SUPERSEDE","id":"F1","reason":"same subject merged"}\n'
+        '- ADD: {"op":"ADD","section":"facts","text":"canonical entry text","provenance":[1,2]}\n'
+        '- NOOP: {"op":"NOOP"}\n'
+        "SUPERSEDE takes only an existing entry id and reason. ADD takes only a valid section key, non-empty text, and provenance turn ids; it does not take id, key, entry, or value fields. Do not emit UPDATE during compaction.\n\n"
         "Rules:\n"
         "1. Merge only active entries about the same semantic subject.\n"
         "2. SUPERSEDE every replaced active entry, then ADD one canonical entry.\n"
