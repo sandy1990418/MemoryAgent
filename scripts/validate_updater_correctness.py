@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import time
 
-from memory_agent.core.sections import AGENT_SECTIONS, PRACTICAL_SECTIONS
+from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.core.transcript import Turn
-from memory_agent.policies.structured import get_memory_policy
+from memory_agent.policies.structured import CHAT_POLICY
 from memory_agent.update.operations import UpdateFailed
 from memory_agent.update.updater import MemoryUpdater
 
@@ -30,14 +30,13 @@ def run_case(name: str, turns: list[Turn], *, fail: bool = False) -> dict:
     llm = RecordingLLM(fail=fail)
     updater = MemoryUpdater(
         llm=llm,
-        sections=AGENT_SECTIONS,
+        sections=CHAT_SECTIONS,
+        policy=CHAT_POLICY,
         evicted_turn_token_budget=1200,
         update_memory_token_budget=600,
         max_candidate_entries=8,
-        max_legacy_candidate_entries=4,
-        enable_llm_gate=True,
     )
-    memory = Memory(sections=AGENT_SECTIONS)
+    memory = Memory(sections=CHAT_SECTIONS, policy=CHAT_POLICY)
     before = memory.to_state()
     updater._turns_within_budget(turns)
     budget_selection = updater.turn_selection_reports[-1]
@@ -63,7 +62,7 @@ def run_case(name: str, turns: list[Turn], *, fail: bool = False) -> dict:
         "turns": [turn.__dict__ for turn in turns],
         "selection": budget_selection,
         "prompt_tail": prompt_trace,
-        "deterministic_and_llm_ops": prepared.applied_ops if prepared else [],
+        "llm_ops": prepared.applied_ops if prepared else [],
         "rejected_ops": prepared.rejected_ops if prepared else [],
         "trial_memory": prepared.trial_memory.to_state() if prepared else None,
         "live_before": before,
@@ -79,15 +78,13 @@ def run_lifecycle_case(name: str, updates: list[Turn]) -> dict:
     llm = RecordingLLM()
     updater = MemoryUpdater(
         llm=llm,
-        sections=PRACTICAL_SECTIONS,
-        policy=get_memory_policy("chat"),
+        sections=CHAT_SECTIONS,
+        policy=CHAT_POLICY,
         evicted_turn_token_budget=1200,
         update_memory_token_budget=600,
         max_candidate_entries=8,
-        max_legacy_candidate_entries=4,
-        enable_llm_gate=True,
     )
-    memory = Memory(sections=PRACTICAL_SECTIONS)
+    memory = Memory(sections=CHAT_SECTIONS, policy=CHAT_POLICY)
     states = []
     started = time.perf_counter()
     for turn in updates:
@@ -122,8 +119,6 @@ def main() -> None:
         run_case("rejection", [Turn(7, "assistant", "I propose Redis."), Turn(8, "user", "No, reject that proposal.")]),
         run_case("correction", [Turn(9, "user", "The status is blocked."), Turn(10, "assistant", "Noted."), Turn(11, "user", "Actually, correction: the status is shipped.")]),
         run_case("status_changes", [Turn(12, "user", "The project is planned."), Turn(13, "assistant", "Noted."), Turn(14, "user", "Actually it is active."), Turn(15, "assistant", "Noted."), Turn(16, "user", "It is no longer active; it is complete.")]),
-        run_case("single_tool_result", [Turn(17, "user", "Check status."), Turn(18, "assistant", "[tool_call] status({})"), Turn(19, "tool", "healthy")]),
-        run_case("multiple_tool_results", [Turn(20, "user", "Check both."), Turn(21, "assistant", "[tool_call] checks({})"), Turn(22, "tool", "db healthy"), Turn(23, "tool", "api healthy")]),
         run_case("unresolved_user", [Turn(24, "user", "What is still blocked?")]),
         run_case("optional_older_mandatory_recent", [Turn(25, "user", "old " * 1500), Turn(26, "assistant", "old answer"), Turn(27, "user", "new mandatory request"), Turn(28, "assistant", "new answer")]),
         run_case("failure_retry", [Turn(29, "user", "Actually, I have never deployed it."), Turn(30, "assistant", "Understood.")], fail=True),

@@ -81,8 +81,8 @@ def build_updater_prompt(
     """Build the single chat updater contract.
 
     ``policy`` remains an explicit argument so callers can pass the shared
-    ``CHAT_POLICY`` object, but it is not a profile switch.  Evaluation labels
-    and runner-specific rubrics must never alter this production prompt.
+    ``CHAT_POLICY`` object. Evaluation labels and runner-specific rubrics must
+    never alter this production prompt.
     """
     sections_block = "\n".join(
         f'- key="{section.key}" prefix="{section.prefix}": {section.description}'

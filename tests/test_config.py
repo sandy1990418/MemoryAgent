@@ -29,37 +29,6 @@ def test_product_config_reads_chat_runtime_limits(tmp_path, monkeypatch):
     assert not hasattr(config, "sections")
 
 
-def test_obsolete_profile_environment_does_not_change_product_config(tmp_path, monkeypatch):
-    path = tmp_path / "product.yaml"
-    path.write_text("compaction_threshold: 31\n", encoding="utf-8")
-    monkeypatch.setenv("MEMORY_PROFILE", "agent")
-    monkeypatch.setenv("MEMORY_SECTIONS", "eval")
-
-    config = ProductMemoryConfig.from_yaml_env(path)
-
-    assert config.compaction_threshold == 31
-    assert not hasattr(config, "memory_profile")
-    assert not hasattr(config, "sections")
-
-
-def test_legacy_profile_keys_are_ignored_in_product_yaml(tmp_path, monkeypatch):
-    path = tmp_path / "product.yaml"
-    path.write_text(
-        "memory_profile: eval\n"
-        "sections: exact_values\n"
-        "compaction_threshold: 24\n",
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("MEMORY_PROFILE", raising=False)
-    monkeypatch.delenv("MEMORY_SECTIONS", raising=False)
-
-    config = ProductMemoryConfig.from_yaml_env(path)
-
-    assert config.compaction_threshold == 24
-    assert not hasattr(config, "memory_profile")
-    assert not hasattr(config, "sections")
-
-
 def test_product_config_rejects_invalid_compaction_threshold(tmp_path, monkeypatch):
     path = tmp_path / "product.yaml"
     path.write_text("compaction_threshold: 0\n", encoding="utf-8")
@@ -69,11 +38,9 @@ def test_product_config_rejects_invalid_compaction_threshold(tmp_path, monkeypat
         ProductMemoryConfig.from_yaml_env(path)
 
 
-def test_chat_builder_always_uses_chat_sections_even_with_legacy_yaml(tmp_path):
+def test_chat_builder_uses_the_canonical_chat_sections(tmp_path):
     path = tmp_path / "product.yaml"
     path.write_text(
-        "memory_profile: agent\n"
-        "sections: eval\n"
         "compaction_threshold: 17\n",
         encoding="utf-8",
     )

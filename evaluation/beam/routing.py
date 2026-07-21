@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Iterable
-
 from memory_agent.core.store import Memory
 from memory_agent.retrieval.selector import MemorySelector
 
@@ -24,12 +22,6 @@ def build_oracle_memory_context(
 ) -> tuple[tuple[str, ...], str, str]:
     """Preserve historical BEAM-aware routing for diagnostic comparison only."""
 
-    pinned_by_type: dict[str, Iterable[str]] = {
-        "instruction_following": {"preferences"},
-        "preference_following": {"preferences"},
-        "contradiction_resolution": {"status_changes"},
-        "summarization": {"preferences", "goal", "status_changes"},
-    }
     budgets = {
         "instruction_following": min(max_tokens, 3500),
         "contradiction_resolution": min(max_tokens, 3000),
@@ -42,7 +34,6 @@ def build_oracle_memory_context(
         query=query,
         max_tokens=budget,
         include_superseded=include_superseded,
-        pinned_sections=pinned_by_type.get(question_type, frozenset()),
     )
     rendered = memory.render(
         entries=entries,

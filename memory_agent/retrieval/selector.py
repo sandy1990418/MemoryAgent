@@ -35,14 +35,12 @@ class MemorySelector:
         query: str = "",
         max_tokens: int | None = None,
         include_superseded: bool = False,
-        pinned_sections=None,
     ) -> list[MemoryEntry]:
         return [item.entry for item in self.select_with_scores(
             memory=memory,
             query=query,
             max_tokens=max_tokens,
             include_superseded=include_superseded,
-            pinned_sections=pinned_sections,
         )]
 
     def select_for_answer(
@@ -59,7 +57,6 @@ class MemorySelector:
         query: str = "",
         max_tokens: int | None = None,
         include_superseded: bool = False,
-        pinned_sections=None,
     ) -> list[SelectedMemory]:
         entries = [
             entry for entry in memory.entries.values()

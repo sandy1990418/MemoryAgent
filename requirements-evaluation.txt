@@ -1,7 +1,4 @@
 # Evaluation-only dependencies.  Install separately from the product chat
-# runtime; BEAM and mem0 comparisons are not production memory semantics.
+# runtime; BEAM is evaluation tooling, not production memory semantics.
 -r requirements-framework.txt
-langchain>=1.1
-langgraph>=1.0
-mem0ai>=2.0
 pytest>=8

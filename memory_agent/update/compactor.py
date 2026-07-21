@@ -164,7 +164,6 @@ class MemoryCompactor:
         ops = parse_memory_ops(response)
         if ops is None:
             return self._reject(candidate, "schema")
-        ops = self._normalize_ops(ops)
         ops = [
             op for op in ops if not (isinstance(op, dict) and op.get("op") == "NOOP")
         ]
@@ -216,16 +215,6 @@ class MemoryCompactor:
             return self._reject(candidate, "no_reduction")
         memory.entries, memory.narrative, memory._counters = trial.entries, trial.narrative, trial._counters
         return applied, []
-
-    @staticmethod
-    def _normalize_ops(ops: list[dict]) -> list[dict]:
-        """Normalize operation spelling without translating legacy schemas."""
-        return [
-            {**op, "op": str(op.get("op", "")).upper()}
-            if isinstance(op, dict)
-            else op
-            for op in ops
-        ]
 
     def _validate_ops(self, memory: Memory, ops: list[dict]) -> list[dict]:
         rejected: list[dict] = []
@@ -285,14 +274,7 @@ class MemoryCompactor:
             memory.entries[entry_id].section for entry_id in supersede_ids
         }
         add_sections = {op["section"] for op in adds}
-        protected_sections = {
-            "preferences",
-            "decisions",
-            "failed_attempts",
-            "open_questions",
-            "progress",
-        }
-        missing_sections = (affected_sections & protected_sections) - add_sections
+        missing_sections = affected_sections - add_sections
         if missing_sections:
             return [
                 {

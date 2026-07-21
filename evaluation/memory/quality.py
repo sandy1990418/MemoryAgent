@@ -1,4 +1,9 @@
-"""Deterministic quality signals for active structured memory."""
+"""Evaluation-only heuristic quality signals for structured chat memory.
+
+These diagnostics are intentionally outside :mod:`memory_agent`: they make
+semantic judgments for analysis and must never affect production updates,
+verification, retrieval, or compaction.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +27,6 @@ class MemoryQualityReport:
     duplicate: QualityIndicator
     stale: QualityIndicator
     raw_request: QualityIndicator
-    active_conflict: QualityIndicator
     section_mismatch: QualityIndicator
     future_usefulness: QualityIndicator
 
@@ -35,7 +39,7 @@ _RAW_REQUEST_RE = re.compile(r"^(?:user\s+)?(?:asked|requested|wants?\s+me\s+to|
 
 
 def memory_quality_report(memory: Memory) -> MemoryQualityReport:
-    """Return explicitly heuristic signals; callers may replace them with labeled evidence."""
+    """Return heuristic evaluation signals without changing runtime behavior."""
     active = [entry for entry in memory.entries.values() if entry.status == "active"]
     incomplete_ids = tuple(
         entry.id for entry in active
@@ -54,16 +58,6 @@ def memory_quality_report(memory: Memory) -> MemoryQualityReport:
             duplicate_ids.append(entry.id)
         else:
             seen[key] = entry.id
-    groups: dict[tuple[object, ...], list] = {}
-    for entry in active:
-        identity = entry.subject_identity
-        if identity is None:
-            continue
-        key = (identity.namespace, identity.entity, identity.attribute, identity.qualifier)
-        groups.setdefault(key, []).append(entry)
-    conflicts = tuple(
-        entry.id for entries in groups.values() if len({e.value for e in entries}) > 1 for entry in entries
-    )
     stale = tuple(entry.id for entry in memory.entries.values() if entry.status == "superseded")
     mismatch = tuple(
         entry.id for entry in active
@@ -79,6 +73,6 @@ def memory_quality_report(memory: Memory) -> MemoryQualityReport:
     return MemoryQualityReport(
         canonical=signal(canonical_ids), incomplete=signal(incomplete_ids),
         duplicate=signal(duplicate_ids), stale=signal(stale), raw_request=signal(raw_ids),
-        active_conflict=signal(conflicts), section_mismatch=signal(mismatch),
+        section_mismatch=signal(mismatch),
         future_usefulness=signal(useful),
     )

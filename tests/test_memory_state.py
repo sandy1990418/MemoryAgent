@@ -2,7 +2,6 @@
 
 import pytest
 
-from memory_agent.core.models import MemoryValue, SubjectIdentity
 from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.policies.structured import CHAT_POLICY
@@ -20,8 +19,6 @@ def _populated_memory() -> Memory:
             "section": "facts",
             "text": "Service uses Postgres 16.",
             "provenance": [2],
-            "subject_identity": SubjectIdentity("project", "service", "database"),
-            "value": MemoryValue("Postgres", unit=None),
         },
         {"op": "ADD", "section": "preferences", "text": "User prefers short answers.", "provenance": [3]},
     ])
@@ -48,8 +45,6 @@ def test_state_round_trip_preserves_entries_narrative_and_render():
         assert (copy.section, copy.text, copy.provenance, copy.status, copy.note) == (
             entry.section, entry.text, entry.provenance, entry.status, entry.note
         )
-        assert copy.subject_identity == entry.subject_identity
-        assert copy.value == entry.value
     assert restored.render(include_superseded=True) == memory.render(include_superseded=True)
 
 

@@ -90,8 +90,9 @@ def test_product_config_loads_separate_memory_budgets(tmp_path, monkeypatch):
     path = tmp_path / "product.yaml"
     path.write_text(
         "answer_memory_token_budget: 101\n"
-        "update_memory_token_budget: 202\n"
-        "evicted_turn_token_budget: 303\n"
+        "updater:\n"
+        "  max_visible_memory_tokens: 202\n"
+        "  max_evicted_turn_tokens: 303\n"
     )
     monkeypatch.setenv("UPDATE_MEMORY_TOKEN_BUDGET", "222")
     config = ProductMemoryConfig.from_yaml_env(path)
@@ -122,7 +123,7 @@ def test_evicted_budget_preserves_complete_multiformat_turns():
         Turn(2, "user", "中文完整句子"),
         Turn(3, "user", "mixed 中文 JSON: {\"ok\": true}"),
         Turn(4, "assistant", "```python\nprint('完整')\n```"),
-        Turn(5, "tool", "{\"rows\": [1, 2, 3]}")
+        Turn(5, "assistant", "Result rows: [1, 2, 3].")
     ]
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'), sections=CHAT_SECTIONS,
@@ -150,27 +151,6 @@ def test_evicted_budget_never_orphans_assistant_and_records_mandatory_overflow()
     assert report["oversized_mandatory_group"] is True
     assert report["mandatory_overflow_tokens"] > 0
     assert report["selection_is_contiguous"] is True
-
-
-def test_chinese_oversized_group_and_tool_results_stay_complete():
-    turns = [
-        Turn(1, "user", "需求" * 3000),
-        Turn(2, "assistant", "我會完整處理。"),
-        Turn(3, "user", "請查詢狀態"),
-        Turn(4, "assistant", "[tool_call] status({'project': 'A'})"),
-        Turn(5, "tool", "running"),
-        Turn(6, "tool", "healthy"),
-    ]
-    updater = MemoryUpdater(
-        llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'), sections=CHAT_SECTIONS,
-        evicted_turn_token_budget=1200,
-    )
-
-    selected = updater._turns_within_budget(turns)
-    assert [turn.id for turn in selected] == [3, 4, 5, 6]
-    report = updater.turn_selection_reports[-1]
-    assert report["dropped_turn_ids"] == [1, 2]
-    assert report["groups"][-1]["type"] == "tool_call_result"
 
 
 def test_chat_budget_keeps_complete_newest_exchange_groups():

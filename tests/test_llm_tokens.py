@@ -19,6 +19,29 @@ def test_openai_client_records_token_usage_by_role():
     }
 
 
+def test_openai_client_reads_official_sdk_response_shape():
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="official response"))],
+        usage=SimpleNamespace(prompt_tokens=11, completion_tokens=3),
+    )
+    model = SimpleNamespace(invoke=lambda messages: response)
+    ledger = TokenLedger()
+    client = OpenAIClient(
+        "model",
+        chat_model_factory=lambda _model: model,
+        role="updater",
+        token_ledger=ledger,
+    )
+
+    assert client.complete("system", []) == "official response"
+    assert ledger.to_dict()["updater"] == {
+        "input_tokens": 11,
+        "output_tokens": 3,
+        "total_tokens": 14,
+        "calls": 1,
+    }
+
+
 def test_token_ledger_can_predeclare_required_roles():
     ledger = TokenLedger()
     ledger.ensure_roles("updater", "compactor", "agent", "judge")

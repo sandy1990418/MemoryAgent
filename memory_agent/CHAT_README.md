@@ -1,8 +1,8 @@
 # Chat memory
 
 `memory_agent.application.chat` is the canonical standalone chat-memory
-facade. It exposes the same `CHAT_POLICY` and `CHAT_SECTIONS` used by the
-runtime and keeps optional framework integrations outside the import path.
+facade. It uses the single `CHAT_POLICY` and `CHAT_SECTIONS` contract while
+keeping optional framework integrations outside the import path.
 
 ```python
 from memory_agent.application.chat import build_chat_memory

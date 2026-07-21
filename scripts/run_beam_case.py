@@ -509,7 +509,7 @@ def flatten_message_batches(chat: list[dict[str, Any]], case_id: str = "1") -> l
                 # Keep BEAM's JSON metadata at this evaluation boundary while
                 # constructing ordinary chat messages for the optional
                 # LangChain adapter.  Production memory only sees user and
-                # assistant turns, never generic MemoryEvent instances.
+                # assistant turns; dataset metadata stays in evaluation.
                 for message in pair:
                     role = str(message.get("role", "unknown"))
                     content = str(message.get("content", "")).strip()
@@ -940,7 +940,6 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         active_messages = restore_from_snapshot(
             replay_snapshot,
             memory=structured_middleware.memory,
-            expected_profile="chat",
         )
         print(
             f"Replaying frozen memory snapshot from {args.replay_memory} "
@@ -996,7 +995,6 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             memory_snapshot_path,
             memory=structured_middleware.memory,
             active_messages=active_messages,
-            memory_profile="chat",
             run_id=run_id,
             source_commit=current_source_commit(),
             chat=str(args.chat),
@@ -1016,7 +1014,6 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
         "source_state": current_source_state(),
         "config": beam_config_snapshot(args),
         "memory_mode": "chat",
-        "memory_profile": "chat",
         "chat": str(args.chat),
         "probes": str(args.probes),
         "topics": str(args.topics),
@@ -1029,7 +1026,6 @@ def run(args: argparse.Namespace | BeamRunConfig) -> dict[str, Any]:
             {
                 "run_id": replay_snapshot.get("run_id"),
                 "source_commit": replay_snapshot.get("source_commit"),
-                "memory_profile": replay_snapshot.get("memory_profile"),
                 "chat": replay_snapshot.get("chat"),
             }
             if replay_snapshot is not None

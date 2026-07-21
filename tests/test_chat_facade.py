@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from memory_agent.core.transcript import Turn
 from memory_agent.models.config import ProductMemoryConfig
 from tests.fakes import ScriptedLLM
@@ -19,7 +21,12 @@ def _clear_forbidden_modules() -> None:
             sys.modules.pop(name)
 
 
-def test_chat_facade_updates_practical_memory_without_agent_imports():
+def test_turn_accepts_only_chat_roles():
+    with pytest.raises(ValueError, match="user.*assistant"):
+        Turn(1, "tool", "transient observation")
+
+
+def test_chat_facade_updates_memory_without_optional_imports():
     _clear_forbidden_modules()
     from memory_agent.application.chat import build_chat_memory
 
@@ -79,6 +86,7 @@ def test_chat_source_has_no_forbidden_imports():
     forbidden = (
         "memory_agent.agents",
         "memory_agent.clients.mem0",
+        "evaluation",
         "scripts",
     )
     assert not any(name.startswith(forbidden) for name in imported)
@@ -193,3 +201,41 @@ def test_chat_compacts_after_crossing_configured_threshold():
     assert len(calls) == 2
     assert chat.compactor is not None
     assert chat.compactor.metrics.attempted_calls == 1
+
+
+def test_chat_render_is_bounded_by_answer_memory_budget():
+    from memory_agent.application.chat import build_chat_memory
+
+    chat = build_chat_memory(
+        ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        config=ProductMemoryConfig(answer_memory_token_budget=20),
+        compact=False,
+    )
+    chat.memory.apply_ops_atomically(
+        [
+            {"op": "ADD", "section": "facts", "text": "A" * 40, "provenance": [1]},
+            {"op": "ADD", "section": "facts", "text": "B" * 40, "provenance": [2]},
+        ]
+    )
+
+    rendered = chat.render()
+
+    assert len(rendered) // 4 <= 20
+    assert "B" * 40 in rendered
+    assert "A" * 40 not in rendered
+
+
+def test_chat_update_failure_is_reported_without_mutating_memory():
+    from memory_agent.application.chat import build_chat_memory
+
+    def fail(*_args):
+        raise RuntimeError("transport down")
+
+    chat = build_chat_memory(ScriptedLLM(fail), compact=False)
+    before = chat.memory.to_state()
+
+    applied, rejected = chat.update([Turn(1, "user", "Remember the launch is blocked.")])
+
+    assert applied == []
+    assert rejected and "updater_failed" in rejected[0]["reason"]
+    assert chat.memory.to_state() == before

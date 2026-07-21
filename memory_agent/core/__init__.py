@@ -3,10 +3,7 @@
 from .models import (
     MemoryEntry,
     MemoryPolicyRef,
-    MemoryValue,
     SelectedMemory,
-    SubjectIdentity,
-    SubjectNormalizer,
 )
 from .sections import CHAT_SECTIONS, SectionConfig
 from .store import Memory
@@ -18,12 +15,9 @@ __all__ = [
     "Memory",
     "MemoryEntry",
     "MemoryPolicyRef",
-    "MemoryValue",
     "CHAT_SECTIONS",
     "SectionConfig",
     "SelectedMemory",
-    "SubjectIdentity",
-    "SubjectNormalizer",
     "Transcript",
     "Turn",
     "WorkingWindow",

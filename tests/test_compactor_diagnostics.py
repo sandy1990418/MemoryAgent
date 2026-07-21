@@ -1,4 +1,4 @@
-from memory_agent.adapters.langchain.structured_memory import StructuredMemoryMiddleware
+from memory_agent.adapters.langchain.chat_memory import LangChainChatAdapter
 from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.policies.structured import CHAT_POLICY
@@ -20,7 +20,7 @@ def _middleware(*, threshold=1, enabled=True):
         if enabled
         else None
     )
-    return StructuredMemoryMiddleware(
+    return LangChainChatAdapter(
         memory,
         updater,
         max_tokens=100,

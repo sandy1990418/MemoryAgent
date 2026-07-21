@@ -23,7 +23,7 @@ from __future__ import annotations
 import inspect
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any, Callable
 
 from langchain_core.messages import (
@@ -31,7 +31,6 @@ from langchain_core.messages import (
     AnyMessage,
     BaseMessage,
     HumanMessage,
-    RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -81,10 +80,7 @@ def _content_to_text(content: Any) -> str:
 
 def _message_to_turn(
     message: AnyMessage,
-    *,
-    include_tool: bool = False,
-    max_tool_chars: int | None = None,
-) -> Turn | None:
+) -> tuple[str, str] | None:
     """Convert a durable chat message to a generic memory turn.
 
     ``ToolMessage`` is intentionally ignored.  Tool output is operational
@@ -92,30 +88,18 @@ def _message_to_turn(
     fact would make future memory updates depend on transient tool payloads.
     """
     if isinstance(message, HumanMessage):
-        return Turn(id=0, role="user", content=_content_to_text(message.content))
+        return "user", _content_to_text(message.content)
     if isinstance(message, AIMessage):
-        return Turn(id=0, role="assistant", content=_content_to_text(message.content))
+        return "assistant", _content_to_text(message.content)
     if isinstance(message, ToolMessage):
-        if not include_tool:
-            return None
-        content = _content_to_text(message.content)
-        if max_tool_chars is not None and len(content) > max_tool_chars:
-            content = (
-                content[:max_tool_chars]
-                + "\n[tool output truncated before memory extraction; "
-                "re-run the tool for the full output]"
-            )
-        name = getattr(message, "name", None)
-        if name:
-            content = f"[{name}] {content}"
-        return Turn(id=0, role="tool", content=content)
+        return None
     if isinstance(message, SystemMessage):
         return None
     # Keep custom BaseMessage subclasses useful while avoiding arbitrary
     # framework metadata in durable memory.
     if isinstance(message, BaseMessage):
         role = "user" if message.type in {"human", "user"} else "assistant"
-        return Turn(id=0, role=role, content=_content_to_text(message.content))
+        return role, _content_to_text(message.content)
     return None
 
 
@@ -131,9 +115,8 @@ class LangChainChatAdapter:
     standalone history adapter.  The model is never asked to summarize or
     update memory; those operations are delegated to ``MemoryUpdater``.
 
-    Parameters intentionally mirror the former structured middleware where
-    useful, making migration from that adapter straightforward while removing
-    its agent/LangGraph contract.
+    The adapter accepts and returns ordinary LangChain message sequences; it
+    does not implement an agent-state or middleware protocol.
     """
 
     def __init__(
@@ -143,11 +126,9 @@ class LangChainChatAdapter:
         max_tokens: int,
         *,
         chat_model: Any | None = None,
-        model: Any | None = None,
         evict_fraction: float = 0.5,
         keep_messages: int = 20,
         max_memory_tokens: int | None = None,
-        max_tool_turn_chars: int | None = 2000,
         transcript: Transcript | None = None,
         token_counter: TokenCounter = count_tokens_approximately,
         memory_selector: MemorySelector | None = None,
@@ -157,9 +138,7 @@ class LangChainChatAdapter:
         compact_min_active_entries: int = 30,
         base_system_prompt: str = "",
     ) -> None:
-        if chat_model is not None and model is not None and chat_model is not model:
-            raise ValueError("pass either chat_model or model, not both")
-        self.chat_model = chat_model if chat_model is not None else model
+        self.chat_model = chat_model
         self.memory = memory
         self.updater = updater
         self.policy = policy or memory.policy or updater.policy
@@ -184,7 +163,6 @@ class LangChainChatAdapter:
         self.max_memory_tokens = (
             max_memory_tokens if max_memory_tokens is not None else max_tokens // 2
         )
-        self.max_tool_turn_chars = max_tool_turn_chars
         self.transcript = transcript if transcript is not None else Transcript()
         self.token_counter = token_counter
         self.memory_selector = memory_selector or MemorySelector(
@@ -319,21 +297,16 @@ class LangChainChatAdapter:
     def _mirror_durable_messages(
         self,
         messages: Sequence[AnyMessage],
-        *,
-        include_tools: bool = False,
     ) -> None:
         for message in messages:
             key = str(message.id)
             if key in self._turn_id_by_message_id:
                 continue
-            turn = _message_to_turn(
-                message,
-                include_tool=include_tools,
-                max_tool_chars=self.max_tool_turn_chars,
-            )
-            if turn is None:
+            turn_data = _message_to_turn(message)
+            if turn_data is None:
                 continue
-            appended = self.transcript.append(turn.role, turn.content)
+            role, content = turn_data
+            appended = self.transcript.append(role, content)
             self._turn_id_by_message_id[key] = appended.id
 
     def _turns_for_ids(self, ids: Sequence[str]) -> list[Turn]:
@@ -359,24 +332,15 @@ class LangChainChatAdapter:
 
     def before_model(
         self,
-        messages: Sequence[AnyMessage] | Mapping[str, Any],
-        runtime: Any = None,
-    ) -> list[AnyMessage] | dict[str, Any] | None:
+        messages: Sequence[AnyMessage],
+    ) -> list[AnyMessage]:
         """Evict a safe prefix and return the retained model history.
 
-        Sequence input is the chat-adapter API.  Mapping input (``{"messages":
-        ...}``) is accepted as a lightweight migration aid for callers that
-        previously passed LangGraph state; it still returns ordinary messages,
-        not an agent state update.
+        Messages are removed from local history only after the updater batch
+        commits successfully.
         """
-        state_input = isinstance(messages, Mapping)
-        incoming = messages.get("messages", []) if state_input else messages
-        self.set_messages(list(incoming))
-        # Mapping input is retained solely as a low-level migration shim for
-        # callers of the former agent middleware.  The canonical sequence API
-        # never persists tools; old state callers can still inspect a bounded
-        # tool turn while migrating to this chat adapter.
-        self._mirror_durable_messages(self._history, include_tools=state_input)
+        self.set_messages(list(messages))
+        self._mirror_durable_messages(self._history)
 
         pending = self._pending_prefix()
         if pending is not None:
@@ -388,10 +352,7 @@ class LangChainChatAdapter:
             evicted_turns = self._turns_for_ids(evicted_ids)
 
         if cutoff <= 0:
-            # A state mapping is a compatibility input, not the adapter's
-            # public contract.  Returning ``None`` preserves the old hook's
-            # no-op signal while sequence callers get ordinary messages.
-            return None if state_input else self.messages
+            return self.messages
 
         # Do not send operational tool output to the updater.  A tool-only
         # prefix is safe to drop after the no-op transaction succeeds.
@@ -399,12 +360,7 @@ class LangChainChatAdapter:
             self._history = self._history[cutoff:]
             self._pending_message_ids = None
             self._pending_turns = ()
-            retained = self.messages
-            return (
-                {"messages": [RemoveMessage(id="__remove_all__"), *retained]}
-                if state_input
-                else retained
-            )
+            return self.messages
 
         try:
             self.service.update_verifier = self.update_verifier
@@ -413,7 +369,7 @@ class LangChainChatAdapter:
             logger.warning("LangChain chat memory update failed; retrying: %s", exc)
             self._pending_message_ids = tuple(_message_ids(evicted))
             self._pending_turns = tuple(evicted_turns)
-            return None if state_input else self.messages
+            return self.messages
 
         if (
             not update_result.committed
@@ -426,17 +382,12 @@ class LangChainChatAdapter:
             )
             self._pending_message_ids = tuple(_message_ids(evicted))
             self._pending_turns = tuple(evicted_turns)
-            return None if state_input else self.messages
+            return self.messages
 
         self._history = self._history[cutoff:]
         self._pending_message_ids = None
         self._pending_turns = ()
-        retained = self.messages
-        return (
-            {"messages": [RemoveMessage(id="__remove_all__"), *retained]}
-            if state_input
-            else retained
-        )
+        return self.messages
 
     @staticmethod
     def _query_from_messages(messages: Sequence[AnyMessage]) -> str:
@@ -471,24 +422,6 @@ class LangChainChatAdapter:
         prompt = self._memory_system_prompt(system_prompt)
         history = [message for message in self._history if not isinstance(message, SystemMessage)]
         return ([SystemMessage(content=prompt)] if prompt else []) + history
-
-    def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
-        """Inject answer-time memory into a request-like object.
-
-        This duck-typed helper supports common LangChain Runnable request
-        objects without importing ``langchain.agents`` or ``ModelRequest``.
-        It is a convenience bridge only; applications should prefer
-        :meth:`prepare_messages` and :meth:`invoke`.
-        """
-        request_messages = getattr(request, "messages", None)
-        if request_messages is not None:
-            self.set_messages(list(request_messages))
-        prompt = self._memory_system_prompt(getattr(request, "system_prompt", "") or "")
-        if hasattr(request, "override"):
-            request = request.override(system_prompt=prompt)
-        else:
-            request.system_prompt = prompt
-        return handler(request)
 
     def _maybe_compact(self) -> None:
         """Compatibility wrapper around framework-neutral compaction."""
@@ -560,19 +493,6 @@ class LangChainChatAdapter:
         return response
 
 
-# Descriptive aliases keep imports readable for applications while retaining
-# one implementation and one state machine.
-ChatMemoryAdapter = LangChainChatAdapter
-StructuredMemoryChatAdapter = LangChainChatAdapter
-ChatMemoryMiddleware = LangChainChatAdapter
-LangChainChatMemory = LangChainChatAdapter
-LangChainChatMemoryMiddleware = LangChainChatAdapter
-
 __all__ = [
-    "ChatMemoryAdapter",
-    "ChatMemoryMiddleware",
-    "LangChainChatMemory",
-    "LangChainChatMemoryMiddleware",
     "LangChainChatAdapter",
-    "StructuredMemoryChatAdapter",
 ]

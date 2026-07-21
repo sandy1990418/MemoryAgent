@@ -11,7 +11,7 @@ from memory_agent.core.store import Memory
 from memory_agent.core.transcript_store import Transcript
 from memory_agent.core.window import WorkingWindow
 from memory_agent.retrieval.selector import MemorySelector
-from memory_agent.update.updater import MemoryUpdater, UpdateFailed
+from memory_agent.update.updater import MemoryUpdater
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +68,7 @@ class MemorySession:
         if not batch:
             return
 
-        try:
-            result = self.service.update(batch)
-        except UpdateFailed as exc:
-            logger.warning("Memory update failed; keeping evicted turns for retry: %s", exc)
-            return
+        result = self.service.update(batch)
 
         if not result.committed:
             logger.warning(

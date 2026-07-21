@@ -13,7 +13,7 @@ from memory_agent.core.store import Memory
 from memory_agent.core.transcript_store import Transcript
 from memory_agent.core.window import WorkingWindow
 from memory_agent.retrieval.context import build_answer_memory_context
-from memory_agent.retrieval.quality import memory_quality_report
+from evaluation.memory.quality import memory_quality_report
 from memory_agent.retrieval.selector import MemorySelector
 from memory_agent.update.compactor import MemoryCompactor
 from memory_agent.update.updater import MemoryUpdater, UpdateFailed

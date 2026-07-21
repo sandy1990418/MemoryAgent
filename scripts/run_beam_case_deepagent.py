@@ -33,14 +33,14 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage
 
 from memory_agent.clients.llm import OpenAIClient, TokenLedger
-from memory_agent.clients.llm import LangChainTokenCallback
+from memory_agent.adapters.langchain.callbacks import LangChainTokenCallback
 from memory_agent.application.chat import ChatMemory
 from scripts.beam_models import (
     BeamDeepAgentRunConfig,
     beam_config_from_argv,
 )
 from memory_agent.models.config import product_config_from_argv
-from memory_agent.adapters.langchain.structured_memory import _content_to_text
+from memory_agent.adapters.langchain.chat import _content_to_text
 from scripts.run_beam_case import (
     DEFAULT_RESULTS_DIR,
     beam_answers_from_results,
@@ -366,7 +366,6 @@ def run(args: argparse.Namespace | BeamDeepAgentRunConfig) -> dict[str, Any]:
         "source_state": current_source_state(),
         "config": beam_config_snapshot(args),
         "memory_mode": memory_mode,
-        "memory_profile": "chat",
         "chat": str(args.chat),
         "probes": str(args.probes),
         "topics": str(args.topics),

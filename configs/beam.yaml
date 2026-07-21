@@ -13,7 +13,6 @@ max_questions_per_type: null
 # answer_model: gpt-5.4-nano
 # memory_model: gpt-5.4-nano
 # judge_model: gpt-5.4-nano
-# mem0_llm_model: gpt-5.4-nano
 # Retrieval and structured-memory knobs. Env overrides use the BEAM_ prefix
 # with the upper-cased key, e.g. BEAM_TOP_K, BEAM_STRUCTURED_MAX_TOKENS.
 top_k: 8
@@ -28,6 +27,6 @@ answer_memory_selection: all
 structured_evict_fraction: 0.5
 structured_keep_messages: 5
 recursion_limit: 50
-# Paired chat-profile comparisons must use the same total retrieved-context
+# Paired chat-memory comparisons must use the same total retrieved-context
 # budget for every variant. Override with BEAM_FIXED_TOKEN_BUDGETS=256,512,1024.
 fixed_token_budgets: [256, 512, 1024]

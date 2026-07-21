@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from threading import RLock
 from typing import Callable
 
 from memory_agent.core.models import (
     MemoryEntry,
     MemoryPolicyRef,
-    MemoryValue,
-    SubjectIdentity,
 )
 from memory_agent.core.sections import CHAT_SECTIONS, SectionConfig
 
@@ -94,8 +91,6 @@ class Memory:
                 provenance=list(entry.provenance),
                 status=entry.status,
                 note=entry.note,
-                subject_identity=entry.subject_identity,
-                value=entry.value,
             )
             for entry_id, entry in self.entries.items()
         }
@@ -135,10 +130,6 @@ class Memory:
                 "status": entry.status,
                 "note": entry.note,
             }
-            if entry.subject_identity is not None:
-                state["subject_identity"] = asdict(entry.subject_identity)
-            if entry.value is not None:
-                state["value"] = asdict(entry.value)
             entries.append(state)
         return {
             "entries": entries,
@@ -153,8 +144,6 @@ class Memory:
             section = raw.get("section")
             if section not in self._section_by_key:
                 raise ValueError(f"unknown section in memory state: {section}")
-            subject = raw.get("subject_identity")
-            value = raw.get("value")
             entry = MemoryEntry(
                 id=str(raw["id"]),
                 section=section,
@@ -162,10 +151,6 @@ class Memory:
                 provenance=list(raw.get("provenance", [])),
                 status=raw.get("status", "active"),
                 note=raw.get("note", ""),
-                subject_identity=(
-                    SubjectIdentity(**subject) if isinstance(subject, dict) else None
-                ),
-                value=MemoryValue(**value) if isinstance(value, dict) else None,
             )
             entries[entry.id] = entry
 
@@ -212,8 +197,6 @@ class Memory:
                 section=section,
                 text=text,
                 provenance=list(provenance),
-                subject_identity=op.get("subject_identity"),
-                value=op.get("value"),
             )
             return True
 
@@ -232,10 +215,6 @@ class Memory:
                 return "invalid provenance"
             entry.text = text
             entry.provenance = sorted(set(entry.provenance) | set(provenance))
-            if "subject_identity" in op:
-                entry.subject_identity = op["subject_identity"]
-            if "value" in op:
-                entry.value = op["value"]
             return True
 
         if kind == "SUPERSEDE":

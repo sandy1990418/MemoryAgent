@@ -115,10 +115,9 @@ def test_chat_models_are_cached_per_resolved_model_name():
     assert calls == ["gpt-5.4-nano"]
 
 
-def test_default_constructor_does_not_require_langchain_openai_to_be_imported():
-    # Constructing the client (without calling complete()) must not import
-    # langchain_openai eagerly -- that only happens lazily inside
-    # OpenAIClient._build_chat_model on first use with the real factory.
+def test_default_constructor_does_not_create_openai_client_eagerly():
+    # Constructing the client (without calling complete()) must not create a
+    # provider client; that only happens on the first real completion.
     client = OpenAIClient("gpt-5.4-nano")
 
     assert client.model == "gpt-5.4-nano"

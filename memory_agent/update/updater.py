@@ -135,7 +135,6 @@ class MemoryUpdater:
         # Fail fast on section mismatches instead of silently running
         # with retention behavior the caller did not intend.
         validate_policy_sections(self.policy, sections)
-        self._section_key_by_prefix = {section.prefix.lower(): section.key for section in sections}
 
     def update_token_usage(self) -> dict:
         """Return per-call and aggregate estimated/provider attribution."""
@@ -280,8 +279,6 @@ class MemoryUpdater:
     @staticmethod
     def _group_type(turns: list[Turn]) -> str:
         roles = {turn.role for turn in turns}
-        if "tool" in roles:
-            return "tool_call_result"
         if turns and turns[0].role == "user" and len(turns) == 1:
             return "unresolved_user"
         if turns and turns[0].role == "user" and "assistant" in roles:
@@ -448,7 +445,6 @@ class MemoryUpdater:
                     f"Could not parse a JSON ops array after retry exhaustion: {response!r}"
                 )
 
-            ops = self._normalize_ops(ops, memory)
             hidden_id_rejections = [
                 {"op": op, "reason": "UPDATE/SUPERSEDE id was not visible to updater"}
                 for op in ops
@@ -619,38 +615,6 @@ class MemoryUpdater:
             mandatory_overflow_tokens=self.turn_selection_reports[-1]["mandatory_overflow_tokens"],
         ))
 
-    def _normalize_ops(self, ops: list[dict], memory: Memory) -> list[dict]:
-        normalized_ops: list[dict] = []
-        for op in ops:
-            if not isinstance(op, dict):
-                normalized_ops.append(op)
-                continue
-
-            normalized = dict(op)
-            kind = normalized.get("op")
-            if kind == "ADD":
-                section = normalized.get("section")
-                if isinstance(section, str):
-                    section_key = self._section_key_by_prefix.get(section.lower())
-                    if section_key is not None:
-                        normalized["section"] = section_key
-            elif (
-                isinstance(kind, str)
-                and kind.lower() in self._section_key_by_prefix
-                and "section" not in normalized
-                and "text" in normalized
-                and "provenance" in normalized
-            ):
-                normalized["op"] = "ADD"
-                normalized["section"] = self._section_key_by_prefix[kind.lower()]
-            elif kind in {"UPDATE", "SUPERSEDE"}:
-                entry_id = self._normalize_entry_id(normalized.get("id"), memory)
-                if entry_id is not None:
-                    normalized["id"] = entry_id
-            normalized_ops.append(normalized)
-        return normalized_ops
-
-
     def _validate_structural_ops(
         self,
         ops: list[dict],
@@ -674,7 +638,7 @@ class MemoryUpdater:
                 if kind == "NOOP":
                     accepted.append(op)
                     continue
-                if kind == "ADD":
+                elif kind == "ADD":
                     section = op.get("section")
                     text = op.get("text")
                     if section not in allowed_sections:
@@ -716,13 +680,6 @@ class MemoryUpdater:
         if limit is None or limit < 1:
             return ops
         return ops[:limit]
-
-    @staticmethod
-    def _normalize_entry_id(entry_id: object, memory: Memory) -> str | None:
-        if isinstance(entry_id, str):
-            if entry_id in memory.entries:
-                return entry_id
-        return None
 
     @staticmethod
     def _validate_provenance(ops: list[dict], evicted_turns: list[Turn]) -> list[dict]:

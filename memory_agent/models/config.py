@@ -115,18 +115,18 @@ class ProductMemoryConfig:
         updater_data = data.get("updater", {})
         if not isinstance(updater_data, dict):
             updater_data = {}
-        def updater_int(key: str, env: str, legacy_key: str, default: int) -> int:
+        def updater_int(key: str, env: str, default: int) -> int:
             raw = os.getenv(env)
             if raw not in (None, ""):
                 return int(raw)
-            return int(updater_data.get(key, data.get(legacy_key, default)))
+            return int(updater_data.get(key, default))
         return cls(
             compaction_threshold=compaction_threshold,
             memory_model=str(config_value(data, "memory_model", "MEMORY_MODEL", cls.memory_model)),
             answer_memory_token_budget=int(config_value(data, "answer_memory_token_budget", "ANSWER_MEMORY_TOKEN_BUDGET", cls.answer_memory_token_budget)),
-            update_memory_token_budget=updater_int("max_visible_memory_tokens", "UPDATE_MEMORY_TOKEN_BUDGET", "update_memory_token_budget", cls.update_memory_token_budget),
-            evicted_turn_token_budget=updater_int("max_evicted_turn_tokens", "EVICTED_TURN_TOKEN_BUDGET", "evicted_turn_token_budget", cls.evicted_turn_token_budget),
-            updater_max_candidate_entries=updater_int("max_candidate_entries", "UPDATER_MAX_CANDIDATE_ENTRIES", "updater_max_candidate_entries", cls.updater_max_candidate_entries),
+            update_memory_token_budget=updater_int("max_visible_memory_tokens", "UPDATE_MEMORY_TOKEN_BUDGET", cls.update_memory_token_budget),
+            evicted_turn_token_budget=updater_int("max_evicted_turn_tokens", "EVICTED_TURN_TOKEN_BUDGET", cls.evicted_turn_token_budget),
+            updater_max_candidate_entries=updater_int("max_candidate_entries", "UPDATER_MAX_CANDIDATE_ENTRIES", cls.updater_max_candidate_entries),
         )
 
 def product_config_from_argv(

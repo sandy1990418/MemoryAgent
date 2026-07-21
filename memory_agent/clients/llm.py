@@ -43,22 +43,6 @@ class TokenLedger:
         }
 
 
-def __getattr__(name: str) -> Any:
-    """Load framework callbacks only when a caller explicitly requests one.
-
-    The core LLM client and token ledger are intentionally usable in a plain
-    Python environment.  LangChain callback support lives behind this lazy
-    attribute so importing ``memory_agent.application.chat`` never imports
-    LangChain (even when it happens to be installed).
-    """
-    if name == "LangChainTokenCallback":
-        from memory_agent.adapters.langchain.callbacks import LangChainTokenCallback
-
-        globals()[name] = LangChainTokenCallback
-        return LangChainTokenCallback
-    raise AttributeError(name)
-
-
 def estimate_tokens(text: str) -> int:
     """Small deterministic fallback when the provider omits usage metadata."""
     return max(1, (len(text or "") + 3) // 4) if text else 0
@@ -71,6 +55,12 @@ def response_token_usage(response: Any, prompt_text: str, output_text: str) -> t
         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
         if input_tokens is not None or output_tokens is not None:
             return int(input_tokens or 0), int(output_tokens or 0)
+    provider_usage = getattr(response, "usage", None)
+    if provider_usage is not None:
+        input_tokens = getattr(provider_usage, "prompt_tokens", None)
+        output_tokens = getattr(provider_usage, "completion_tokens", None)
+        if input_tokens is not None or output_tokens is not None:
+            return int(input_tokens or 0), int(output_tokens or 0)
     return estimate_tokens(prompt_text), estimate_tokens(output_text)
 
 
@@ -81,8 +71,21 @@ class LLMClient(Protocol):
         ...
 
 
+class _OpenAIChatModel:
+    """Small adapter around the official OpenAI Python client."""
+
+    def __init__(self, model: str) -> None:
+        from openai import OpenAI
+
+        self.model = model
+        self.client = OpenAI()
+
+    def invoke(self, messages: list[dict]) -> Any:
+        return self.client.chat.completions.create(model=self.model, messages=messages)
+
+
 class OpenAIClient:
-    """Thin wrapper around `langchain_openai.ChatOpenAI`.
+    """Thin wrapper around the official OpenAI Python client.
 
     `model` may carry an "openai:" prefix matching the demo env-var
     convention; the prefix is stripped before calling the API. The class caches
@@ -111,9 +114,7 @@ class OpenAIClient:
 
     @staticmethod
     def _build_chat_model(model: str) -> Any:
-        from langchain_openai import ChatOpenAI  # lazy import
-
-        return ChatOpenAI(model=model)
+        return _OpenAIChatModel(model)
 
     def _get_chat_model(self, model: str) -> Any:
         chat_model = self._chat_models.get(model)
@@ -137,6 +138,11 @@ class OpenAIClient:
     @staticmethod
     def _extract_text(response: Any) -> str:
         """Pull the assistant text out of a chat model response."""
+        choices = getattr(response, "choices", None)
+        if choices:
+            content = getattr(getattr(choices[0], "message", None), "content", None)
+            if content is not None:
+                return str(content)
         text_accessor = getattr(response, "text", None)
         if text_accessor is not None:
             return str(text_accessor)

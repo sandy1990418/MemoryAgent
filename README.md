@@ -29,13 +29,12 @@ does not import optional framework integrations or evaluation tooling.
 memory_agent/
   core/                    framework-neutral turns, entries, store, and schema
   policies/structured.py   the CHAT_POLICY contract
-  normalization/           chat subject/value normalization
-  update/                  extraction, validation, and compaction
+  update/                  LLM updates, structural validation, and compaction
   retrieval/               answer-time selection and rendering
   application/chat.py      canonical chat facade
   application/session.py   framework-free conversation session
   adapters/langchain/      optional LangChain chat adapter
-  clients/llm.py           small LLM protocol and provider adapter
+  clients/llm.py           LLM protocol, token ledger, and OpenAI adapter
   models/config.py         product configuration
 
 configs/product.yaml       chat memory limits and updater settings

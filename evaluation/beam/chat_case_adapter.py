@@ -1,7 +1,7 @@
 """BEAM JSON to public chat-turn conversion.
 
-BEAM metadata remains an evaluation concern and is never represented as a
-production ``MemoryEvent``.  The adapter emits the same ``Turn`` objects used
+BEAM metadata remains an evaluation concern and is not persisted in product
+memory. The adapter emits the same ``Turn`` objects used
 by :func:`memory_agent.build_chat_memory`; callers can keep dataset metadata
 alongside the returned turns when they need it for reports.
 """

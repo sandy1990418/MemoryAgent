@@ -1,4 +1,3 @@
 # Optional LangChain chat adapter (not required by memory_agent.application.chat).
 -r requirements.txt
 langchain-core>=1.1
-langchain-openai>=1.0

@@ -48,7 +48,7 @@ def test_beam_production_and_middleware_service_are_byte_identical():
         {"op": "ADD", "section": "facts", "text": "The project uses SQLite.", "provenance": [1]},
         {"op": "ADD", "section": "decisions", "text": "The team chose Postgres.", "provenance": [2]},
     ])
-    selector = MemorySelector(pinned_sections=frozenset())
+    selector = MemorySelector()
     entries = selector.select_for_answer(
         memory=memory,
         query="Which database does the project use?",
@@ -95,7 +95,7 @@ def test_answer_memory_selection_all_bypasses_selector_budget():
         (),
         {
             "memory": memory,
-            "memory_selector": MemorySelector(pinned_sections=frozenset()),
+            "memory_selector": MemorySelector(),
         },
     )()
 

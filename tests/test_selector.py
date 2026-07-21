@@ -58,7 +58,7 @@ def test_selector_does_not_use_query_or_benchmark_metadata_for_ordering():
 
     first = selector.select(memory, query="first fact", max_tokens=2)
     second = selector.select(memory, query="database migration", max_tokens=2)
-    third = selector.select(memory, query="", max_tokens=2, pinned_sections=frozenset())
+    third = selector.select(memory, query="", max_tokens=2)
 
     assert [entry.id for entry in first] == ["F3", "F2"]
     assert [entry.id for entry in second] == ["F3", "F2"]

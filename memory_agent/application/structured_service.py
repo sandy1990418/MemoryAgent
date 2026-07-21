@@ -31,13 +31,7 @@ class StructuredUpdateResult:
 
 
 class StructuredMemoryService:
-    """Own update transactions independently of any agent framework.
-
-    LangChain middleware and standalone chat facades both delegate here.  This
-    keeps message adaptation at the edge and provides the application boundary
-    that future event adapters can target after translating events into update
-    inputs.
-    """
+    """Own verified, atomic chat-memory updates and optional compaction."""
 
     def __init__(
         self,
@@ -76,7 +70,11 @@ class StructuredMemoryService:
 
     def update(self, turns: list[Turn]) -> StructuredUpdateResult:
         """Prepare, verify and atomically commit one update batch."""
-        prepared = self.updater.prepare_update(self.memory, turns)
+        try:
+            prepared = self.updater.prepare_update(self.memory, turns)
+        except UpdateFailed as exc:
+            logger.warning("Chat memory updater failed; no state was committed: %s", exc)
+            return StructuredUpdateResult(failure_reason=f"updater_failed: {exc}")
         if prepared.rejected_ops:
             return StructuredUpdateResult(
                 applied_ops=prepared.applied_ops,

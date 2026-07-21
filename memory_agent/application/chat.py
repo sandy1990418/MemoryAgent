@@ -1,9 +1,4 @@
-"""Standalone chat/practical-memory application facade.
-
-This module is intentionally small and dependency-light: it exposes the
-practical structured-memory pieces without importing agent, BEAM, eval, or
-mem0 integration code.
-"""
+"""Framework-neutral product facade for structured chat memory."""
 
 from __future__ import annotations
 
@@ -17,6 +12,7 @@ from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.core.transcript import Turn
 from memory_agent.policies.structured import CHAT_POLICY
+from memory_agent.retrieval.selector import MemorySelector
 from memory_agent.update.compactor import MemoryCompactor
 from memory_agent.update.updater import MemoryUpdater
 
@@ -44,14 +40,16 @@ class _RoleRecordingLLM:
 
 @dataclass
 class ChatMemory:
-    """Practical chat memory package suitable for standalone handoff."""
+    """Production chat memory package suitable for standalone handoff."""
 
     memory: Memory
     updater: MemoryUpdater
     compactor: MemoryCompactor | None = None
     compact_min_active_entries: int = 30
+    answer_memory_token_budget: int = 600
     token_ledger: TokenLedger | None = None
     service: StructuredMemoryService | None = None
+    memory_selector: MemorySelector | None = None
 
     def __post_init__(self) -> None:
         if self.service is None:
@@ -62,6 +60,8 @@ class ChatMemory:
                 compactor=self.compactor,
                 compact_min_active_entries=self.compact_min_active_entries,
             )
+        if self.memory_selector is None:
+            self.memory_selector = MemorySelector(policy=self.memory.policy)
 
     def token_usage(self) -> dict[str, dict[str, int]]:
         """Token spend per role ("updater"/"compactor") for this chat memory."""
@@ -78,7 +78,17 @@ class ChatMemory:
         return [], [{"op": None, "reason": result.failure_reason, "errors": errors}]
 
     def render(self, *, include_superseded: bool = False) -> str:
-        return self.memory.render(include_superseded=include_superseded)
+        assert self.memory_selector is not None
+        entries = self.memory_selector.select(
+            memory=self.memory,
+            max_tokens=self.answer_memory_token_budget,
+            include_superseded=include_superseded,
+        )
+        return self.memory.render(
+            entries=entries,
+            include_superseded=include_superseded,
+            max_tokens=self.answer_memory_token_budget,
+        )
 
 
 def build_chat_memory(
@@ -88,7 +98,7 @@ def build_chat_memory(
     config: ProductMemoryConfig | None = None,
     config_path: str | Path = "configs/product.yaml",
 ) -> ChatMemory:
-    """Build chat memory from product YAML/env without agent/eval/BEAM imports."""
+    """Build chat memory from the product configuration."""
     product = config or ProductMemoryConfig.from_yaml_env(config_path)
     ledger = TokenLedger()
     ledger.ensure_roles("updater", "compactor")
@@ -128,5 +138,6 @@ def build_chat_memory(
         updater=updater,
         compactor=compactor,
         compact_min_active_entries=product.compaction_threshold,
+        answer_memory_token_budget=product.answer_memory_token_budget,
         token_ledger=ledger,
     )

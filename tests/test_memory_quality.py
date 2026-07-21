@@ -2,7 +2,7 @@
 
 from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
-from memory_agent.retrieval.quality import memory_quality_report
+from evaluation.memory.quality import memory_quality_report
 
 
 def test_quality_report_exposes_labeled_indicators():

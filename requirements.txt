@@ -1,5 +1,5 @@
 # Framework-free chat runtime.  Optional integrations live in the files
 # below so importing/building chat memory does not require LangChain, LangGraph
-# or mem0.
+# or optional framework adapters.
 openai>=1.60
 python-dotenv>=1.0

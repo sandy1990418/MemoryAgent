@@ -3,9 +3,10 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from memory_agent.clients.llm import LangChainTokenCallback, TokenLedger
-from memory_agent.adapters.langchain.structured_memory import StructuredMemoryMiddleware
-from memory_agent.core.sections import AGENT_SECTIONS
+from memory_agent.adapters.langchain.callbacks import LangChainTokenCallback
+from memory_agent.clients.llm import TokenLedger
+from memory_agent.application.chat import ChatMemory
+from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.update.updater import MemoryUpdater
 from scripts.run_beam_case_deepagent import (
@@ -95,7 +96,7 @@ class FakeAgent:
 
 
 def test_ask_agent_includes_chronological_order_with_structured_memory():
-    memory = Memory(sections=AGENT_SECTIONS)
+    memory = Memory(sections=CHAT_SECTIONS)
     memory.apply_ops(
         [
             {
@@ -112,13 +113,12 @@ def test_ask_agent_includes_chronological_order_with_structured_memory():
             },
         ]
     )
-    structured_middleware = StructuredMemoryMiddleware(
+    structured_middleware = ChatMemory(
         memory=memory,
         updater=MemoryUpdater(
             llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
-            sections=AGENT_SECTIONS,
+            sections=CHAT_SECTIONS,
         ),
-        max_tokens=1000,
     )
     agent = FakeAgent()
 
@@ -144,7 +144,7 @@ def test_ask_agent_includes_chronological_order_with_structured_memory():
     )
 
 def test_ask_agent_surfaces_recorded_denials_block():
-    memory = Memory(sections=AGENT_SECTIONS)
+    memory = Memory(sections=CHAT_SECTIONS)
     memory.apply_ops(
         [
             {
@@ -161,13 +161,12 @@ def test_ask_agent_surfaces_recorded_denials_block():
             },
         ]
     )
-    structured_middleware = StructuredMemoryMiddleware(
+    structured_middleware = ChatMemory(
         memory=memory,
         updater=MemoryUpdater(
             llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
-            sections=AGENT_SECTIONS,
+            sections=CHAT_SECTIONS,
         ),
-        max_tokens=1000,
     )
     agent = FakeAgent()
 
@@ -208,7 +207,7 @@ def test_system_prompt_without_retrieval_omits_search_tool():
 
 
 def test_ask_agent_without_retrieval_instructs_memory_only_answering():
-    memory = Memory(sections=AGENT_SECTIONS)
+    memory = Memory(sections=CHAT_SECTIONS)
     memory.apply_ops(
         [
             {
@@ -219,13 +218,12 @@ def test_ask_agent_without_retrieval_instructs_memory_only_answering():
             }
         ]
     )
-    structured_middleware = StructuredMemoryMiddleware(
+    structured_middleware = ChatMemory(
         memory=memory,
         updater=MemoryUpdater(
             llm=ScriptedLLM(lambda system, messages: '[{"op": "NOOP"}]'),
-            sections=AGENT_SECTIONS,
+            sections=CHAT_SECTIONS,
         ),
-        max_tokens=1000,
     )
     agent = FakeAgent()
 

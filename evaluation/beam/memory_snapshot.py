@@ -50,14 +50,12 @@ def write_memory_snapshot(
     *,
     memory: Memory,
     active_messages: list[AnyMessage],
-    memory_profile: str,
     run_id: str,
     source_commit: str | None,
     chat: str | None = None,
 ) -> None:
     payload = {
         "snapshot_version": SNAPSHOT_VERSION,
-        "memory_profile": memory_profile,
         "run_id": run_id,
         "source_commit": source_commit,
         "chat": chat,
@@ -80,14 +78,7 @@ def restore_from_snapshot(
     payload: dict[str, Any],
     *,
     memory: Memory,
-    expected_profile: str,
 ) -> list[AnyMessage]:
     """Load snapshot memory state and return its working-context messages."""
-    profile = payload.get("memory_profile")
-    if profile != expected_profile:
-        raise ValueError(
-            f"snapshot memory profile {profile!r} does not match "
-            f"run profile {expected_profile!r}"
-        )
     memory.load_state(payload["memory_state"])
     return deserialize_messages(payload.get("active_messages", []))

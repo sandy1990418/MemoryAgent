@@ -352,7 +352,7 @@ def test_summarization_context_uses_broader_chronology_than_topical_selection():
     ])
     middleware = SimpleNamespace(
         memory=memory,
-        memory_selector=MemorySelector(pinned_sections=frozenset()),
+        memory_selector=MemorySelector(),
     )
     context = build_oracle_answer_context(
         structured_middleware=middleware,
@@ -437,7 +437,7 @@ def test_beam_runner_uses_public_chat_memory_api():
 def test_beam_middleware_uses_product_compaction_threshold(tmp_path):
     product_path = tmp_path / "product.yaml"
     product_path.write_text(
-        "memory_profile: chat\nsections: chat\ncompaction_threshold: 7\n",
+        "compaction_threshold: 7\n",
         encoding="utf-8",
     )
     args = SimpleNamespace(
