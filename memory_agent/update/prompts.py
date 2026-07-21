@@ -138,7 +138,8 @@ def build_compactor_prompt(
         "6. Never operate on or re-activate a superseded entry.\n"
         "7. Do not merge entries only because they share broad words.\n"
         "8. Use NOOP when no safe same-subject consolidation exists.\n"
-        "9. Return the JSON array only.\n\n"
+        "9. ADD text is user-visible canonical memory, not an audit log: never copy source entry ids, operation names, provenance arrays, or merge bookkeeping into it.\n"
+        "10. Return the JSON array only.\n\n"
         "Current memory:\n"
         f"{current_memory}"
     )

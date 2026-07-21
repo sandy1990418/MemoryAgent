@@ -53,8 +53,11 @@ class StructuredMemoryService:
         )
         self.compactor = compactor
         self.compact_min_active_entries = compact_min_active_entries
-        self._last_compaction_failure_active: int | None = None
-        self._compaction_retry_growth = 10
+        # A rejected candidate should not suppress review of unrelated
+        # sections.  Fingerprints are retained only for the exact unchanged
+        # active-entry set that failed, and are pruned once any source entry
+        # leaves the active state.
+        self._compaction_failure_candidates: set[tuple[str, ...]] = set()
         self._compaction_checks: list[dict[str, object]] = []
         self._last_update_diagnostics: dict[str, object] = {
             "planned_turn_ids": [],
@@ -237,11 +240,27 @@ class StructuredMemoryService:
             self.compactor.record_skip("no_candidates")
             self._compaction_checks.append(diagnostic)
             return
-        if (
-            self._last_compaction_failure_active is not None
-            and active
-            < self._last_compaction_failure_active + self._compaction_retry_growth
-        ):
+        active_ids = {
+            entry.id
+            for entry in self.memory.entries.values()
+            if entry.status == "active"
+        }
+        # Candidate windows intentionally overlap.  Only suppress a candidate
+        # whose exact active ids previously failed; later sections and new
+        # entries remain eligible in the same pass.
+        self._compaction_failure_candidates = {
+            fingerprint
+            for fingerprint in self._compaction_failure_candidates
+            if set(fingerprint).issubset(active_ids)
+        }
+        eligible_candidates = [
+            candidate
+            for candidate in candidates
+            if self._candidate_fingerprint(candidate)
+            not in self._compaction_failure_candidates
+        ]
+        diagnostic["eligible_candidate_count"] = len(eligible_candidates)
+        if not eligible_candidates:
             diagnostic["skip_reason"] = "candidate_circuit_breaker"
             self.compactor.record_skip("candidate_circuit_breaker")
             self._compaction_checks.append(diagnostic)
@@ -250,10 +269,9 @@ class StructuredMemoryService:
         attempted_before = self.compactor.metrics.attempted_calls
         try:
             applied, rejected = self.compactor.compact_candidates(
-                self.memory, candidates
+                self.memory, eligible_candidates
             )
         except UpdateFailed as exc:
-            self._last_compaction_failure_active = active
             logger.warning("Memory compaction failed; continuing uncompacted: %s", exc)
             diagnostic["attempted_calls"] = (
                 self.compactor.metrics.attempted_calls - attempted_before
@@ -261,17 +279,37 @@ class StructuredMemoryService:
             self._compaction_checks.append(diagnostic)
             return
         if rejected:
-            self._last_compaction_failure_active = active
             logger.warning(
                 "Memory compaction ops rejected; continuing uncompacted: %s", rejected
             )
+            by_subject = {
+                candidate.subject_key: candidate for candidate in eligible_candidates
+            }
+            for rejection in rejected:
+                if rejection.get("reason") == "transport":
+                    # Transport failures are transient and should be retried.
+                    continue
+                candidate_key = rejection.get("candidate")
+                candidate = (
+                    by_subject.get(candidate_key)
+                    if isinstance(candidate_key, str)
+                    else None
+                )
+                if candidate is not None:
+                    self._compaction_failure_candidates.add(
+                        self._candidate_fingerprint(candidate)
+                    )
         elif applied:
-            self._last_compaction_failure_active = None
             logger.info("Memory compaction applied %d ops", len(applied))
         diagnostic["attempted_calls"] = (
             self.compactor.metrics.attempted_calls - attempted_before
         )
         self._compaction_checks.append(diagnostic)
+
+    @staticmethod
+    def _candidate_fingerprint(candidate) -> tuple[str, ...]:
+        """Identify one bounded review by its active entry ids."""
+        return tuple(entry.id for entry in candidate.entries)
 
     def compaction_diagnostics(self) -> dict[str, object]:
         reasons = Counter(

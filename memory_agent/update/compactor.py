@@ -117,15 +117,36 @@ class MemoryCompactor:
         )
 
     def detect_candidates(self, memory: Memory) -> list[CompactionCandidate]:
-        """Build deterministic section/recency chunks for LLM review only."""
+        """Build deterministic, overlapping section/recency windows.
+
+        A non-overlapping partition makes entries on opposite sides of a
+        chunk boundary impossible for the model to compare.  Sliding each
+        bounded window by one entry keeps the review structurally bounded
+        while giving adjacent windows one shared anchor.  The overlap is
+        intentionally structural; no local similarity or lexical matching is
+        performed here.
+        """
         active = sorted(
             (entry for entry in memory.entries.values() if entry.status == "active"),
             key=lambda entry: (entry.section, max(entry.provenance or [-1]), entry.id),
         )
         candidates: list[CompactionCandidate] = []
+        step = max(1, self.max_candidate_entries - 1)
         for section in sorted(self._section_keys):
             entries = [entry for entry in active if entry.section == section]
-            for offset in range(0, len(entries), self.max_candidate_entries):
+            offsets = [0]
+            while offsets[-1] + self.max_candidate_entries < len(entries):
+                next_offset = offsets[-1] + step
+                # Always review a bounded tail window.  This avoids ending on
+                # a tiny suffix after a boundary-overlap window and gives the
+                # final active state a full opportunity for consolidation.
+                if next_offset + self.max_candidate_entries >= len(entries):
+                    tail_offset = len(entries) - self.max_candidate_entries
+                    if tail_offset != offsets[-1]:
+                        offsets.append(tail_offset)
+                    break
+                offsets.append(next_offset)
+            for offset in offsets:
                 chunk = tuple(entries[offset:offset + self.max_candidate_entries])
                 if len(chunk) < 2:
                     continue
@@ -171,6 +192,24 @@ class MemoryCompactor:
     def _compact_candidate(
         self, memory: Memory, candidate: CompactionCandidate
     ) -> tuple[list[dict], list[dict]]:
+        # Candidates may overlap.  An earlier window can supersede one of the
+        # shared entries, so review only the active subset at the time this
+        # window is processed and avoid presenting stale ids to the model.
+        active_entries = tuple(
+            entry
+            for entry in candidate.entries
+            if (current := memory.entries.get(entry.id)) is not None
+            and current.status == "active"
+        )
+        if len(active_entries) < 2:
+            self.metrics.skipped_compactions += 1
+            self.metrics.record_reason("stale_candidate")
+            return [], []
+        candidate = CompactionCandidate(
+            subject_key=candidate.subject_key,
+            entries=active_entries,
+            reason=candidate.reason,
+        )
         visible_ids = {entry.id for entry in candidate.entries}
         if len(candidate.entries) > self.max_candidate_entries:
             return self._reject(candidate, "budget")
@@ -213,7 +252,10 @@ class MemoryCompactor:
     ):
         self.metrics.rejected_compactions += 1
         self.metrics.record_reason(reason)
-        rejection = {"candidate": candidate.subject_key, "reason": reason}
+        rejection: dict[str, object] = {
+            "candidate": candidate.subject_key,
+            "reason": reason,
+        }
         if detail is not None:
             rejection["detail"] = detail
         return [], [rejection]
@@ -229,7 +271,7 @@ class MemoryCompactor:
                     "visible_ids": sorted(visible_ids),
                 },
             )
-        rejected = self._validate_ops(memory, ops)
+        rejected = self._validate_ops(memory, ops, visible_ids=visible_ids)
         if rejected:
             reason = "provenance" if any("provenance" in item["reason"] for item in rejected) else "schema"
             return self._reject(candidate, reason, rejected)
@@ -245,7 +287,13 @@ class MemoryCompactor:
         memory.entries, memory.narrative, memory._counters = trial.entries, trial.narrative, trial._counters
         return applied, []
 
-    def _validate_ops(self, memory: Memory, ops: list[dict]) -> list[dict]:
+    def _validate_ops(
+        self,
+        memory: Memory,
+        ops: list[dict],
+        *,
+        visible_ids: set[str] | None = None,
+    ) -> list[dict]:
         rejected: list[dict] = []
         supersede_ids: set[str] = set()
         adds: list[dict] = []
@@ -266,7 +314,7 @@ class MemoryCompactor:
                     )
                 elif entry_id in supersede_ids:
                     rejected.append({"op": op, "reason": "duplicate SUPERSEDE id"})
-                else:
+                elif isinstance(entry_id, str):
                     supersede_ids.add(entry_id)
             elif kind == "ADD":
                 section = op.get("section")
@@ -282,6 +330,16 @@ class MemoryCompactor:
                     or any(not isinstance(turn_id, int) for turn_id in provenance)
                 ):
                     rejected.append({"op": op, "reason": "invalid provenance"})
+                elif self._contains_bookkeeping(text, visible_ids or set()):
+                    rejected.append(
+                        {
+                            "op": op,
+                            "reason": (
+                                "canonical text contains entry ids or compaction "
+                                "bookkeeping"
+                            ),
+                        }
+                    )
                 else:
                     adds.append(op)
             else:
@@ -331,3 +389,33 @@ class MemoryCompactor:
                 }
             ]
         return []
+
+    @staticmethod
+    def _contains_bookkeeping(text: str, source_ids: set[str]) -> bool:
+        """Reject machine-facing metadata copied into user-visible text.
+
+        This is deliberately a structural guard, not semantic extraction:
+        exact source entry ids and explicit operation/metadata markers are
+        never valid parts of a canonical memory sentence.  Tokenizing only on
+        punctuation avoids treating an id such as ``F1`` as a substring of a
+        normal word while catching common forms such as ``[F1]`` and ``F1/F2``.
+        """
+        tokens = text
+        for separator in "[](){}:,;.!?/\\\"'`\n\r\t":
+            tokens = tokens.replace(separator, " ")
+        if any(token in source_ids for token in tokens.split()):
+            return True
+        folded = text.casefold()
+        return any(
+            marker in text or marker.casefold() in folded
+            for marker in (
+                "SUPERSEDE",
+                "NOOP",
+                '"op"',
+                '"id"',
+                '"provenance"',
+                "provenance:",
+                "source entries",
+                "entry ids",
+            )
+        )
