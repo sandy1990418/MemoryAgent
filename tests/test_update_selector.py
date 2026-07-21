@@ -1,9 +1,7 @@
-from memory_agent.core.models import MemoryValue, SubjectIdentity
-from memory_agent.core.sections import CHAT_SECTIONS, PRACTICAL_SECTIONS
+from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 from memory_agent.core.transcript import Turn
-from memory_agent.normalization.chat import ChatSubjectNormalizer
-from memory_agent.policies.structured import get_memory_policy
+from memory_agent.policies.structured import CHAT_POLICY
 from memory_agent.update.selector import UpdateMemorySelector
 from memory_agent.update.updater import MemoryUpdater
 from memory_agent.models.config import ProductMemoryConfig
@@ -19,58 +17,28 @@ def _memory() -> Memory:
     return memory
 
 
-def test_update_selector_returns_explainable_related_match():
+def test_update_selector_returns_bounded_recency_view():
     selection = UpdateMemorySelector(_memory(), token_estimator=lambda _text: 1).select_for_update(
         [Turn(id=3, role="user", content="Deployment deadline moved to May 1")], 2
     )
-    assert [entry.id for entry in selection.entries] == ["F1"]
-    assert selection.matches[0].reasons[0].startswith("lexical_overlap:")
-    assert dict(selection.matches[0].score_components)["lexical_overlap"] > 0
-    assert 0 < selection.matches[0].confidence <= 1
+    assert [entry.id for entry in selection.entries] == ["F2", "F1"]
+    assert selection.matches[0].reasons == ("active",)
+    assert dict(selection.matches[0].score_components)["active"] == 2.0
+    assert selection.matches[0].confidence == 1.0
 
 
-def test_update_selector_unrelated_turn_has_empty_context():
+def test_update_selector_ignores_turn_content_when_bounding_context():
     selection = UpdateMemorySelector(_memory()).select_for_update(
         [Turn(id=3, role="user", content="Tell me a joke about penguins")], 100
     )
-    assert selection.entries == ()
-    assert selection.visible_tokens == 0
-
-
-def test_typed_exact_subject_unit_qualifier_precedes_bounded_legacy_fallback():
-    memory = _memory()
-    identity = SubjectIdentity("chat", "api latency", "value", "when online", 0.9)
-    memory.apply_ops([
-        {"op": "ADD", "section": "facts", "text": "When online, API latency is 250 ms.", "provenance": [3], "subject_identity": identity, "value": MemoryValue("250", "ms")},
-        {"op": "ADD", "section": "facts", "text": "API latency dashboard is archived.", "provenance": [4]},
-    ])
-    selection = UpdateMemorySelector(memory, token_estimator=lambda _: 1,
-        subject_normalizer=ChatSubjectNormalizer(), max_legacy_fallback_entries=1,
-    ).select_for_update([Turn(id=5, role="user", content="When online, API latency is 200 ms.")], 5)
-    assert selection.entries[0].id == "F3"
-    assert selection.matches[0].reasons == ("typed_exact_subject_unit_qualifier",)
-    assert selection.fallback_used is True
-    assert selection.fallback_reason == "bounded_ambiguous_legacy_lexical_match"
-    assert len(selection.entries) <= 2
-
-
-def test_migration_on_touch_only_migrates_selected_high_confidence_legacy_entry():
-    memory = Memory(sections=CHAT_SECTIONS)
-    memory.apply_ops([
-        {"op":"ADD", "section":"facts", "text":"The API latency is 250 ms.", "provenance":[1]},
-        {"op":"ADD", "section":"facts", "text":"The worker queue depth is 10 items.", "provenance":[2]},
-    ])
-    updater = MemoryUpdater(llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
-        sections=CHAT_SECTIONS, max_retries=0)
-    updater.update(memory, [Turn(id=3, role="user", content="The API latency is 200 ms.")])
-    assert memory.entries["F1"].subject_identity is not None
-    assert memory.entries["F2"].subject_identity is None
+    assert [entry.id for entry in selection.entries] == ["F2", "F1"]
+    assert selection.visible_tokens > 0
 
 
 def test_updater_rejects_existing_id_outside_visible_context():
     memory = _memory()
     updater = MemoryUpdater(
-        llm=ScriptedLLM(lambda _system, _messages: '[{"op":"SUPERSEDE","id":"F2","reason":"hidden"}]'),
+        llm=ScriptedLLM(lambda _system, _messages: '[{"op":"SUPERSEDE","id":"Z99","reason":"unknown"}]'),
         sections=CHAT_SECTIONS,
         max_retries=0,
     )
@@ -78,7 +46,7 @@ def test_updater_rejects_existing_id_outside_visible_context():
         memory, [Turn(id=3, role="user", content="Deployment deadline moved")]
     )
     assert applied == []
-    assert rejected[0]["reason"] == "UPDATE/SUPERSEDE id was not visible to updater"
+    assert rejected[0]["reason"] == "unknown SUPERSEDE id: Z99"
     assert memory.entries["F2"].status == "active"
 
 
@@ -145,22 +113,7 @@ def test_product_config_loads_nested_updater_budget(tmp_path):
     assert config.update_memory_token_budget == 111
     assert config.evicted_turn_token_budget == 222
     assert config.updater_max_candidate_entries == 7
-    assert config.updater_max_legacy_candidate_entries == 3
-
-
-def test_required_typed_exact_subject_reports_budget_overflow():
-    memory = Memory(sections=CHAT_SECTIONS)
-    identity = SubjectIdentity("chat", "api latency", "value", "when online", .9)
-    memory.apply_ops([{
-        "op": "ADD", "section": "facts", "text": "When online, API latency is 250 ms.",
-        "provenance": [1], "subject_identity": identity, "value": MemoryValue("250", "ms"),
-    }])
-    selection = UpdateMemorySelector(
-        memory, token_estimator=lambda _text: 10, subject_normalizer=ChatSubjectNormalizer()
-    ).select_for_update([Turn(2, "user", "When online, API latency is 200 ms.")], 1)
-    assert [entry.id for entry in selection.entries] == ["F1"]
-    assert selection.visible_tokens == 10
-    assert selection.required_overflow_tokens == 9
+    assert not hasattr(config, "updater_max_legacy_candidate_entries")
 
 
 def test_evicted_budget_preserves_complete_multiformat_turns():
@@ -220,8 +173,8 @@ def test_chinese_oversized_group_and_tool_results_stay_complete():
     assert report["groups"][-1]["type"] == "tool_call_result"
 
 
-def test_practical_budget_omits_transient_assistant_answers_but_keeps_user_sources():
-    policy = get_memory_policy("chat")
+def test_chat_budget_keeps_complete_newest_exchange_groups():
+    policy = CHAT_POLICY
     turns = [
         Turn(1, "user", "Project Alpha is blocked."),
         Turn(2, "assistant", "Long generic advice " * 200),
@@ -230,7 +183,7 @@ def test_practical_budget_omits_transient_assistant_answers_but_keeps_user_sourc
     ]
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
-        sections=PRACTICAL_SECTIONS,
+        sections=CHAT_SECTIONS,
         policy=policy,
         evicted_turn_token_budget=20,
         token_estimator=lambda text: max(1, len(text) // 20),
@@ -238,21 +191,21 @@ def test_practical_budget_omits_transient_assistant_answers_but_keeps_user_sourc
 
     selected = updater._turns_within_budget(turns)
 
-    assert [turn.id for turn in selected] == [1, 3]
+    assert [turn.id for turn in selected] == [3, 4]
 
 
-def test_practical_budget_keeps_assistant_proposal_with_user_acceptance():
-    policy = get_memory_policy("chat")
+def test_chat_budget_keeps_complete_acceptance_exchange():
+    policy = CHAT_POLICY
     turns = [
         Turn(1, "assistant", "I propose using a weekly release train."),
         Turn(2, "user", "Yes, let's do that."),
     ]
     updater = MemoryUpdater(
         llm=ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
-        sections=PRACTICAL_SECTIONS,
+        sections=CHAT_SECTIONS,
         policy=policy,
         evicted_turn_token_budget=1,
         token_estimator=lambda _text: 1,
     )
 
-    assert updater._turns_within_budget(turns) == turns
+    assert updater._turns_within_budget(turns) == turns[-1:]

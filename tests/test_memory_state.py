@@ -3,16 +3,16 @@
 import pytest
 
 from memory_agent.core.models import MemoryValue, SubjectIdentity
-from memory_agent.core.sections import PRACTICAL_SECTIONS
+from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
-from memory_agent.policies.structured import get_memory_policy
+from memory_agent.policies.structured import CHAT_POLICY
 from memory_agent.retrieval.context import build_answer_memory_context
 from memory_agent.retrieval.selector import MemorySelector
 
 
 def _populated_memory() -> Memory:
-    policy = get_memory_policy("practical")
-    memory = Memory(PRACTICAL_SECTIONS, policy=policy)
+    policy = CHAT_POLICY
+    memory = Memory(CHAT_SECTIONS, policy=policy)
     memory.apply_ops([
         {"op": "ADD", "section": "facts", "text": "API latency is 250ms.", "provenance": [1]},
         {
@@ -32,7 +32,7 @@ def _populated_memory() -> Memory:
 
 
 def _restored(memory: Memory) -> Memory:
-    clone = Memory(PRACTICAL_SECTIONS, policy=memory.policy)
+    clone = Memory(CHAT_SECTIONS, policy=memory.policy)
     clone.load_state(memory.to_state())
     return clone
 
@@ -57,11 +57,10 @@ def test_state_round_trip_survives_json_and_preserves_selection():
     import json
 
     memory = _populated_memory()
-    restored = Memory(PRACTICAL_SECTIONS, policy=memory.policy)
+    restored = Memory(CHAT_SECTIONS, policy=memory.policy)
     restored.load_state(json.loads(json.dumps(memory.to_state())))
 
-    policy = get_memory_policy("practical")
-    selector = MemorySelector(policy=policy, pinned_sections=frozenset())
+    selector = MemorySelector(policy=CHAT_POLICY)
 
     def selected_ids(target: Memory) -> tuple[str, ...]:
         entries = selector.select_for_answer(
@@ -93,7 +92,7 @@ def test_load_state_recomputes_counters_when_missing():
     memory = _populated_memory()
     state = memory.to_state()
     del state["counters"]
-    restored = Memory(PRACTICAL_SECTIONS, policy=memory.policy)
+    restored = Memory(CHAT_SECTIONS, policy=memory.policy)
     restored.load_state(state)
 
     restored.apply_ops(
@@ -104,7 +103,7 @@ def test_load_state_recomputes_counters_when_missing():
 
 
 def test_load_state_rejects_unknown_section():
-    restored = Memory(PRACTICAL_SECTIONS, policy=get_memory_policy("practical"))
+    restored = Memory(CHAT_SECTIONS, policy=CHAT_POLICY)
 
     with pytest.raises(ValueError, match="unknown section"):
         restored.load_state(

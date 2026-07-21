@@ -1,18 +1,25 @@
-# Chat practical memory
+# Chat memory
 
-`memory_agent.application.chat` is the standalone practical-memory facade. It avoids agent,
-BEAM/evaluation, and mem0 imports so another engineer can copy or depend on the
-chat memory surface without understanding the evaluation runners.
+`memory_agent.application.chat` is the canonical standalone chat-memory
+facade. It exposes the same `CHAT_POLICY` and `CHAT_SECTIONS` used by the
+runtime and keeps optional framework integrations outside the import path.
 
 ```python
 from memory_agent.application.chat import build_chat_memory
 from memory_agent.core.transcript import Turn
 
-chat_memory = build_chat_memory()  # Reads configs/product.yaml, then env overrides.
-chat_memory.update([Turn(id=1, role="user", content="Remember I prefer concise replies")])
-print(chat_memory.render())
-print(chat_memory.token_usage())  # Token spend per role: {"updater": {...}, "compactor": {...}}
+chat = build_chat_memory()  # Reads configs/product.yaml and environment.
+chat.update([
+    Turn(id=1, role="user", content="Remember I prefer concise replies."),
+])
+print(chat.render())
+print(chat.token_usage())
 ```
 
-Set `MEMORY_PROFILE`, `MEMORY_SECTIONS`, `MEMORY_COMPACTION_THRESHOLD`, or
-`MEMORY_MODEL` to override one product setting without editing the YAML file.
+`build_chat_memory` accepts an injected `LLMClient` for deterministic tests,
+and `compact=False` disables optional active-entry compaction. Configuration
+controls model and token limits while retention remains chat-only.
+
+The facade returns applied and rejected operations from `ChatMemory.update`.
+Source turns should remain available to the caller when an update is rejected,
+so a later call can retry without losing context.

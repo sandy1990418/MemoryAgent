@@ -1,4 +1,4 @@
-from memory_agent.core.sections import CHAT_SECTIONS, EXACT_VALUES
+from memory_agent.core.sections import CHAT_SECTIONS
 from memory_agent.core.store import Memory
 
 
@@ -246,20 +246,20 @@ def test_render_chronological_budget_keeps_contiguous_prefix_and_footer():
 
 
 def test_render_chronological_can_exclude_sections():
-    mem = Memory(sections=[*CHAT_SECTIONS, EXACT_VALUES])
+    mem = Memory(sections=CHAT_SECTIONS)
     mem.apply_ops(
         [
             {"op": "ADD", "section": "facts", "text": "topical fact", "provenance": [3]},
             {
                 "op": "ADD",
-                "section": "exact_values",
-                "text": "Flask 2.3.1",
+                "section": "status_changes",
+                "text": "Flask 2.3.1 status changed.",
                 "provenance": [1],
             },
         ]
     )
 
-    rendered = mem.render_chronological(exclude_sections={"exact_values"})
+    rendered = mem.render_chronological(exclude_sections={"status_changes"})
 
     assert "topical fact" in rendered
     assert "Flask 2.3.1" not in rendered
