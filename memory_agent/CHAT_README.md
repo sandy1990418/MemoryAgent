@@ -18,7 +18,17 @@ print(chat.token_usage())
 
 `build_chat_memory` accepts an injected `LLMClient` for deterministic tests,
 and `compact=False` disables optional active-entry compaction. Configuration
-controls model and token limits while retention remains chat-only.
+controls model and token limits while retention remains chat-only. Answer
+rendering uses the configured `answer_memory_token_budget` (600 by default),
+and a caller can request a different positive, still-bounded budget for one
+answer without changing the chat configuration:
+
+```python
+print(chat.render(max_tokens=1200))
+```
+
+Selection remains query-independent and uses section/order metadata only; the
+per-call override does not enable lexical or evaluation-specific retrieval.
 
 The facade returns applied and rejected operations from `ChatMemory.update`.
 Source turns should remain available to the caller when an update is rejected,

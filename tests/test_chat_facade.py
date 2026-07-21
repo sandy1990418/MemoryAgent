@@ -225,6 +225,50 @@ def test_chat_render_is_bounded_by_answer_memory_budget():
     assert "A" * 40 not in rendered
 
 
+def test_chat_render_accepts_a_bounded_per_call_budget_override():
+    from memory_agent.application.chat import build_chat_memory
+
+    chat = build_chat_memory(
+        ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        config=ProductMemoryConfig(answer_memory_token_budget=20),
+        compact=False,
+    )
+    chat.memory.apply_ops_atomically(
+        [
+            {"op": "ADD", "section": "facts", "text": "A" * 40, "provenance": [1]},
+            {"op": "ADD", "section": "facts", "text": "B" * 40, "provenance": [2]},
+        ]
+    )
+
+    default_rendered = chat.render()
+    widened_rendered = chat.render(max_tokens=40)
+
+    assert len(default_rendered) // 4 <= 20
+    assert len(widened_rendered) // 4 <= 40
+    assert "B" * 40 in widened_rendered
+    assert "A" * 40 in widened_rendered
+    assert "A" * 40 not in default_rendered
+
+
+@pytest.mark.parametrize("budget", [0, -1, True, 1.5])
+def test_chat_render_rejects_non_positive_or_non_integer_budget(budget):
+    from memory_agent.application.chat import build_chat_memory
+
+    chat = build_chat_memory(
+        ScriptedLLM(lambda *_: '[{"op":"NOOP"}]'),
+        compact=False,
+    )
+
+    with pytest.raises(ValueError, match="max_tokens"):
+        chat.render(max_tokens=budget)
+
+
+@pytest.mark.parametrize("budget", [0, -1, True, 1.5])
+def test_product_config_rejects_invalid_answer_memory_budget(budget):
+    with pytest.raises(ValueError, match="answer_memory_token_budget"):
+        ProductMemoryConfig(answer_memory_token_budget=budget)
+
+
 def test_chat_update_failure_is_reported_without_mutating_memory():
     from memory_agent.application.chat import build_chat_memory
 

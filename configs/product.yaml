@@ -1,5 +1,7 @@
 compaction_threshold: 30
 memory_model: openai:gpt-5.4-nano
+# Default answer-memory context cap; callers may use ChatMemory.render(max_tokens=...).
+answer_memory_token_budget: 600
 updater:
   # Keep recent turns complete while leaving headroom for schema and memory.
   max_visible_memory_tokens: 600

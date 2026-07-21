@@ -17,6 +17,13 @@ from memory_agent.update.compactor import MemoryCompactor
 from memory_agent.update.updater import MemoryUpdater
 
 
+def _validate_token_budget(value: int, *, name: str) -> int:
+    """Return a usable positive token budget or fail at the API boundary."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
 @dataclass
 class _RoleRecordingLLM:
     """Record estimated token usage per role for caller-supplied clients.
@@ -68,6 +75,10 @@ class ChatMemory:
     )
 
     def __post_init__(self) -> None:
+        self.answer_memory_token_budget = _validate_token_budget(
+            self.answer_memory_token_budget,
+            name="answer_memory_token_budget",
+        )
         if self.service is None:
             self.service = StructuredMemoryService(
                 memory=self.memory,
@@ -169,17 +180,34 @@ class ChatMemory:
             ]
         return result.applied_ops, []
 
-    def render(self, *, include_superseded: bool = False) -> str:
+    def render(
+        self,
+        *,
+        include_superseded: bool = False,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Render bounded answer memory, optionally widening this call only.
+
+        The configured ``answer_memory_token_budget`` remains the default. A
+        caller can request a larger (or smaller) bounded context for a
+        particular answer without rebuilding the chat object. Selection stays
+        structural and query-independent; the same effective budget is used
+        for selection and final rendering.
+        """
         assert self.memory_selector is not None
+        budget = self.answer_memory_token_budget if max_tokens is None else _validate_token_budget(
+            max_tokens,
+            name="max_tokens",
+        )
         entries = self.memory_selector.select(
             memory=self.memory,
-            max_tokens=self.answer_memory_token_budget,
+            max_tokens=budget,
             include_superseded=include_superseded,
         )
         return self.memory.render(
             entries=entries,
             include_superseded=include_superseded,
-            max_tokens=self.answer_memory_token_budget,
+            max_tokens=budget,
         )
 
 

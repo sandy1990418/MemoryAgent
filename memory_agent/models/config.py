@@ -102,6 +102,14 @@ class ProductMemoryConfig:
     evicted_turn_token_budget: int = 3600
     updater_max_candidate_entries: int = 8
 
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.answer_memory_token_budget, bool)
+            or not isinstance(self.answer_memory_token_budget, int)
+            or self.answer_memory_token_budget <= 0
+        ):
+            raise ValueError("answer_memory_token_budget must be a positive integer")
+
     @classmethod
     def from_yaml_env(cls, path: str | Path = "configs/product.yaml") -> "ProductMemoryConfig":
         data = load_simple_yaml(path) if Path(path).exists() else {}
