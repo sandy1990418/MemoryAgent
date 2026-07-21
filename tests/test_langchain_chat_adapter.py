@@ -170,6 +170,31 @@ def test_ainvoke_uses_async_model_and_retains_reply():
     assert adapter.messages[-1].content == "async reply"
 
 
+def test_update_diagnostics_delegates_authoritative_service_report():
+    adapter = _adapter(response=lambda *_: "[]", max_tokens=2)
+    adapter.service.update_diagnostics = lambda: {
+        "planned_turn_ids": [1],
+        "planned_batch_turn_ids": [[1]],
+        "committed_turn_ids": [1],
+        "deferred_turn_ids": [],
+        "dropped_turn_ids": [],
+        "status": "committed",
+    }
+
+    adapter.before_model(
+        [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]
+    )
+
+    assert adapter.update_diagnostics() == {
+        "planned_turn_ids": [1],
+        "planned_batch_turn_ids": [[1]],
+        "committed_turn_ids": [1],
+        "deferred_turn_ids": [],
+        "dropped_turn_ids": [],
+        "status": "committed",
+    }
+
+
 def test_invoke_injects_memory_at_answer_time_and_keeps_reply():
     class FakeChatModel:
         def __init__(self):
