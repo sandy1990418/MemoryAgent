@@ -28,6 +28,7 @@ class StructuredUpdateResult:
     verification: MemoryUpdateVerification | None = None
     committed: bool = False
     failure_reason: str | None = None
+    diagnostics: dict[str, object] = field(default_factory=dict)
 
 
 class StructuredMemoryService:
@@ -55,6 +56,14 @@ class StructuredMemoryService:
         self._last_compaction_failure_active: int | None = None
         self._compaction_retry_growth = 10
         self._compaction_checks: list[dict[str, object]] = []
+        self._last_update_diagnostics: dict[str, object] = {
+            "planned_turn_ids": [],
+            "planned_batch_turn_ids": [],
+            "committed_turn_ids": [],
+            "deferred_turn_ids": [],
+            "dropped_turn_ids": [],
+            "status": "idle",
+        }
 
     def _validate_component_policies(self) -> None:
         """Reject stacks whose components disagree about workload semantics."""
@@ -69,47 +78,133 @@ class StructuredMemoryService:
             raise ValueError(f"structured memory components use conflicting policies: {names}")
 
     def update(self, turns: list[Turn]) -> StructuredUpdateResult:
-        """Prepare, verify and atomically commit one update batch."""
+        """Prepare, verify and atomically commit one update transaction.
+
+        ``MemoryUpdater.prepare_update`` stages every planned micro-batch on
+        one isolated trial memory. Verification runs for each staged batch,
+        and this method performs exactly one live-memory commit after all
+        verifications pass.
+        """
         try:
             prepared = self.updater.prepare_update(self.memory, turns)
         except UpdateFailed as exc:
             logger.warning("Chat memory updater failed; no state was committed: %s", exc)
-            return StructuredUpdateResult(failure_reason=f"updater_failed: {exc}")
-        if prepared.rejected_ops:
+            diagnostics = self.updater.update_diagnostics()
+            self._last_update_diagnostics = diagnostics
             return StructuredUpdateResult(
-                applied_ops=prepared.applied_ops,
+                failure_reason=f"updater_failed: {exc}",
+                diagnostics=diagnostics,
+            )
+        if prepared.rejected_ops:
+            diagnostics = self.updater.update_diagnostics()
+            self._last_update_diagnostics = diagnostics
+            return StructuredUpdateResult(
+                # Earlier batches may have changed only the isolated trial;
+                # expose no applied operations when the outer transaction is
+                # rejected and nothing reached live memory.
+                applied_ops=[],
                 rejected_ops=prepared.rejected_ops,
                 failure_reason="rejected_ops",
+                diagnostics=diagnostics,
             )
 
-        verification = self.update_verifier.verify(
-            evicted_turns=turns,
-            applied_ops=prepared.applied_ops,
-            rejected_ops=prepared.rejected_ops,
-            memory=prepared.trial_memory,
-        )
-        if not verification.passed:
+        batch_verifications: list[MemoryUpdateVerification] = []
+        try:
+            if prepared.batches:
+                for batch in prepared.batches:
+                    batch_verifications.append(
+                        self.update_verifier.verify(
+                            evicted_turns=list(batch.turns),
+                            applied_ops=batch.applied_ops,
+                            rejected_ops=batch.rejected_ops,
+                            memory=prepared.trial_memory,
+                        )
+                    )
+            else:
+                # Preserve the historical empty-update verifier call and
+                # result shape while still treating it as one transaction.
+                batch_verifications.append(
+                    self.update_verifier.verify(
+                        evicted_turns=turns,
+                        applied_ops=[],
+                        rejected_ops=[],
+                        memory=prepared.trial_memory,
+                    )
+                )
+        except Exception as exc:  # verifier failures are transaction failures
+            diagnostics = self.updater.update_diagnostics()
+            diagnostics["status"] = "verification_failed"
+            diagnostics["committed_turn_ids"] = []
+            diagnostics["deferred_turn_ids"] = list(diagnostics.get("planned_turn_ids", []))
+            self._last_update_diagnostics = diagnostics
+            verification = MemoryUpdateVerification(
+                passed=False,
+                errors=[f"verifier exception: {exc}"],
+            )
             return StructuredUpdateResult(
-                applied_ops=prepared.applied_ops,
+                applied_ops=[],
                 verification=verification,
                 failure_reason="verification_failed",
+                diagnostics=diagnostics,
+            )
+        verification_errors = [
+            error
+            for index, result in enumerate(batch_verifications)
+            for error in (
+                result.errors
+                if result.passed
+                else [f"batch {index + 1}: {error}" for error in result.errors]
+            )
+        ]
+        verification = MemoryUpdateVerification(
+            passed=all(result.passed for result in batch_verifications) and not verification_errors,
+            errors=verification_errors,
+        )
+        if not verification.passed:
+            diagnostics = self.updater.update_diagnostics()
+            diagnostics["status"] = "verification_failed"
+            diagnostics["committed_turn_ids"] = []
+            diagnostics["deferred_turn_ids"] = list(diagnostics.get("planned_turn_ids", []))
+            self._last_update_diagnostics = diagnostics
+            return StructuredUpdateResult(
+                applied_ops=[],
+                verification=verification,
+                failure_reason="verification_failed",
+                diagnostics=diagnostics,
             )
 
         try:
             prepared.commit(self.memory)
         except RuntimeError:
+            diagnostics = self.updater.update_diagnostics()
+            diagnostics["status"] = "concurrent_change"
+            diagnostics["committed_turn_ids"] = []
+            diagnostics["deferred_turn_ids"] = list(diagnostics.get("planned_turn_ids", []))
+            self._last_update_diagnostics = diagnostics
             return StructuredUpdateResult(
-                applied_ops=prepared.applied_ops,
+                applied_ops=[],
                 verification=verification,
                 failure_reason="concurrent_change",
+                diagnostics=diagnostics,
             )
 
+        self.updater._mark_update_committed(prepared)
+        diagnostics = self.updater.update_diagnostics()
+        self._last_update_diagnostics = diagnostics
         self.maybe_compact()
         return StructuredUpdateResult(
             applied_ops=prepared.applied_ops,
             verification=verification,
             committed=True,
+            diagnostics=diagnostics,
         )
+
+    def update_diagnostics(self) -> dict[str, object]:
+        """Return diagnostics for the latest update transaction."""
+        return {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in self._last_update_diagnostics.items()
+        }
 
     def maybe_compact(self) -> None:
         """Consolidate candidates without making compaction update-critical."""

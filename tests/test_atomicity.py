@@ -1,5 +1,9 @@
 from memory_agent.application.session import MemorySession
+from memory_agent.application.structured_service import StructuredMemoryService
 from memory_agent.core.sections import CHAT_SECTIONS
+from memory_agent.core.store import Memory
+from memory_agent.core.transcript import Turn
+from memory_agent.policies.structured import CHAT_POLICY
 from memory_agent.update.updater import MemoryUpdater
 from tests.fakes import ScriptedLLM
 
@@ -120,3 +124,124 @@ def test_partial_rejected_ops_keep_turns_and_do_not_mutate_memory():
     transcript_ids = {t.id for t in session.transcript.all()}
     assert window_ids == transcript_ids
     assert session.memory.entries == {}
+
+
+def test_multi_batch_update_covers_all_turns_and_commits_once(monkeypatch):
+    responses = iter(
+        [
+            '[{"op":"ADD","section":"facts","text":"first batch",'
+            '"provenance":[1]}]',
+            '[{"op":"ADD","section":"facts","text":"second batch",'
+            '"provenance":[3]}]',
+        ]
+    )
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: next(responses)),
+        sections=CHAT_SECTIONS,
+        policy=CHAT_POLICY,
+        max_retries=0,
+        evicted_turn_token_budget=2,
+        token_estimator=lambda _text: 1,
+    )
+    memory = Memory(sections=CHAT_SECTIONS, policy=CHAT_POLICY)
+    commits = []
+    original_commit = memory.commit_trial
+    monkeypatch.setattr(
+        memory,
+        "commit_trial",
+        lambda trial, revision: commits.append(revision)
+        or original_commit(trial, revision),
+    )
+    service = StructuredMemoryService(memory=memory, updater=updater, policy=CHAT_POLICY)
+
+    result = service.update(
+        [
+            Turn(1, "user", "oldest"),
+            Turn(2, "user", "middle"),
+            Turn(3, "user", "newest"),
+        ]
+    )
+
+    assert result.committed
+    assert result.rejected_ops == []
+    assert commits == [0]
+    assert result.diagnostics == {
+        "planned_turn_ids": [1, 2, 3],
+        "planned_batch_turn_ids": [[1, 2], [3]],
+        "committed_turn_ids": [1, 2, 3],
+        "deferred_turn_ids": [],
+        "dropped_turn_ids": [],
+        "status": "committed",
+    }
+    assert [entry.text for entry in memory.entries.values()] == [
+        "first batch",
+        "second batch",
+    ]
+
+
+def test_late_batch_rejection_rolls_back_earlier_staged_batches(monkeypatch):
+    responses = iter(
+        [
+            '[{"op":"ADD","section":"facts","text":"staged only",'
+            '"provenance":[1]}]',
+            '[{"op":"UPDATE","id":"F999","text":"invalid",'
+            '"provenance":[3]}]',
+        ]
+    )
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: next(responses)),
+        sections=CHAT_SECTIONS,
+        policy=CHAT_POLICY,
+        max_retries=0,
+        evicted_turn_token_budget=2,
+        token_estimator=lambda _text: 1,
+    )
+    memory = Memory(sections=CHAT_SECTIONS, policy=CHAT_POLICY)
+    before = memory.to_state()
+    commits = []
+    original_commit = memory.commit_trial
+    monkeypatch.setattr(
+        memory,
+        "commit_trial",
+        lambda trial, revision: commits.append(revision)
+        or original_commit(trial, revision),
+    )
+    service = StructuredMemoryService(memory=memory, updater=updater, policy=CHAT_POLICY)
+
+    result = service.update(
+        [
+            Turn(1, "user", "oldest"),
+            Turn(2, "user", "middle"),
+            Turn(3, "user", "newest"),
+        ]
+    )
+
+    assert not result.committed
+    assert result.failure_reason == "rejected_ops"
+    assert result.applied_ops == []
+    assert memory.to_state() == before
+    assert commits == []
+    assert result.diagnostics["planned_turn_ids"] == [1, 2, 3]
+    assert result.diagnostics["committed_turn_ids"] == []
+    assert result.diagnostics["deferred_turn_ids"] == [1, 2, 3]
+    assert result.diagnostics["dropped_turn_ids"] == []
+
+
+def test_oversized_exchange_is_one_complete_planned_batch():
+    updater = MemoryUpdater(
+        llm=ScriptedLLM(lambda *_: "[]"),
+        sections=CHAT_SECTIONS,
+        policy=CHAT_POLICY,
+        evicted_turn_token_budget=1,
+        token_estimator=lambda _text: 1,
+    )
+
+    batches = updater._plan_turn_batches(
+        [
+            Turn(1, "user", "request"),
+            Turn(2, "assistant", "response"),
+        ]
+    )
+
+    assert [[turn.id for turn in batch] for batch in batches] == [[1, 2]]
+    assert updater.turn_selection_reports[-1]["dropped_turn_ids"] == []
