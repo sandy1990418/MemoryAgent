@@ -254,10 +254,10 @@ def test_chat_update_retries_only_deferred_suffix_and_is_idempotent():
             '"provenance":[3]}]',
         ]
     )
-    calls = {"count": 0}
+    calls = []
 
-    def responder(*_):
-        calls["count"] += 1
+    def responder(system, messages):
+        calls.append((system, messages))
         return next(responses)
 
     chat = build_chat_memory(
@@ -275,13 +275,97 @@ def test_chat_update_retries_only_deferred_suffix_and_is_idempotent():
 
     applied, rejected = chat.update(turns)
 
+    assert [op["text"] for op in applied] == ["saved prefix"]
+    assert rejected and "F999" in rejected[0]["reason"]
+    assert [entry.text for entry in chat.memory.entries.values()] == ["saved prefix"]
+    assert len(calls) == 2
+    diagnostics = chat.update_diagnostics()
+    assert diagnostics["submitted_turn_ids"] == [1, 2, 3]
+    assert diagnostics["committed_turn_ids"] == [1, 2]
+    assert diagnostics["deferred_turn_ids"] == [3]
+    assert diagnostics["retained_deferred_turn_ids"] == [3]
+    assert diagnostics["dropped_turn_ids"] == []
+    assert diagnostics["attempt_count"] == 1
+
+    # The explicit retry receives only the deferred suffix. The public facade
+    # must not conceal an exhausted suffix failure by retrying in this call.
+    applied, rejected = chat.update(turns)
+
     assert rejected == []
-    assert [op["text"] for op in applied] == ["saved prefix", "saved suffix"]
+    assert [op["text"] for op in applied] == ["saved suffix"]
     assert [entry.text for entry in chat.memory.entries.values()] == [
         "saved prefix",
         "saved suffix",
     ]
-    assert calls["count"] == 3
+    assert len(calls) == 3
+    retry_content = calls[-1][0] + "\n" + "\n".join(
+        str(message.get("content", "")) for message in calls[-1][1]
+    )
+    assert "newest" in retry_content
+    assert "oldest" not in retry_content
+    assert "middle" not in retry_content
+    diagnostics = chat.update_diagnostics()
+    assert diagnostics["submitted_turn_ids"] == [3]
+    assert diagnostics["committed_turn_ids"] == [3]
+    assert diagnostics["deferred_turn_ids"] == []
+    assert diagnostics["retained_deferred_turn_ids"] == []
 
     assert chat.update(turns) == ([], [])
-    assert calls["count"] == 3
+    assert len(calls) == 3
+
+
+def test_chat_update_retains_deferred_suffix_until_a_later_public_call():
+    from memory_agent.application.chat import build_chat_memory
+
+    responses = iter(
+        [
+            '[{"op":"ADD","section":"facts","text":"saved prefix",'
+            '"provenance":[1]}]',
+            '[{"op":"UPDATE","id":"F999","text":"invalid",'
+            '"provenance":[3]}]',
+            '[{"op":"ADD","section":"facts","text":"saved suffix",'
+            '"provenance":[3]},'
+            '{"op":"ADD","section":"facts","text":"saved next",'
+            '"provenance":[4]}]',
+        ]
+    )
+    calls = []
+
+    def responder(system, messages):
+        calls.append((system, messages))
+        return next(responses)
+
+    chat = build_chat_memory(
+        ScriptedLLM(responder),
+        config=ProductMemoryConfig(evicted_turn_token_budget=2),
+        compact=False,
+    )
+    chat.updater.max_retries = 0
+    chat.updater.token_estimator = lambda _text: 1
+
+    first_batch = [
+        Turn(1, "user", "oldest"),
+        Turn(2, "user", "middle"),
+        Turn(3, "user", "newest"),
+    ]
+    applied, rejected = chat.update(first_batch)
+    assert [op["text"] for op in applied] == ["saved prefix"]
+    assert rejected
+
+    # The next caller need not resend the failed batch: the facade retains it
+    # and retries it before processing newly supplied turns.
+    applied, rejected = chat.update([Turn(4, "user", "next")])
+    assert rejected == []
+    assert [op["text"] for op in applied] == ["saved suffix", "saved next"]
+    assert [entry.text for entry in chat.memory.entries.values()] == [
+        "saved prefix",
+        "saved suffix",
+        "saved next",
+    ]
+    assert len(calls) == 3
+    retry_content = calls[-1][0] + "\n" + "\n".join(
+        str(message.get("content", "")) for message in calls[-1][1]
+    )
+    assert "newest" in retry_content
+    assert "next" in retry_content
+    assert retry_content.index("newest") < retry_content.index("next")
