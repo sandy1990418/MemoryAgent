@@ -143,7 +143,7 @@ def test_explicit_user_goal_replacement_supersedes_old_goal_and_adds_latest():
     assert memory.entries["G2"].text == "Stabilize the release before shipping."
 
 
-def test_substantive_exchange_can_be_saved_as_one_progress_rollup():
+def test_user_reported_work_can_be_saved_as_one_progress_entry():
     memory = _memory()
     updater = _updater(
         lambda *_: (
@@ -156,7 +156,7 @@ def test_substantive_exchange_can_be_saved_as_one_progress_rollup():
     applied, rejected = updater.update(
         memory,
         [
-            Turn(1, "user", "We decided to use base-height and Heron's formula."),
+            Turn(1, "user", "I completed the comparison of base-height and Heron's formula."),
             Turn(2, "assistant", "Use base times height or Heron's formula."),
         ],
     )
