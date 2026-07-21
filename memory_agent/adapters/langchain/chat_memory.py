@@ -1,8 +1,8 @@
-"""Optional LangChain adapters.
+"""Compatibility import for the optional LangChain chat adapter.
 
-Importing this package requires ``langchain-core``.  The canonical structured
-chat adapter is intentionally separate from LangChain's agent middleware and
-does not import LangGraph or any agent runtime.
+The implementation lives in :mod:`memory_agent.adapters.langchain.chat`; this
+module gives the adapter an explicit, discoverable ``chat_memory`` path while
+keeping one implementation and one state machine.
 """
 
 from .chat import (
