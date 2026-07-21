@@ -148,7 +148,7 @@ def test_user_reported_work_can_be_saved_as_one_progress_entry():
     updater = _updater(
         lambda *_: (
             '[{"op":"ADD","section":"progress",'
-            '"text":"Discussion covered base-height and Heron area methods.",'
+            '"text":"User reported: compared base-height and Heron area methods.",'
             '"provenance":[1,2]}]'
         )
     )

@@ -71,6 +71,13 @@ class ChatMemory:
         assert self.service is not None
         result = self.service.update(turns)
         if result.committed:
+            if result.rejected_ops:
+                return result.applied_ops, result.rejected_ops
+            if result.failure_reason:
+                errors = result.verification.errors if result.verification else []
+                return result.applied_ops, [
+                    {"op": None, "reason": result.failure_reason, "errors": errors}
+                ]
             return result.applied_ops, []
         if result.rejected_ops:
             return [], result.rejected_ops

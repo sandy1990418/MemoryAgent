@@ -99,6 +99,7 @@ class PreparedUpdate:
     _committed: bool = False
     batches: list[PreparedBatch] = field(default_factory=list)
     diagnostics: dict[str, object] = field(default_factory=dict)
+    failure_reason: str | None = None
 
     def commit(self, live_memory: Memory) -> None:
         if self.rejected_ops:
@@ -350,6 +351,7 @@ class MemoryUpdater:
         batches: list[PreparedBatch] | list[list[Turn]],
         status: str,
         committed: bool = False,
+        committed_turn_ids: list[int] | None = None,
     ) -> dict[str, object]:
         batch_turn_ids = [
             [turn.id for turn in batch.turns] if isinstance(batch, PreparedBatch)
@@ -357,8 +359,13 @@ class MemoryUpdater:
             for batch in batches
         ]
         planned_ids = [turn.id for turn in turns]
-        committed_ids = planned_ids if committed else []
-        deferred_ids = [] if committed else planned_ids
+        committed_ids = (
+            list(committed_turn_ids)
+            if committed_turn_ids is not None
+            else planned_ids if committed else []
+        )
+        committed_set = set(committed_ids)
+        deferred_ids = [turn_id for turn_id in planned_ids if turn_id not in committed_set]
         diagnostics: dict[str, object] = {
             "planned_turn_ids": planned_ids,
             "planned_batch_turn_ids": batch_turn_ids,
@@ -475,7 +482,25 @@ class MemoryUpdater:
         all_applied: list[dict] = []
         try:
             for batch in batches:
-                applied, rejected = self._update_trial(trial, batch)
+                try:
+                    applied, rejected = self._update_trial(trial, batch)
+                except UpdateFailed as exc:
+                    if not staged_batches:
+                        raise
+                    diagnostics = self._set_update_diagnostics(
+                        turns=turns,
+                        batches=batches,
+                        status="failed",
+                    )
+                    return PreparedUpdate(
+                        trial,
+                        all_applied,
+                        [],
+                        base_revision,
+                        batches=staged_batches,
+                        diagnostics=diagnostics,
+                        failure_reason=f"updater_failed: {exc}",
+                    )
                 prepared_batch = PreparedBatch(tuple(batch), applied, rejected)
                 staged_batches.append(prepared_batch)
                 if rejected:
@@ -526,6 +551,22 @@ class MemoryUpdater:
         )
         prepared.diagnostics.clear()
         prepared.diagnostics.update(diagnostics)
+
+    def mark_update_outcome(
+        self,
+        *,
+        turns: list[Turn],
+        batches: list[PreparedBatch] | list[list[Turn]],
+        committed_turn_ids: list[int],
+        status: str,
+    ) -> dict[str, object]:
+        """Record an authoritative committed-prefix/deferred-suffix outcome."""
+        return self._set_update_diagnostics(
+            turns=turns,
+            batches=batches,
+            status=status,
+            committed_turn_ids=committed_turn_ids,
+        )
 
     def _update_trial(self, memory: Memory, evicted_turns: list[Turn]) -> tuple[list[dict], list[dict]]:
         """Run one bounded LLM extraction and atomically validate its ops.

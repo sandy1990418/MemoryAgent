@@ -59,10 +59,11 @@ def test_chat_prompt_prioritizes_user_evidence_and_preserves_conflicts():
     assert "Do not treat an assistant correction or suggestion as a user correction" in system
     assert "Direct durable user state" in system
     assert "never let assistant-derived progress crowd out direct user state" in system
-    assert "Do not NOOP an explicit durable user self-report" in system
+    assert "Save explicit durable user self-reports" in system
     assert "positive or negative reports about their experience" in system
-    assert "A substantive discussion alone is not progress" in system
-    assert "Never convert assistant explanations, examples, plans, generated code" in system
+    assert "User reported:" in system
+    assert "Discussion covered (implementation not confirmed):" in system
+    assert "Never present assistant explanations, examples, plans, generated code" in system
 
 
 def test_chat_prompt_preserves_user_goal_lifecycle_across_topics():

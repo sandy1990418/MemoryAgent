@@ -126,6 +126,43 @@ def test_failed_update_retains_exact_pending_messages_for_retry():
     assert diagnostics["eviction_records"][-1]["committed_turn_ids"] == [1]
 
 
+def test_late_batch_rejection_evicts_only_committed_message_prefix():
+    responses = iter(
+        [
+            '[{"op":"ADD","section":"facts","text":"saved prefix",'
+            '"provenance":[1]}]',
+            '[{"op":"UPDATE","id":"F999","text":"invalid",'
+            '"provenance":[3]}]',
+        ]
+    )
+    adapter = _adapter(
+        response=lambda *_: next(responses),
+        max_tokens=2,
+        keep_messages=1,
+    )
+    adapter.updater.max_retries = 0
+    adapter.updater.evicted_turn_token_budget = 2
+    adapter.updater.token_estimator = lambda _text: 1
+    messages = [
+        HumanMessage(content="u1"),
+        AIMessage(content="a1"),
+        HumanMessage(content="u2"),
+        AIMessage(content="a2"),
+        HumanMessage(content="u3"),
+    ]
+
+    retained = adapter.before_model(messages)
+
+    assert [message.id for message in retained] == [message.id for message in messages[2:]]
+    assert [entry.text for entry in adapter.memory.entries.values()] == ["saved prefix"]
+    diagnostics = adapter.eviction_diagnostics()
+    assert diagnostics["planned_turn_ids"] == [1, 2, 3, 4]
+    assert diagnostics["committed_turn_ids"] == [1, 2]
+    assert diagnostics["deferred_turn_ids"] == [3, 4]
+    assert diagnostics["dropped_turn_ids"] == []
+    assert diagnostics["status"] == "partial"
+
+
 def test_tool_messages_are_not_durable_but_pair_cutoff_is_safe():
     ai = AIMessage(
         content="",

@@ -78,12 +78,12 @@ class StructuredMemoryService:
             raise ValueError(f"structured memory components use conflicting policies: {names}")
 
     def update(self, turns: list[Turn]) -> StructuredUpdateResult:
-        """Prepare, verify and atomically commit one update transaction.
+        """Commit the verified leading batches and defer the untouched suffix.
 
-        ``MemoryUpdater.prepare_update`` stages every planned micro-batch on
-        one isolated trial memory. Verification runs for each staged batch,
-        and this method performs exactly one live-memory commit after all
-        verifications pass.
+        Each live-memory write is still atomic.  A malformed later micro-batch
+        no longer rolls back earlier verified batches forever; diagnostics let
+        window adapters evict only the contiguous committed turn prefix and
+        retain the failed/unattempted suffix for retry.
         """
         try:
             prepared = self.updater.prepare_update(self.memory, turns)
@@ -95,107 +95,106 @@ class StructuredMemoryService:
                 failure_reason=f"updater_failed: {exc}",
                 diagnostics=diagnostics,
             )
-        if prepared.rejected_ops:
-            diagnostics = self.updater.update_diagnostics()
-            self._last_update_diagnostics = diagnostics
-            return StructuredUpdateResult(
-                # Earlier batches may have changed only the isolated trial;
-                # expose no applied operations when the outer transaction is
-                # rejected and nothing reached live memory.
-                applied_ops=[],
-                rejected_ops=prepared.rejected_ops,
-                failure_reason="rejected_ops",
-                diagnostics=diagnostics,
-            )
 
-        batch_verifications: list[MemoryUpdateVerification] = []
-        try:
-            if prepared.batches:
-                for batch in prepared.batches:
-                    batch_verifications.append(
-                        self.update_verifier.verify(
-                            evicted_turns=list(batch.turns),
-                            applied_ops=batch.applied_ops,
-                            rejected_ops=batch.rejected_ops,
-                            memory=prepared.trial_memory,
-                        )
-                    )
-            else:
-                # Preserve the historical empty-update verifier call and
-                # result shape while still treating it as one transaction.
-                batch_verifications.append(
-                    self.update_verifier.verify(
-                        evicted_turns=turns,
-                        applied_ops=[],
-                        rejected_ops=[],
-                        memory=prepared.trial_memory,
-                    )
+        commit_trial, base_revision = self.memory.transaction_snapshot()
+        committed_batches = []
+        committed_ops: list[dict] = []
+        rejected_ops: list[dict] = []
+        verification_errors: list[str] = []
+        failure_reason = prepared.failure_reason
+
+        for index, batch in enumerate(prepared.batches):
+            if batch.rejected_ops:
+                rejected_ops = batch.rejected_ops
+                failure_reason = "rejected_ops"
+                break
+
+            batch_trial, _ = commit_trial.transaction_snapshot()
+            reapplied, rejections = batch_trial.apply_ops_atomically(batch.applied_ops)
+            if rejections:
+                rejected_ops = rejections
+                failure_reason = "rejected_ops"
+                break
+            try:
+                batch_verification = self.update_verifier.verify(
+                    evicted_turns=list(batch.turns),
+                    applied_ops=reapplied,
+                    rejected_ops=[],
+                    memory=batch_trial,
                 )
-        except Exception as exc:  # verifier failures are transaction failures
-            diagnostics = self.updater.update_diagnostics()
-            diagnostics["status"] = "verification_failed"
-            diagnostics["committed_turn_ids"] = []
-            diagnostics["deferred_turn_ids"] = list(diagnostics.get("planned_turn_ids", []))
-            self._last_update_diagnostics = diagnostics
-            verification = MemoryUpdateVerification(
-                passed=False,
-                errors=[f"verifier exception: {exc}"],
-            )
-            return StructuredUpdateResult(
-                applied_ops=[],
-                verification=verification,
-                failure_reason="verification_failed",
-                diagnostics=diagnostics,
-            )
-        verification_errors = [
-            error
-            for index, result in enumerate(batch_verifications)
-            for error in (
-                result.errors
-                if result.passed
-                else [f"batch {index + 1}: {error}" for error in result.errors]
-            )
+            except Exception as exc:  # verifier failures defer this suffix
+                batch_verification = MemoryUpdateVerification(
+                    passed=False,
+                    errors=[f"verifier exception: {exc}"],
+                )
+            if not batch_verification.passed:
+                verification_errors.extend(
+                    f"batch {index + 1}: {error}"
+                    for error in batch_verification.errors
+                )
+                failure_reason = "verification_failed"
+                break
+
+            commit_trial = batch_trial
+            committed_batches.append(batch)
+            committed_ops.extend(reapplied)
+
+        committed_turn_ids = [
+            turn.id for batch in committed_batches for turn in batch.turns
+        ]
+        committed_turn_id_set = set(committed_turn_ids)
+        deferred_turn_ids = [
+            turn.id for turn in turns if turn.id not in committed_turn_id_set
         ]
         verification = MemoryUpdateVerification(
-            passed=all(result.passed for result in batch_verifications) and not verification_errors,
+            passed=not verification_errors,
             errors=verification_errors,
         )
-        if not verification.passed:
-            diagnostics = self.updater.update_diagnostics()
-            diagnostics["status"] = "verification_failed"
-            diagnostics["committed_turn_ids"] = []
-            diagnostics["deferred_turn_ids"] = list(diagnostics.get("planned_turn_ids", []))
-            self._last_update_diagnostics = diagnostics
-            return StructuredUpdateResult(
-                applied_ops=[],
-                verification=verification,
-                failure_reason="verification_failed",
-                diagnostics=diagnostics,
-            )
 
-        try:
-            prepared.commit(self.memory)
-        except RuntimeError:
-            diagnostics = self.updater.update_diagnostics()
-            diagnostics["status"] = "concurrent_change"
-            diagnostics["committed_turn_ids"] = []
-            diagnostics["deferred_turn_ids"] = list(diagnostics.get("planned_turn_ids", []))
-            self._last_update_diagnostics = diagnostics
-            return StructuredUpdateResult(
-                applied_ops=[],
-                verification=verification,
-                failure_reason="concurrent_change",
-                diagnostics=diagnostics,
-            )
+        # Empty input is a successful no-op. Non-empty input only reports a
+        # commit when at least one complete leading batch was verified.
+        committed = bool(committed_batches) or not turns
+        if committed_batches:
+            try:
+                self.memory.commit_trial(commit_trial, base_revision)
+            except RuntimeError:
+                committed = False
+                committed_turn_ids = []
+                deferred_turn_ids = [turn.id for turn in turns]
+                committed_ops = []
+                failure_reason = "concurrent_change"
 
-        self.updater._mark_update_committed(prepared)
-        diagnostics = self.updater.update_diagnostics()
+        status = (
+            "committed"
+            if committed and not deferred_turn_ids
+            else "partial"
+            if committed_turn_ids
+            else failure_reason or "deferred"
+        )
+        diagnostic_batches = prepared.diagnostics.get("planned_batch_turn_ids", [])
+        # Rehydrate only the turn grouping for the updater's stable diagnostic
+        # formatter; semantic processing is never repeated here.
+        by_id = {turn.id: turn for turn in turns}
+        diagnostic_turn_batches = [
+            [by_id[turn_id] for turn_id in batch_ids if turn_id in by_id]
+            for batch_ids in diagnostic_batches
+        ]
+        diagnostics = self.updater.mark_update_outcome(
+            turns=turns,
+            batches=diagnostic_turn_batches,
+            committed_turn_ids=committed_turn_ids,
+            status=status,
+        )
         self._last_update_diagnostics = diagnostics
-        self.maybe_compact()
+
+        if committed_batches:
+            self.maybe_compact()
         return StructuredUpdateResult(
-            applied_ops=prepared.applied_ops,
+            applied_ops=committed_ops,
+            rejected_ops=rejected_ops,
             verification=verification,
-            committed=True,
+            committed=committed,
+            failure_reason=failure_reason if deferred_turn_ids else None,
             diagnostics=diagnostics,
         )
 

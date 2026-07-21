@@ -336,6 +336,20 @@ class LangChainChatAdapter:
             if message_id in self._turn_id_by_message_id
         ]
 
+    def _committed_message_prefix_length(
+        self,
+        messages: Sequence[AnyMessage],
+        committed_turn_ids: set[int],
+    ) -> int:
+        """Map a committed durable-turn prefix back to framework messages."""
+        if not committed_turn_ids:
+            return 0
+        for index, message in enumerate(messages):
+            turn_id = self._turn_id_by_message_id.get(str(message.id))
+            if turn_id is not None and turn_id not in committed_turn_ids:
+                return index
+        return len(messages)
+
     def _record_eviction_diagnostics(
         self,
         *,
@@ -498,11 +512,40 @@ class LangChainChatAdapter:
             )
             return self.messages
 
-        if (
-            not update_result.committed
-            or update_result.rejected_ops
-            or update_result.failure_reason == "verification_failed"
-        ):
+        result_diagnostics = getattr(update_result, "diagnostics", {}) or {}
+        committed_turn_ids = set(result_diagnostics.get("committed_turn_ids", []))
+        committed_message_count = self._committed_message_prefix_length(
+            evicted,
+            committed_turn_ids,
+        )
+        if committed_message_count:
+            committed_messages = evicted[:committed_message_count]
+            deferred_messages = evicted[committed_message_count:]
+            committed_turns = [
+                turn for turn in evicted_turns if turn.id in committed_turn_ids
+            ]
+            deferred_turns = [
+                turn for turn in evicted_turns if turn.id not in committed_turn_ids
+            ]
+            self._history = self._history[committed_message_count:]
+            if deferred_messages:
+                self._pending_message_ids = tuple(_message_ids(deferred_messages))
+                self._pending_turns = tuple(deferred_turns)
+            else:
+                self._pending_message_ids = None
+                self._pending_turns = ()
+            self._record_eviction_diagnostics(
+                planned=evicted,
+                committed=committed_messages,
+                deferred=deferred_messages,
+                planned_turns=evicted_turns,
+                committed_turns=committed_turns,
+                deferred_turns=deferred_turns,
+                status="partial" if deferred_messages else "committed",
+            )
+            return self.messages
+
+        if not update_result.committed:
             logger.warning(
                 "LangChain chat memory update was not committed; retaining pending messages: %s",
                 update_result.failure_reason or update_result.rejected_ops,
@@ -518,16 +561,9 @@ class LangChainChatAdapter:
             )
             return self.messages
 
-        self._history = self._history[cutoff:]
-        self._pending_message_ids = None
-        self._pending_turns = ()
-        self._record_eviction_diagnostics(
-            planned=evicted,
-            committed=evicted,
-            planned_turns=evicted_turns,
-            committed_turns=evicted_turns,
-            status="committed",
-        )
+        # A successful empty-turn transaction is handled above; a non-empty
+        # committed result must always identify the exact committed prefix.
+        logger.warning("Committed update omitted committed_turn_ids; retaining messages")
         return self.messages
 
     @staticmethod

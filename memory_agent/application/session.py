@@ -70,7 +70,10 @@ class MemorySession:
 
         result = self.service.update(batch)
 
-        if not result.committed:
+        committed_ids = set(result.diagnostics.get("committed_turn_ids", []))
+        committed_prefix = [turn for turn in batch if turn.id in committed_ids]
+
+        if not committed_prefix:
             logger.warning(
                 "Memory update was not committed (%s): %s",
                 result.failure_reason,
@@ -80,7 +83,7 @@ class MemorySession:
             # memory. Keep the turns for retry instead of dropping context.
             return
 
-        self.window.remove(batch)
+        self.window.remove(committed_prefix)
 
     def _render_memory_for_prompt(self, query: str = "") -> str:
         selected_entries = self.memory_selector.select(
