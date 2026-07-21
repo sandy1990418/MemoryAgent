@@ -21,13 +21,14 @@ def _memory():
     return Memory(sections=CHAT_SECTIONS, policy=CHAT_POLICY)
 
 
-def test_chat_prompt_has_one_consistent_batch_limit():
+def test_chat_prompt_has_one_consistent_structural_batch_contract():
     system, messages = _updater()._build_prompt(
         _memory(),
         [Turn(id=7, role="user", content="I changed my mind: use SQLite 3.39.")],
     )
 
-    assert "at most three concise ADD or UPDATE operations" in system
+    assert "Do not omit a distinct durable assertion merely to keep a batch artificially small" in system
+    assert "at most three concise ADD or UPDATE operations" not in system
     assert "at most one durable ADD or UPDATE" not in system
     assert "EVAL PROFILE" not in system
     assert messages == [
@@ -57,8 +58,8 @@ def test_chat_prompt_prioritizes_user_evidence_and_preserves_conflicts():
     assert "Keep it active; do not choose a winner, UPDATE, or SUPERSEDE either claim" in system
     assert "An explicit user correction or replacement establishes the latest truth" in system
     assert "Do not treat an assistant correction or suggestion as a user correction" in system
-    assert "Direct durable user state" in system
-    assert "never let assistant-derived progress crowd out direct user state" in system
+    assert "Preserve direct durable user state" in system
+    assert "never present assistant-derived progress as user-confirmed state" in system
     assert "Save explicit durable user self-reports" in system
     assert "positive or negative reports about their experience" in system
     assert "User reported:" in system

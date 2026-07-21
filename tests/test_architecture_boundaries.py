@@ -25,7 +25,7 @@ def _imports(path: Path) -> set[str]:
 
 def test_chat_is_the_only_production_policy_and_section_contract():
     assert CHAT_POLICY.name == "chat"
-    assert CHAT_POLICY.max_ops_per_batch == 3
+    assert CHAT_POLICY.max_ops_per_batch is None
     assert CHAT_POLICY.disallowed_sections == frozenset(
         {"exact_values", "timeline", "tool_facts"}
     )

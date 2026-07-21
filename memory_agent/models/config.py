@@ -96,7 +96,10 @@ class ProductMemoryConfig:
     memory_model: str = "openai:gpt-5.4-nano"
     answer_memory_token_budget: int = 600
     update_memory_token_budget: int = 600
-    evicted_turn_token_budget: int = 1200
+    # Multiple complete exchanges can share one bounded updater prompt;
+    # retaining complete groups avoids dropping turns while amortizing the
+    # updater schema over larger exchanges.
+    evicted_turn_token_budget: int = 3600
     updater_max_candidate_entries: int = 8
 
     @classmethod

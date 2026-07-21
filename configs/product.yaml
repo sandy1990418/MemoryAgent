@@ -3,5 +3,7 @@ memory_model: openai:gpt-5.4-nano
 updater:
   # Keep recent turns complete while leaving headroom for schema and memory.
   max_visible_memory_tokens: 600
-  max_evicted_turn_tokens: 1200
+  # Batch several complete exchanges while preserving an explicit prompt
+  # budget and never splitting a user/assistant group.
+  max_evicted_turn_tokens: 3600
   max_candidate_entries: 8

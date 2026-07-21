@@ -158,7 +158,7 @@ def test_reversal_requires_visible_active_id_and_commits_atomically():
     assert memory.entries["D2"].text == "Use Postgres."
 
 
-def test_operation_cap_keeps_three_actionable_ops():
+def test_structural_batch_accepts_all_valid_operations():
     updater = _updater(
         "["
         '{"op":"ADD","section":"preferences","text":"A","provenance":[1]},'
@@ -170,7 +170,7 @@ def test_operation_cap_keeps_three_actionable_ops():
     applied, rejected = updater.update(_memory(), [Turn(1, "user", "Several durable facts.")])
 
     assert rejected == []
-    assert len(applied) == 3
+    assert len(applied) == 4
 
 
 def test_update_retries_transport_failure_inside_one_transaction():
@@ -234,6 +234,26 @@ def test_turn_budget_keeps_complete_newest_groups():
     assert updater.turn_selection_reports[-1]["selection_is_contiguous"] is True
 
 
+def test_larger_batch_budget_amortizes_schema_without_dropping_exchange_groups():
+    turns = [
+        Turn(index, "user" if index % 2 else "assistant", "x" * 2800)
+        for index in range(1, 7)
+    ]
+    old_budget = _updater(
+        "[]", evicted_turn_token_budget=1200,
+    )._plan_turn_batches(turns)
+    new_updater = _updater(
+        "[]", evicted_turn_token_budget=3600,
+    )
+    new_budget = new_updater._plan_turn_batches(turns)
+
+    assert len(old_budget) == 3
+    assert len(new_budget) == 2
+    assert [turn.id for batch in new_budget for turn in batch] == [turn.id for turn in turns]
+    assert new_updater.turn_selection_reports[-1]["dropped_turn_ids"] == []
+    assert new_updater.turn_selection_reports[-1]["deferred_turn_ids"] == []
+
+
 def test_update_token_usage_reports_provider_independent_estimates():
     updater = _updater("[]")
     updater.update(_memory(), [Turn(1, "user", "Remember this fact.")])
@@ -253,6 +273,6 @@ def test_prompt_is_chat_only_and_has_no_evaluation_profile_rules():
     )
 
     assert "CHAT POLICY rules" in system
-    assert "at most three concise ADD or UPDATE operations" in system
+    assert "operation-count limit" not in system
     assert "EVAL PROFILE" not in system
     assert "timeline/progress" not in system

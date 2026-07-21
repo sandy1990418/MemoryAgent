@@ -29,6 +29,16 @@ def test_product_config_reads_chat_runtime_limits(tmp_path, monkeypatch):
     assert not hasattr(config, "sections")
 
 
+def test_product_config_defaults_to_multi_exchange_updater_budget(tmp_path, monkeypatch):
+    path = tmp_path / "product.yaml"
+    path.write_text("compaction_threshold: 30\n", encoding="utf-8")
+    monkeypatch.delenv("EVICTED_TURN_TOKEN_BUDGET", raising=False)
+
+    config = ProductMemoryConfig.from_yaml_env(path)
+
+    assert config.evicted_turn_token_budget == 3600
+
+
 def test_product_config_rejects_invalid_compaction_threshold(tmp_path, monkeypatch):
     path = tmp_path / "product.yaml"
     path.write_text("compaction_threshold: 0\n", encoding="utf-8")

@@ -18,7 +18,12 @@ class StructuredMemoryPolicy:
 
 CHAT_POLICY = StructuredMemoryPolicy(
     name="chat",
-    max_ops_per_batch=3,
+    # Keep operation shape, provenance, and entry-size validation structural,
+    # but do not discard durable state merely because a larger complete
+    # conversational batch produced more than three operations. Prompt and
+    # turn budgets remain the bounds on updater work; custom policies may still
+    # opt into a stricter cap when they need one.
+    max_ops_per_batch=None,
     disallowed_sections=frozenset({"exact_values", "timeline", "tool_facts"}),
 )
 

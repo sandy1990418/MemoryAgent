@@ -24,7 +24,7 @@ def _memory():
 
 def test_chat_policy_is_the_only_runtime_policy():
     assert CHAT_POLICY.name == "chat"
-    assert CHAT_POLICY.max_ops_per_batch == 3
+    assert CHAT_POLICY.max_ops_per_batch is None
     assert "exact_values" in CHAT_POLICY.disallowed_sections
     assert "timeline" in CHAT_POLICY.disallowed_sections
 
@@ -42,7 +42,7 @@ def test_chat_sections_are_the_only_runtime_section_set():
     }
 
 
-def test_chat_policy_filters_unsupported_sections_and_caps_batch():
+def test_chat_policy_filters_unsupported_sections_without_dropping_valid_batch_ops():
     updater = _updater(
         lambda system, messages: json.dumps(
             [
@@ -91,7 +91,7 @@ def test_chat_policy_filters_unsupported_sections_and_caps_batch():
     assert "timeline" in rejected[0]["reason"]
     assert memory.entries == {}
 
-    capped = _updater(
+    uncapped = _updater(
         lambda system, messages: json.dumps(
             [
                 {"op": "ADD", "section": "preferences", "text": "A", "provenance": [1]},
@@ -101,13 +101,13 @@ def test_chat_policy_filters_unsupported_sections_and_caps_batch():
             ]
         )
     )
-    capped_memory = _memory()
-    capped_applied, capped_rejected = capped.update(
-        capped_memory,
+    uncapped_memory = _memory()
+    uncapped_applied, uncapped_rejected = uncapped.update(
+        uncapped_memory,
         [Turn(id=1, role="user", content="Several durable facts.")],
     )
-    assert capped_rejected == []
-    assert len(capped_applied) == 3
+    assert uncapped_rejected == []
+    assert len(uncapped_applied) == 4
 
 
 def test_ordinary_assistant_explanation_is_not_saved():
@@ -156,7 +156,7 @@ def test_chat_policy_does_not_expose_evaluation_prompt_rules():
     assert "EVAL PROFILE" not in system
     assert "evaluation profile" not in system.lower()
     assert "information extraction" not in system.lower()
-    assert "at most three concise ADD or UPDATE operations" in system
+    assert "operation-count limit" not in system
     assert messages == [
         {
             "role": "user",

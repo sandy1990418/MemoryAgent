@@ -32,7 +32,7 @@ def run_case(name: str, turns: list[Turn], *, fail: bool = False) -> dict:
         llm=llm,
         sections=CHAT_SECTIONS,
         policy=CHAT_POLICY,
-        evicted_turn_token_budget=1200,
+        evicted_turn_token_budget=3600,
         update_memory_token_budget=600,
         max_candidate_entries=8,
     )
@@ -80,7 +80,7 @@ def run_lifecycle_case(name: str, updates: list[Turn]) -> dict:
         llm=llm,
         sections=CHAT_SECTIONS,
         policy=CHAT_POLICY,
-        evicted_turn_token_budget=1200,
+        evicted_turn_token_budget=3600,
         update_memory_token_budget=600,
         max_candidate_entries=8,
     )
