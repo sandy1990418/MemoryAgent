@@ -98,8 +98,6 @@ class ProductMemoryConfig:
     update_memory_token_budget: int = 600
     evicted_turn_token_budget: int = 1200
     updater_max_candidate_entries: int = 8
-    updater_max_legacy_candidate_entries: int = 4
-    updater_enable_llm_gate: bool = True
 
     @classmethod
     def from_yaml_env(cls, path: str | Path = "configs/product.yaml") -> "ProductMemoryConfig":
@@ -122,12 +120,6 @@ class ProductMemoryConfig:
             if raw not in (None, ""):
                 return int(raw)
             return int(updater_data.get(key, data.get(legacy_key, default)))
-        gate_raw = os.getenv("UPDATER_ENABLE_LLM_GATE")
-        updater_enable_llm_gate = (
-            bool(_parse_scalar(gate_raw)) if gate_raw not in (None, "")
-            else bool(updater_data.get("enable_llm_gate", cls.updater_enable_llm_gate))
-        )
-
         return cls(
             compaction_threshold=compaction_threshold,
             memory_model=str(config_value(data, "memory_model", "MEMORY_MODEL", cls.memory_model)),
@@ -135,8 +127,6 @@ class ProductMemoryConfig:
             update_memory_token_budget=updater_int("max_visible_memory_tokens", "UPDATE_MEMORY_TOKEN_BUDGET", "update_memory_token_budget", cls.update_memory_token_budget),
             evicted_turn_token_budget=updater_int("max_evicted_turn_tokens", "EVICTED_TURN_TOKEN_BUDGET", "evicted_turn_token_budget", cls.evicted_turn_token_budget),
             updater_max_candidate_entries=updater_int("max_candidate_entries", "UPDATER_MAX_CANDIDATE_ENTRIES", "updater_max_candidate_entries", cls.updater_max_candidate_entries),
-            updater_max_legacy_candidate_entries=updater_int("max_legacy_candidate_entries", "UPDATER_MAX_LEGACY_CANDIDATE_ENTRIES", "updater_max_legacy_candidate_entries", cls.updater_max_legacy_candidate_entries),
-            updater_enable_llm_gate=updater_enable_llm_gate,
         )
 
 def product_config_from_argv(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from memory_agent.core.models import MemoryEntry, SubjectNormalizer
+from memory_agent.core.models import MemoryEntry
 from memory_agent.core.store import Memory
 from memory_agent.core.transcript import Turn
 
@@ -43,18 +43,10 @@ class UpdateMemorySelector:
         self,
         memory: Memory,
         token_estimator: Callable[[str], int] | None = None,
-        subject_normalizer: SubjectNormalizer | None = None,
-        identity_confidence_threshold: float = 0.85,
-        max_legacy_fallback_entries: int = 4,
         max_candidate_entries: int = 8,
     ) -> None:
         self.memory = memory
         self.token_estimator = token_estimator or _default_token_estimator
-        # Retained as adapter-compatible constructor parameters. Selection is
-        # intentionally independent of subject extraction and turn contents.
-        self.subject_normalizer = subject_normalizer
-        self.identity_confidence_threshold = identity_confidence_threshold
-        self.max_legacy_fallback_entries = max_legacy_fallback_entries
         self.max_candidate_entries = max(1, max_candidate_entries)
 
     def select_for_update(
