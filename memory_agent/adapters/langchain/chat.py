@@ -176,6 +176,24 @@ class LangChainChatAdapter:
         # caller adds more messages before invoking the next model call.
         self._pending_message_ids: tuple[str, ...] | None = None
         self._pending_turns: tuple[Turn, ...] = ()
+        # Keep the adapter-level lifecycle visible without exposing the
+        # framework-neutral service's internal result object.  In particular,
+        # a deferred prefix must be distinguishable from a committed prefix;
+        # callers use this to detect a transport/verifier failure before
+        # deciding whether it is safe to advance their local history.
+        self._last_eviction_diagnostics: dict[str, Any] = {
+            "planned_turn_ids": [],
+            "planned_batch_turn_ids": [],
+            "committed_turn_ids": [],
+            "deferred_turn_ids": [],
+            "dropped_turn_ids": [],
+            "status": "no_eviction",
+            "planned_message_ids": [],
+            "committed_message_ids": [],
+            "deferred_message_ids": [],
+            "dropped_message_ids": [],
+        }
+        self._eviction_diagnostic_records: list[dict[str, list[Any]]] = []
 
     @property
     def messages(self) -> list[AnyMessage]:
@@ -317,6 +335,60 @@ class LangChainChatAdapter:
             if message_id in self._turn_id_by_message_id
         ]
 
+    def _record_eviction_diagnostics(
+        self,
+        *,
+        planned: Sequence[AnyMessage] = (),
+        committed: Sequence[AnyMessage] = (),
+        deferred: Sequence[AnyMessage] = (),
+        dropped: Sequence[AnyMessage] = (),
+        planned_turns: Sequence[Turn] = (),
+        committed_turns: Sequence[Turn] = (),
+        deferred_turns: Sequence[Turn] = (),
+        dropped_turns: Sequence[Turn] = (),
+        status: str = "unknown",
+    ) -> None:
+        """Record the last prefix lifecycle in stable, JSON-friendly form."""
+        record: dict[str, Any] = {
+            "planned_turn_ids": [turn.id for turn in planned_turns],
+            # The adapter submits one logical prefix to the service.  The
+            # service may split that prefix internally, but only it can
+            # report those implementation batches authoritatively.
+            "planned_batch_turn_ids": (
+                [[turn.id for turn in planned_turns]] if planned_turns else []
+            ),
+            "committed_turn_ids": [turn.id for turn in committed_turns],
+            "deferred_turn_ids": [turn.id for turn in deferred_turns],
+            "dropped_turn_ids": [turn.id for turn in dropped_turns],
+            "status": status,
+            "planned_message_ids": _message_ids(planned),
+            "committed_message_ids": _message_ids(committed),
+            "deferred_message_ids": _message_ids(deferred),
+            "dropped_message_ids": _message_ids(dropped),
+        }
+        self._last_eviction_diagnostics = record
+        self._eviction_diagnostic_records.append(record)
+
+    def eviction_diagnostics(self) -> dict[str, Any]:
+        """Return IDs for the most recent planned prefix lifecycle.
+
+        A successful eviction has all planned durable turn IDs in
+        ``committed_turn_ids`` and has no deferred or dropped IDs.  Tool and
+        system messages can appear in the message-ID lists while remaining
+        absent from the durable turn-ID lists by design.
+        """
+        def copy_record(record: dict[str, Any]) -> dict[str, Any]:
+            return {
+                key: list(value) if isinstance(value, list) else value
+                for key, value in record.items()
+            }
+
+        diagnostics: dict[str, Any] = {
+            **copy_record(self._last_eviction_diagnostics),
+        }
+        diagnostics["eviction_records"] = [copy_record(record) for record in self._eviction_diagnostic_records]
+        return diagnostics
+
     def _pending_prefix(self) -> tuple[int, list[AnyMessage], list[Turn]] | None:
         if not self._pending_message_ids:
             return None
@@ -352,11 +424,15 @@ class LangChainChatAdapter:
             evicted_turns = self._turns_for_ids(evicted_ids)
 
         if cutoff <= 0:
+            self._record_eviction_diagnostics(status="no_eviction")
             return self.messages
 
         # Do not send operational tool output to the updater.  A tool-only
         # prefix is safe to drop after the no-op transaction succeeds.
         if not evicted_turns:
+            self._record_eviction_diagnostics(
+                planned=evicted, committed=evicted, status="committed"
+            )
             self._history = self._history[cutoff:]
             self._pending_message_ids = None
             self._pending_turns = ()
@@ -369,6 +445,13 @@ class LangChainChatAdapter:
             logger.warning("LangChain chat memory update failed; retrying: %s", exc)
             self._pending_message_ids = tuple(_message_ids(evicted))
             self._pending_turns = tuple(evicted_turns)
+            self._record_eviction_diagnostics(
+                planned=evicted,
+                deferred=evicted,
+                planned_turns=evicted_turns,
+                deferred_turns=evicted_turns,
+                status="deferred",
+            )
             return self.messages
 
         if (
@@ -382,11 +465,25 @@ class LangChainChatAdapter:
             )
             self._pending_message_ids = tuple(_message_ids(evicted))
             self._pending_turns = tuple(evicted_turns)
+            self._record_eviction_diagnostics(
+                planned=evicted,
+                deferred=evicted,
+                planned_turns=evicted_turns,
+                deferred_turns=evicted_turns,
+                status="deferred",
+            )
             return self.messages
 
         self._history = self._history[cutoff:]
         self._pending_message_ids = None
         self._pending_turns = ()
+        self._record_eviction_diagnostics(
+            planned=evicted,
+            committed=evicted,
+            planned_turns=evicted_turns,
+            committed_turns=evicted_turns,
+            status="committed",
+        )
         return self.messages
 
     @staticmethod
