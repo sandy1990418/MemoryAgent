@@ -51,6 +51,21 @@ class ChatMemory:
     service: StructuredMemoryService | None = None
     memory_selector: MemorySelector | None = None
     _committed_turn_ids: set[int] = field(default_factory=set, init=False, repr=False)
+    _deferred_turns: list[Turn] = field(default_factory=list, init=False, repr=False)
+    _last_update_diagnostics: dict[str, object] = field(
+        default_factory=lambda: {
+            "planned_turn_ids": [],
+            "submitted_turn_ids": [],
+            "committed_turn_ids": [],
+            "deferred_turn_ids": [],
+            "retained_deferred_turn_ids": [],
+            "dropped_turn_ids": [],
+            "attempt_count": 0,
+            "status": "idle",
+        },
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if self.service is None:
@@ -68,34 +83,91 @@ class ChatMemory:
         """Token spend per role ("updater"/"compactor") for this chat memory."""
         return self.token_ledger.to_dict() if self.token_ledger else {}
 
-    def update(self, turns: list[Turn]) -> tuple[list[dict], list[dict]]:
-        """Update every uncommitted turn, retrying only a deferred suffix.
+    def update_diagnostics(self) -> dict[str, object]:
+        """Return structural metadata for the latest public update call."""
+        return {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in self._last_update_diagnostics.items()
+        }
 
-        Turn ids make the public facade idempotent: callers may safely retry
-        the same list after a partial failure without duplicating entries that
-        were already committed by an earlier leading micro-batch.
+    def update(self, turns: list[Turn]) -> tuple[list[dict], list[dict]]:
+        """Update uncommitted turns, retaining only a deferred suffix.
+
+        The service may commit a verified leading prefix while deferring a
+        later microbatch.  Record that prefix and retain the suffix locally so
+        a caller can safely retry the same list (or submit the next batch),
+        but do not retry the suffix inside this call: the updater has already
+        exhausted its per-batch retry budget.  Keeping retry ownership at the
+        public-call boundary avoids replaying committed work and multiplying
+        failed-batch LLM calls without dropping turns when an evaluation caller
+        does not inspect the return value.
         """
         assert self.service is not None
-        pending = [turn for turn in turns if turn.id not in self._committed_turn_ids]
-        applied: list[dict] = []
-        while pending:
-            result = self.service.update(pending)
-            committed_ids = set(result.diagnostics.get("committed_turn_ids", []))
-            new_committed_ids = committed_ids - self._committed_turn_ids
-            if new_committed_ids:
-                self._committed_turn_ids.update(new_committed_ids)
-                applied.extend(result.applied_ops)
-                pending = [turn for turn in pending if turn.id not in new_committed_ids]
-                # Retry only the deferred suffix. Every loop that continues
-                # strictly reduces pending, so persistent failures terminate.
+        pending: list[Turn] = []
+        seen_ids: set[int] = set()
+        for turn in [*self._deferred_turns, *turns]:
+            if turn.id in self._committed_turn_ids or turn.id in seen_ids:
                 continue
-            if result.rejected_ops:
-                return applied, result.rejected_ops
+            seen_ids.add(turn.id)
+            pending.append(turn)
+        self._deferred_turns.clear()
+        if not pending:
+            self._last_update_diagnostics = {
+                "planned_turn_ids": [],
+                "submitted_turn_ids": [],
+                "committed_turn_ids": [],
+                "deferred_turn_ids": [],
+                "retained_deferred_turn_ids": [],
+                "dropped_turn_ids": [],
+                "attempt_count": 0,
+                "status": "idempotent",
+            }
+            return [], []
+
+        result = self.service.update(pending)
+        pending_ids = {turn.id for turn in pending}
+        raw_committed_ids = result.diagnostics.get("committed_turn_ids", [])
+        committed_ids = (
+            {
+                turn_id
+                for turn_id in raw_committed_ids
+                if isinstance(turn_id, int) and turn_id in pending_ids
+            }
+            if isinstance(raw_committed_ids, list)
+            else set()
+        )
+        self._committed_turn_ids.update(committed_ids)
+        self._deferred_turns = [
+            turn for turn in pending if turn.id not in committed_ids
+        ]
+        self._last_update_diagnostics = {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in result.diagnostics.items()
+        }
+        self._last_update_diagnostics.update(
+            {
+                "planned_turn_ids": [turn.id for turn in pending],
+                "submitted_turn_ids": [turn.id for turn in pending],
+                "committed_turn_ids": [turn.id for turn in pending if turn.id in committed_ids],
+                "deferred_turn_ids": [
+                    turn.id for turn in pending if turn.id not in committed_ids
+                ],
+                "retained_deferred_turn_ids": [
+                    turn.id for turn in self._deferred_turns
+                ],
+                "dropped_turn_ids": [],
+                "attempt_count": 1,
+            }
+        )
+
+        if result.rejected_ops:
+            return result.applied_ops, result.rejected_ops
+        if result.failure_reason:
             errors = result.verification.errors if result.verification else []
-            return applied, [
+            return result.applied_ops, [
                 {"op": None, "reason": result.failure_reason, "errors": errors}
             ]
-        return applied, []
+        return result.applied_ops, []
 
     def render(self, *, include_superseded: bool = False) -> str:
         assert self.memory_selector is not None
