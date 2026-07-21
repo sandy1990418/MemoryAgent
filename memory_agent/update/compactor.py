@@ -12,8 +12,8 @@ from memory_agent.core.models import MemoryEntry
 from memory_agent.core.sections import SectionConfig
 from memory_agent.core.store import Memory
 from memory_agent.policies.structured import (
+    CHAT_POLICY,
     StructuredMemoryPolicy,
-    get_memory_policy,
     validate_policy_sections,
 )
 from memory_agent.update.operations import parse_memory_ops
@@ -81,7 +81,7 @@ class MemoryCompactor:
     ) -> None:
         self.llm = llm
         self.sections = sections
-        self.policy = policy or get_memory_policy(None)
+        self.policy = policy or CHAT_POLICY
         validate_policy_sections(self.policy, sections)
         self.model = model
         self.max_memory_tokens = max_memory_tokens

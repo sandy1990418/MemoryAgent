@@ -1,8 +1,9 @@
 """Structured-memory policy contracts."""
 
-from .structured import StructuredMemoryPolicy, get_memory_policy
+from .structured import CHAT_POLICY, StructuredMemoryPolicy, validate_policy_sections
 
 __all__ = [
+    "CHAT_POLICY",
     "StructuredMemoryPolicy",
-    "get_memory_policy",
+    "validate_policy_sections",
 ]
