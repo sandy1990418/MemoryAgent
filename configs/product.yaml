@@ -8,5 +8,3 @@ updater:
   max_visible_memory_tokens: 600
   max_evicted_turn_tokens: 1200
   max_candidate_entries: 8
-  max_legacy_candidate_entries: 4
-  enable_llm_gate: true

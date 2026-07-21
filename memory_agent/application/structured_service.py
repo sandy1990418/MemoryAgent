@@ -135,16 +135,10 @@ class StructuredMemoryService:
             return
         candidates = self.compactor.detect_candidates(self.memory)
         if active <= self.compact_min_active_entries:
-            candidates = [
-                candidate
-                for candidate in candidates
-                if candidate.reason == "progress-rollup"
-            ]
-            if not candidates:
-                diagnostic["skip_reason"] = "below_scan_threshold"
-                self.compactor.record_skip("below_scan_threshold")
-                self._compaction_checks.append(diagnostic)
-                return
+            diagnostic["skip_reason"] = "below_scan_threshold"
+            self.compactor.record_skip("below_scan_threshold")
+            self._compaction_checks.append(diagnostic)
+            return
         diagnostic["candidate_count"] = len(candidates)
         if not candidates:
             diagnostic["skip_reason"] = "no_candidates"
@@ -160,14 +154,7 @@ class StructuredMemoryService:
             self.compactor.record_skip("candidate_circuit_breaker")
             self._compaction_checks.append(diagnostic)
             return
-        diagnostic["skip_reason"] = (
-            "llm_candidate"
-            if any(
-                candidate.reason in {"semantic-overlap", "progress-rollup"}
-                for candidate in candidates
-            )
-            else "deterministic_candidate"
-        )
+        diagnostic["skip_reason"] = "llm_candidate"
         attempted_before = self.compactor.metrics.attempted_calls
         try:
             applied, rejected = self.compactor.compact_candidates(

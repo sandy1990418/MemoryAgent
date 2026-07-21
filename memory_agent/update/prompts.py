@@ -121,7 +121,6 @@ def build_compactor_prompt(
         "2. SUPERSEDE every replaced active entry, then ADD one canonical entry.\n"
         "3. Preserve latest truth, preferences, decisions, current state, blockers, "
         "and failed attempts.\n"
-        "3a. A progress rollup is a topic summary, not a latest-value overwrite.\n"
         "4. Canonical ADD provenance must be the union of source provenance ids.\n"
         "5. Never supersede without a canonical ADD; never delete entries.\n"
         "6. Never operate on or re-activate a superseded entry.\n"
@@ -137,21 +136,3 @@ def build_compactor_prompt(
             "content": "Return subject-based compaction operations for the active entries.",
         }
     ]
-
-
-def build_progress_rollup_prompt(
-    *,
-    source_entries: str,
-    max_chars: int,
-) -> tuple[str, list[dict]]:
-    """Prompt for content generation only; the application owns all memory ops."""
-    system = (
-        "Summarize the supplied progress entries into one compact chronological "
-        "topic summary. Preserve concrete methods, outcomes, decisions, and important "
-        "distinctions, while removing repetition. Do not mention memory ids, source "
-        "entries, provenance, compaction, or superseding. Return plain summary text "
-        f"only, with no JSON, markdown, label, or preamble. Maximum {max_chars} "
-        "characters.\n\nProgress entries:\n"
-        f"{source_entries}"
-    )
-    return system, [{"role": "user", "content": "Return the compact summary only."}]

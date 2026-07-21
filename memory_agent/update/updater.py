@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 from collections import Counter
 from dataclasses import asdict, dataclass
 from statistics import mean, median
@@ -41,7 +40,6 @@ def _debug_ops(label: str, ops: list[dict]) -> None:
         dict(Counter(op.get("section") for op in dict_ops if op.get("section"))),
     )
 
-_TURN_SUFFIX_RE = re.compile(r"\s*\(turns?\s+([0-9,\-\s]+)\)\s*$", re.IGNORECASE)
 def _default_token_estimator(text: str) -> int:
     return max(1, len(text) // 4)
 
@@ -61,11 +59,10 @@ class UpdateTokenReport:
     retry_tokens: int = 0
     provider_input_tokens: int | None = None
     provider_output_tokens: int | None = None
-    deterministic_ops_count: int = 0
     llm_ops_count: int = 0
     rejected_ops_count: int = 0
     llm_call_required_reason: str = "call:possible_durable_assertion"
-    required_exact_subject_overflow_tokens: int = 0
+    required_overflow_tokens: int = 0
     mandatory_overflow_tokens: int = 0
 
     @property
@@ -115,11 +112,7 @@ class MemoryUpdater:
         update_memory_token_budget: int | None = None,
         evicted_turn_token_budget: int | None = None,
         policy: StructuredMemoryPolicy | None = None,
-        subject_normalizer: object | None = None,
-        identity_confidence_threshold: float = 0.85,
         max_candidate_entries: int = 8,
-        max_legacy_candidate_entries: int = 4,
-        enable_llm_gate: bool = False,
     ) -> None:
         self.llm = llm
         self.sections = sections
@@ -133,19 +126,10 @@ class MemoryUpdater:
         )
         self.evicted_turn_token_budget = evicted_turn_token_budget
         self.token_reports: list[UpdateTokenReport] = []
-        # Every updater uses the same chat retention semantics, including
-        # direct construction by framework adapters and evaluation runners.
+        # Every updater uses the one chat retention contract.
         self.policy = policy or CHAT_POLICY
-        # Retained as an adapter-compatible argument; semantic normalization
-        # is intentionally outside the updater's structural contract.
-        self.subject_normalizer = None
-        self.identity_confidence_threshold = identity_confidence_threshold
         self.max_candidate_entries = max_candidate_entries
-        self.max_legacy_candidate_entries = max_legacy_candidate_entries
-        self.enable_llm_gate = enable_llm_gate
         self.decision_reasons: Counter[str] = Counter()
-        self.write_suppression_reasons: Counter[str] = Counter()
-        self.lifecycle_diagnostics: Counter[str] = Counter()
         self.evicted_user_assistant_pairs = 0
         self.turn_selection_reports: list[dict] = []
         # Fail fast on section mismatches instead of silently running
@@ -185,11 +169,7 @@ class MemoryUpdater:
             "p95_input_tokens_per_call": p95,
             "updater_calls_per_evicted_pair": calls / self.evicted_user_assistant_pairs if self.evicted_user_assistant_pairs else 0.0,
             "evicted_user_assistant_pairs": self.evicted_user_assistant_pairs,
-            "calls_skipped_by_deterministic_gating": sum(v for k, v in self.decision_reasons.items() if k.startswith("skip:")),
             "decision_reasons": dict(self.decision_reasons),
-            "write_suppression_reasons": dict(self.write_suppression_reasons),
-            "suppressed_write_count": sum(self.write_suppression_reasons.values()),
-            "lifecycle_diagnostics": dict(self.lifecycle_diagnostics),
             "retries": sum(1 for r in self.token_reports if r.retry_tokens),
             "retry_tokens": sum(r.retry_tokens for r in self.token_reports),
             "rejected_ops_count": sum(r.rejected_ops_count for r in self.token_reports),
@@ -390,9 +370,6 @@ class MemoryUpdater:
         selection = UpdateMemorySelector(
             memory,
             self.token_estimator,
-            self.subject_normalizer,
-            self.identity_confidence_threshold,
-            max_legacy_fallback_entries=self.max_legacy_candidate_entries,
             max_candidate_entries=self.max_candidate_entries,
         ).select_for_update(prompt_turns, self.update_memory_token_budget)
         visible_entries = [memory.entries[entry.id] for entry in selection.entries]
@@ -436,7 +413,6 @@ class MemoryUpdater:
                     visible_entries=visible_entries,
                     response="",
                     provider_before=provider_before,
-                    deterministic_ops=[],
                     llm_ops_count=0,
                     rejected_count=1,
                     decision_reason=decision_reason,
@@ -460,7 +436,6 @@ class MemoryUpdater:
                     visible_entries=visible_entries,
                     response=response,
                     provider_before=provider_before,
-                    deterministic_ops=[],
                     llm_ops_count=0,
                     rejected_count=1,
                     decision_reason=decision_reason,
@@ -513,11 +488,10 @@ class MemoryUpdater:
                 ),
                 provider_input_tokens=provider_input,
                 provider_output_tokens=provider_output,
-                deterministic_ops_count=0,
                 llm_ops_count=len(ops),
                 rejected_ops_count=len(hidden_id_rejections),
                 llm_call_required_reason=decision_reason,
-                required_exact_subject_overflow_tokens=selection.required_overflow_tokens,
+                required_overflow_tokens=selection.required_overflow_tokens,
                 mandatory_overflow_tokens=self.turn_selection_reports[-1]["mandatory_overflow_tokens"],
             )
             self.token_reports.append(call_report)
@@ -609,7 +583,6 @@ class MemoryUpdater:
         visible_entries: list,
         response: str,
         provider_before: tuple[int, int, int] | None,
-        deterministic_ops: list[dict],
         llm_ops_count: int,
         rejected_count: int,
         decision_reason: str,
@@ -639,11 +612,10 @@ class MemoryUpdater:
             retry_tokens=max(0, self.token_estimator(prompt_text) - self.token_estimator(base_prompt_text)),
             provider_input_tokens=provider_input,
             provider_output_tokens=provider_output,
-            deterministic_ops_count=len(deterministic_ops),
             llm_ops_count=llm_ops_count,
             rejected_ops_count=rejected_count,
             llm_call_required_reason=decision_reason,
-            required_exact_subject_overflow_tokens=required_overflow_tokens,
+            required_overflow_tokens=required_overflow_tokens,
             mandatory_overflow_tokens=self.turn_selection_reports[-1]["mandatory_overflow_tokens"],
         ))
 
@@ -662,7 +634,6 @@ class MemoryUpdater:
                     section_key = self._section_key_by_prefix.get(section.lower())
                     if section_key is not None:
                         normalized["section"] = section_key
-                self._normalize_text_provenance(normalized)
             elif (
                 isinstance(kind, str)
                 and kind.lower() in self._section_key_by_prefix
@@ -672,14 +643,10 @@ class MemoryUpdater:
             ):
                 normalized["op"] = "ADD"
                 normalized["section"] = self._section_key_by_prefix[kind.lower()]
-                self._normalize_text_provenance(normalized)
             elif kind in {"UPDATE", "SUPERSEDE"}:
                 entry_id = self._normalize_entry_id(normalized.get("id"), memory)
                 if entry_id is not None:
                     normalized["id"] = entry_id
-                if kind == "UPDATE":
-                    self._normalize_text_provenance(normalized)
-
             normalized_ops.append(normalized)
         return normalized_ops
 
@@ -744,90 +711,11 @@ class MemoryUpdater:
         return accepted, rejected
 
     def _cap_ops(self, ops: list[dict]) -> list[dict]:
+        """Apply only the configured operation-count safety cap."""
         limit = self.policy.max_ops_per_batch
         if limit is None or limit < 1:
             return ops
-
-        supersedes = [
-            op for op in ops if isinstance(op, dict) and op.get("op") == "SUPERSEDE"
-        ]
-        replacements = [
-            op for op in ops if isinstance(op, dict) and op.get("op") == "ADD"
-        ]
-        if supersedes and replacements:
-            return [*supersedes, replacements[0]]
-
-        actionable = [
-            op
-            for op in ops
-            if not (isinstance(op, dict) and op.get("op") == "NOOP")
-        ]
-        if len(actionable) <= limit:
-            return ops
-
-        section_priority = {
-            "preferences": 0,
-            "decisions": 1,
-            "status_changes": 2,
-            "failed_attempts": 3,
-            "open_questions": 4,
-            "progress": 5,
-            "goal": 6,
-            "facts": 7,
-        }
-        ranked = sorted(
-            enumerate(actionable),
-            key=lambda item: (
-                section_priority.get(item[1].get("section"), 20)
-                if isinstance(item[1], dict)
-                else 30,
-                item[0],
-            ),
-        )
-        keep_indexes = {index for index, _op in ranked[:limit]}
-        return [op for index, op in enumerate(actionable) if index in keep_indexes]
-
-    @staticmethod
-    def _normalize_text_provenance(op: dict) -> None:
-        provenance = op.get("provenance")
-        if isinstance(provenance, list):
-            op["provenance"] = [
-                int(value) if isinstance(value, str) and value.isdigit() else value
-                for value in provenance
-            ]
-        text = op.get("text")
-        if not isinstance(text, str):
-            return
-
-        match = _TURN_SUFFIX_RE.search(text)
-        if not match:
-            return
-
-        turn_ids: list[int] = []
-        for part in match.group(1).split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "-" in part:
-                start_text, end_text = [value.strip() for value in part.split("-", 1)]
-                if start_text.isdigit() and end_text.isdigit():
-                    start, end = int(start_text), int(end_text)
-                    if start <= end:
-                        turn_ids.extend(range(start, end + 1))
-                    else:
-                        turn_ids.extend(range(end, start + 1))
-                continue
-            if part.isdigit():
-                turn_ids.append(int(part))
-
-        if turn_ids:
-            provenance = op.get("provenance")
-            if not isinstance(provenance, list) or not provenance:
-                op["provenance"] = sorted(set(turn_ids))
-            elif all(isinstance(turn_id, int) for turn_id in provenance):
-                op["provenance"] = sorted(set(provenance) | set(turn_ids))
-
-        op["text"] = _TURN_SUFFIX_RE.sub("", text).strip()
+        return ops[:limit]
 
     @staticmethod
     def _normalize_entry_id(entry_id: object, memory: Memory) -> str | None:

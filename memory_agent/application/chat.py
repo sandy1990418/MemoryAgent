@@ -102,9 +102,7 @@ def build_chat_memory(
     else:
         updater_llm = _RoleRecordingLLM(llm, ledger, "updater")
         compactor_llm = _RoleRecordingLLM(llm, ledger, "compactor")
-    # Product configuration may still contain legacy runner keys while
-    # callers migrate.  The production facade is deliberately chat-only:
-    # BEAM/evaluation profiles must never alter durable product semantics.
+    # The production facade is deliberately chat-only.
     policy = CHAT_POLICY
     sections = list(CHAT_SECTIONS)
     memory = Memory(sections=sections, policy=policy)
@@ -115,15 +113,12 @@ def build_chat_memory(
         update_memory_token_budget=product.update_memory_token_budget,
         evicted_turn_token_budget=product.evicted_turn_token_budget,
         max_candidate_entries=product.updater_max_candidate_entries,
-        max_legacy_candidate_entries=product.updater_max_legacy_candidate_entries,
-        enable_llm_gate=product.updater_enable_llm_gate,
     )
     compactor = (
         MemoryCompactor(
             llm=compactor_llm,
             sections=sections,
             policy=policy,
-            enable_semantic_candidates=False,
         )
         if compact
         else None
